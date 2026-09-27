@@ -220,7 +220,9 @@ class AiClient(private val cfg: ProviderConfig) {
             val echo = (r.text ?: "").trim().take(30).replace("\n", " ")
             "连通正常 · ${ms}ms" + if (echo.isNotEmpty()) " · 回：$echo" else ""
         } else {
-            "连接失败 · " + friendly(r.error!!) + " · ${ms}ms"
+            // 原始返回一并展示：文案映射只是辅助，用户要看得到服务商到底说了什么，
+            // 免得再出现「明明有钱却被告知去充值」这种误导。
+            "连接失败 · " + friendly(r.error!!) + " · ${ms}ms\n\n原始返回：\n" + r.error!!.take(500)
         }
     }
 
@@ -262,8 +264,25 @@ class AiClient(private val cfg: ProviderConfig) {
                 e.contains("http 401") || e.contains("unauthorized") ->
                     "API Key 不对或没有该模型的权限（401）。\n→ 到设置里重新粘贴 Key，并点「测试连通」。"
 
-                e.contains("http 402") || e.contains("insufficient") ->
-                    "账户余额不足（402）。\n→ 去服务商后台充值。"
+                // 注意：绝对不能用裸的 contains("insufficient") 当作「余额不足」判据。
+                // insufficient_quota（配额/限速）、insufficient_user_quota（Key 额度上限）、
+                // insufficient permission（权限不足）都不是「没钱」，而且老代码这条排在 403 之前，
+                // 会把「403 权限不足」误报成「账户余额不足，去充值」——用户明明有钱却一直被叫充值。
+                // 所以先精确区分配额 / 权限，再判真正的余额不足，并把服务商原文附上。
+                e.contains("insufficient_quota") || e.contains("insufficient quota") ||
+                    e.contains("insufficient_user_quota") ->
+                    "额度/配额用尽（不是余额）：这把 Key 触发了限速或额度上限。\n" +
+                        "→ 等一会儿再试；或到服务商后台看「配额/用量」。\n原文：" + err.take(240)
+
+                e.contains("insufficient_permission") || e.contains("insufficient permission") ->
+                    "权限不足：这把 Key 不能用于该模型或该接口。\n" +
+                        "→ 换一个模型，或换一把有权限的 Key。\n原文：" + err.take(240)
+
+                e.contains("http 402") || e.contains("insufficient balance") ||
+                    e.contains("insufficient_balance") ->
+                    "服务商判定账户余额不足（402）。\n" +
+                        "→ 若你确认账户里有钱：多半是这把 Key 属于**另一个账号**，或走的是第三方中转。\n" +
+                        "→ 设置里点「测试连通」核对；确认 Base URL 与服务商一致。\n原文：" + err.take(240)
 
                 e.contains("http 403") ->
                     "被拒绝（403）：Key 权限不足，或该地区/该模型不可用。"
