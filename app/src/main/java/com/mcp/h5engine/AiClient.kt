@@ -139,7 +139,10 @@ class AiClient(private val cfg: ProviderConfig) {
 
     fun chat(rawHistory: List<ChatMsg>, tools: List<JSONObject>): ChatReply {
         aborted = false
-        val history = limitHistory(sanitizeHistory(rawHistory))
+        // 注意顺序：先按条数裁，再清洗配对。
+        // 反过来的话，裁剪会把某个 assistant(tool_calls) 的响应截在窗口外，
+        // 服务商直接回 400「An assistant message with 'tool_calls' must be followed by tool messages」。
+        val history = sanitizeHistory(limitHistory(rawHistory))
         // 设置里可以直接关掉工具定义：50+ 个工具的 JSON 是 token 大头，
         // 免费档模型（Groq 8000 TPM 这类）关掉立刻就能用。
         val toolsUse = if (cfg.sendTools) tools else emptyList()
@@ -160,7 +163,14 @@ class AiClient(private val cfg: ProviderConfig) {
 
         var last: ChatReply = ChatReply(null, emptyList(), "未发起请求")
         for (attempt in 1..4) {
-            val r = once(body, direct)
+            val r = once(
+                body, direct,
+                when {
+                    ultraTried -> " · 已精简(去工具+砍历史)"
+                    lightTried -> " · 已精简(去工具)"
+                    else -> ""
+                }
+            )
             last = r
             val err = r.error
             if (err == null) return r          // 成功
@@ -204,8 +214,13 @@ class AiClient(private val cfg: ProviderConfig) {
         val limit = cfg.historyLimit.coerceAtLeast(4)
         if (src.size <= limit + 1) return src
         val head = src.firstOrNull()?.takeIf { it.role == "system" }
-        return if (head != null) listOf(head) + src.drop(1).takeLast(limit)
-        else src.takeLast(limit)
+        val rest = if (head != null) src.drop(1) else src
+        var tail = rest.takeLast(limit)
+        // 起点尽量落在「用户消息」上：从 assistant/tool 中间开始的话，
+        // 前面那半轮会变成孤儿（sanitizeHistory 能兜住，但白丢一整轮上下文）。
+        val firstUser = tail.indexOfFirst { it.role == "user" }
+        if (firstUser > 0) tail = tail.drop(firstUser)
+        return if (head != null) listOf(head) + tail else tail
     }
 
     /** 请求体积超限：413 / TPM 限流 / 上下文超长。这类错误必须换小请求，重试同一条没意义 */
@@ -264,7 +279,7 @@ class AiClient(private val cfg: ProviderConfig) {
         return o
     }
 
-    private fun once(body: JSONObject, direct: Boolean = false): ChatReply {
+    private fun once(body: JSONObject, direct: Boolean = false, note: String = ""): ChatReply {
         val rb = Request.Builder().url(endpoint)
             .header("Connection", "close")
             .post(body.toString().toRequestBody("application/json".toMediaType()))
@@ -291,7 +306,7 @@ class AiClient(private val cfg: ProviderConfig) {
                         " · 请求体 ${body.toString().length} 字节" +
                         " · 消息 ${body.optJSONArray("messages")?.length() ?: 0} 条" +
                         " · 工具 ${body.optJSONArray("tools")?.length() ?: 0} 个" +
-                        (if (direct) " · 直连(已绕过系统代理)" else " · 走系统代理")
+                        (if (direct) " · 直连(已绕过系统代理)" else " · 走系统代理") + note
                     ChatReply(null, emptyList(), "HTTP ${r.code} ${text.take(600)}\n$diag")
                 } else {
                     parse(text)
@@ -412,6 +427,14 @@ class AiClient(private val cfg: ProviderConfig) {
                 e.contains("http 404") ->
                     "找不到接口或模型（404）。\n→ 多半是 Base URL 或模型名写错了，用「测试连通」验证。"
 
+                e.contains("tool_calls") && e.contains("must be followed") ->
+                    "本地对话里的「工具调用记录」不完整（某个工具调用的返回丢了），服务商拒绝接收。\n" +
+                        "→ 多为历史被裁剪导致，App 已自动修配对；若还出现，去设置里把「历史条数上限」调大。\n" +
+                        "原文：" + err.take(300)
+
+                e.contains("http 400") ->
+                    "请求被拒（400：参数或格式问题）。\n原文：" + err.take(300)
+
                 e.contains("http 413") || e.contains("http413") ||
                     e.contains("request too large") || e.contains("tokens per minute") ->
                     "这条请求超过了该模型能收的大小（413 / TPM 限流 / 上下文超长）。\n" +
@@ -470,6 +493,59 @@ class AiClient(private val cfg: ProviderConfig) {
         return parts
     }
 
+    /**
+     * 发出去之前的最后一道保险：任何 assistant(tool_calls) 都必须被**紧随其后**的 tool 消息
+     * 逐条回应，否则就地拆掉 tool_calls；反过来，找不到对应 tool_calls 的孤儿 tool 消息
+     * 降级成普通文本。
+     *
+     * 为什么要在这一层再做一次：上游历史可能被裁剪/被异常中断（工具没返回结果就存了记录），
+     * 服务商对这种请求只会回一句 400「must be followed by tool messages」，
+     * 用户看到的就是「请求失败」——宁可丢一点上下文，也不能让整条请求发不出去。
+     */
+    private fun fixToolPairing(msgs: JSONArray): JSONArray {
+        // 第一遍：拆掉「响应不完整」的 tool_calls
+        for (i in 0 until msgs.length()) {
+            val m = msgs.optJSONObject(i) ?: continue
+            if (m.optString("role") != "assistant") continue
+            val tcs = m.optJSONArray("tool_calls") ?: continue
+            if (tcs.length() == 0) continue
+            val need = HashSet<String>()
+            for (k in 0 until tcs.length()) {
+                val id = tcs.optJSONObject(k)?.optString("id") ?: ""
+                if (id.isNotEmpty()) need.add(id)
+            }
+            var j = i + 1
+            while (j < msgs.length()) {
+                val nm = msgs.optJSONObject(j) ?: break
+                if (nm.optString("role") != "tool") break
+                val tid = nm.optString("tool_call_id")
+                if (tid.isNotEmpty()) need.remove(tid)
+                j++
+            }
+            if (need.isNotEmpty()) m.remove("tool_calls")
+        }
+        // 第二遍：把补齐后仍然「无主」的 tool 消息降级成用户文本
+        val known = HashSet<String>()
+        for (i in 0 until msgs.length()) {
+            val m = msgs.optJSONObject(i) ?: continue
+            val tcs = m.optJSONArray("tool_calls") ?: continue
+            for (k in 0 until tcs.length()) {
+                val id = tcs.optJSONObject(k)?.optString("id") ?: ""
+                if (id.isNotEmpty()) known.add(id)
+            }
+        }
+        for (i in 0 until msgs.length()) {
+            val m = msgs.optJSONObject(i) ?: continue
+            if (m.optString("role") != "tool") continue
+            if (m.optString("tool_call_id") in known) continue
+            m.put("role", "user")
+            m.remove("tool_call_id")
+            val c = m.optString("content")
+            m.put("content", "（历史工具结果，对应的调用记录已丢失）\n" + c)
+        }
+        return msgs
+    }
+
     private fun bodyOpenAi(history: List<ChatMsg>, tools: List<JSONObject>): JSONObject {
         val msgs = JSONArray()
         for (m in history) {
@@ -498,7 +574,7 @@ class AiClient(private val cfg: ProviderConfig) {
 
         val out = JSONObject()
             .put("model", cfg.model)
-            .put("messages", msgs)
+            .put("messages", fixToolPairing(msgs))
             .put("temperature", cfg.temperature)
 
         // 输出上限：设置里调（0 = 不发送，交服务商决定）。
@@ -722,7 +798,9 @@ class AiClient(private val cfg: ProviderConfig) {
                 val item = arr.getJSONObject(i)
                 val f = item.optJSONObject("function") ?: continue
                 tcs += ToolCall(
-                    item.optString("id", UUID.randomUUID().toString()),
+                    // 有些中转会把 id 回成空串，这时 optString 的默认值不会生效 ——
+                    // 空 id 会让 tool 消息无法与 tool_calls 配对，服务商直接 400。
+                    item.optString("id").ifBlank { UUID.randomUUID().toString() },
                     f.optString("name"),
                     f.optString("arguments", "{}")
                 )

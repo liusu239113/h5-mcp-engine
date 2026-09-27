@@ -97,9 +97,19 @@ class AgentRunner(
             }
 
             for (tc in reply.toolCalls) {
-                if (cancelled) return
+                if (cancelled) {
+                    // 用户中途按了停止：**必须**给这个还没执行的调用补一条占位响应。
+                    // 否则历史里会留下「assistant 带 tool_calls 却没有对应 tool 消息」的残缺记录，
+                    // 而这条记录会被一直带下去 —— 之后每一条消息都会被服务商直接拒收：
+                    //   HTTP 400 An assistant message with 'tool_calls' must be followed by tool messages
+                    // （用户看到的现象就是「上一秒还能用，突然一直请求失败」）。
+                    history += ChatMsg("tool", "（已取消，未执行）", emptyList(), toolCallId = tc.id)
+                    continue
+                }
 
-                val res = tools.call(tc.name, tc.argsJson)
+                // 工具自己抛异常（参数不合法 / 文件不存在之类）同样要补响应，道理同上
+                val res = runCatching { tools.call(tc.name, tc.argsJson) }
+                    .getOrElse { t -> EngineTools.ToolResult("工具执行出错：${t.javaClass.simpleName}: ${t.message}") }
                 val images = if (cfg.vision) res.images else emptyList()
                 var text = res.text
                 if (res.images.isNotEmpty() && !cfg.vision && visionFallback) {
