@@ -1,25 +1,66 @@
 /*
- * MCP H5 Engine - JS 运行时
- * 挂到 window.Engine，游戏侧直接：
- *   await Engine.mcp.connect('http://10.0.2.2:3000/mcp')
- *   const tools = await Engine.mcp.listTools()
- *   const r = await Engine.mcp.callTool('weather', { city: '上海' })
+ * MCP H5 Engine —— 游戏侧运行时，挂到 window.Engine
  *
- * 完全零依赖，方便你魔改 / 换成 @modelcontextprotocol/sdk
+ * 游戏里可以：
+ *   await Engine.mcp.connect(url)       // 游戏主动去连外部 MCP 服务
+ *   await Engine.mcp.listTools()
+ *   await Engine.mcp.callTool(name, {})
+ *   await Engine.store.save('slot1.json', {...})
+ *   await Engine.http.get(url)          // 走原生，绕过 CORS
+ *
+ * 另外这里会把 console 输出上报给原生，AI 用 game_console 就能看到。
  */
 (function (global) {
     'use strict';
 
+    /* ---------------- 0. console 上报 ---------------- */
+
+    const origLog = console.log.bind(console);
+    const origWarn = console.warn.bind(console);
+    const origError = console.error.bind(console);
+
+    function fmt(v) {
+        if (typeof v === 'string') return v;
+        if (v instanceof Error) return v.stack || v.message;
+        try { return JSON.stringify(v); } catch (e) { return String(v); }
+    }
+
+    function report(level, args) {
+        try {
+            if (nativeOk()) {
+                window.Native.post(JSON.stringify({
+                    id: '__log',
+                    op: 'log',
+                    data: { level: level, text: Array.prototype.map.call(args, fmt).join(' ') }
+                }));
+            }
+        } catch (e) { /* 忽略 */ }
+    }
+
+    console.log = function () { report('log', arguments); origLog.apply(null, arguments); };
+    console.warn = function () { report('warn', arguments); origWarn.apply(null, arguments); };
+    console.error = function () { report('error', arguments); origError.apply(null, arguments); };
+
+    window.addEventListener('error', function (e) {
+        report('error', ['未捕获异常: ' + (e.message || e.type) +
+            ' @' + (e.filename || '?') + ':' + (e.lineno || 0)]);
+    });
+
+    window.addEventListener('unhandledrejection', function (e) {
+        report('error', ['未处理的 Promise 拒绝: ' + fmt(e.reason)]);
+    });
+
     /* ---------------- 1. 原生桥 ---------------- */
+
     const pending = new Map();
     let seq = 0;
 
-    const hasNative = () =>
-        typeof window.Native !== 'undefined' &&
-        window.Native !== null &&
-        typeof window.Native.post === 'function';
+    function nativeOk() {
+        return typeof window.Native !== 'undefined' &&
+            window.Native !== null &&
+            typeof window.Native.post === 'function';
+    }
 
-    // 原生会调这个（注意：原生传的是对象，不是字符串）
     window.__nativeResolve = function (payload) {
         if (!payload) return;
         const p = pending.get(payload.id);
@@ -31,13 +72,12 @@
 
     function call(op, data) {
         return new Promise(function (resolve, reject) {
-            if (!hasNative()) {
+            if (!nativeOk()) {
                 reject(new Error('原生桥不可用：需要在 Android 容器里跑'));
                 return;
             }
             const id = 'r' + (++seq);
             pending.set(id, { resolve: resolve, reject: reject });
-            // 超时兜底，防止游戏卡死在 await 上
             setTimeout(function () {
                 if (pending.has(id)) {
                     pending.delete(id);
@@ -48,11 +88,9 @@
         });
     }
 
-    /* ---------------- 2. MCP ---------------- */
-    const sessions = new Map();
+    /* ---------------- 2. 游戏主动连 MCP ---------------- */
 
     const mcp = {
-        /** 连接并 initialize，返回 { serverInfo, protocolVersion } */
         connect: function (url, options) {
             const opt = options || {};
             return call('mcp.open', {
@@ -60,9 +98,6 @@
                 headers: opt.headers || {},
                 name: opt.name || 'h5-game',
                 id: opt.id || url
-            }).then(function (info) {
-                sessions.set(opt.id || url, true);
-                return info;
             });
         },
 
@@ -90,7 +125,7 @@
             });
         },
 
-        /** 把 tools/call 返回的 content 数组拍平成人能看的文本 */
+        /** 把 tools/call 的 content 数组拍平成文本 */
         text: function (result) {
             if (!result) return '';
             if (typeof result === 'string') return result;
@@ -106,6 +141,7 @@
     };
 
     /* ---------------- 3. 沙箱存档 ---------------- */
+
     const store = {
         save: function (name, obj) {
             return call('fs.write', { path: 'saves/' + name, text: JSON.stringify(obj) });
@@ -125,6 +161,7 @@
     };
 
     /* ---------------- 4. HTTP（绕过 CORS） ---------------- */
+
     const http = {
         get: function (url, headers) {
             return call('http', { method: 'GET', url: url, headers: headers || {} });
@@ -139,5 +176,11 @@
         }
     };
 
-    global.Engine = { call: call, mcp: mcp, store: store, http: http, hasNative: hasNative };
+    global.Engine = {
+        call: call,
+        mcp: mcp,
+        store: store,
+        http: http,
+        hasNative: nativeOk
+    };
 })(window);

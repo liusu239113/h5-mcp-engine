@@ -19,27 +19,29 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 
 /**
- * JS <-> 原生 的桥
+ * JS <-> 原生 的桥（WebView 内部用，和 MCP 服务端是两回事）
  *
- * JS 侧发：
- *   Native.post(JSON.stringify({ id, op, data }))
- * 原生回（异步，走主线程）：
- *   window.__nativeResolve(id, JSON.stringify(payload))
+ * JS 侧发：  Native.post(JSON.stringify({ id, op, data }))
+ * 原生回：    window.__nativeResolve(payload)
  *
- * payload = { id, result } 或 { id, error }
+ * op：
+ *   ping / log / http / mcp.open / mcp.request / fs.list / fs.read / fs.write
  *
- * op 列表：
- *   ping                 探活
- *   http                 代发 HTTP 请求（顺手绕过 WebView 的 CORS）
- *   mcp.open             连接 MCP 服务（initialize）
- *   mcp.request          通用 JSON-RPC 方法派发
- *   fs.list/read/write   沙箱文件读写（存档）
+ * 注意：这里的 mcp.* 是让**游戏自己**去连外部 MCP 服务；
+ *      而 McpServer.kt 是让**外面的 AI** 来连这个 App。两者方向相反。
  */
 class EngineBridge(
     private val web: WebView,
-    /** 沙箱根目录，一般是 context.filesDir/games/<gameId> */
-    private val sandboxRoot: File
+    sandboxRoot: File,
+    private val logs: LogBuffer? = null
 ) {
+
+    @Volatile
+    private var sandboxRoot: File = sandboxRoot
+
+    fun setSandbox(dir: File) {
+        sandboxRoot = dir
+    }
 
     private val main = Handler(Looper.getMainLooper())
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
@@ -70,6 +72,12 @@ class EngineBridge(
 
     private fun dispatch(op: String, d: JSONObject): JSONObject = when (op) {
         "ping" -> JSONObject().put("ok", true).put("ts", System.currentTimeMillis())
+
+        "log" -> {
+            logs?.add("${d.optString("level", "log")}: ${d.optString("text")}")
+            JSONObject().put("ok", true)
+        }
+
         "http" -> httpRequest(d)
         "mcp.open" -> mcpOpen(d)
         "mcp.request" -> mcpRequest(d)
@@ -87,7 +95,11 @@ class EngineBridge(
         val builder = Request.Builder().url(url)
 
         d.optJSONObject("headers")?.let { h ->
-            h.keys().forEach { k -> builder.header(k, h.optString(k)) }
+            val it = h.keys()
+            while (it.hasNext()) {
+                val k = it.next()
+                builder.header(k, h.optString(k))
+            }
         }
 
         val bodyStr = d.optString("body", "")
@@ -102,10 +114,11 @@ class EngineBridge(
         }
     }
 
-    // ---------------- mcp ----------------
+    // ---------------- 游戏侧主动连外部 MCP ----------------
 
     private fun mcpOpen(d: JSONObject): JSONObject {
         val url = d.getString("url")
+
         val headers = HashMap<String, String>()
         d.optJSONObject("headers")?.let { h ->
             val it = h.keys()
