@@ -69,6 +69,116 @@ import java.util.zip.ZipOutputStream
  * 界面风格：手绘简洁风，浅色为默认，可在设置里切深色。
  * 所有可点区域都有按下反馈；导出结果会明确告诉用户文件在哪、并能一键分享。
  */
+/**
+ * 预览静音闸门（注入到每一个游戏页面的最前面）。
+ *
+ * 为什么必须注入、且必须注入在游戏脚本之前：
+ * 预览 WebView 是常驻的 —— 切到「对话」只是改 visibility，页面和游戏循环都还活着，
+ * 所以游戏里的 BGM / 音效会一直响下去（用户切出去还在听，纯扰民）。
+ * 而 AudioContext 是游戏启动时建的，等 onPageFinished 再注入就晚了（抓不到已建的实例），
+ * 因此在资源层把这段脚本插到 HTML 最前面。
+ *
+ * 两条路都堵：
+ *   1) <audio>/<video>/new Audio() —— 静音期间 play() 直接拒绝，并把正在播的 pause 掉；
+ *   2) Web Audio —— 把 AudioContext.prototype.destination 换成自己控制的 GainNode，
+ *      「已经建好的」AudioContext 也照样能压（下一次取 destination 时就接上了），
+ *      所以切换页签是立刻生效，不需要重载页面。
+ *
+ * 对外只暴露 window.__hexoraSetMuted(bool)，由 MainActivity 按当前页签调用。
+ * 默认 muted = true：页面一进来就是安静的，只有停在「预览」页才放开。
+ */
+private val GAME_MUTE_BOOTSTRAP = """
+<script>(function(){
+  if (window.__hexoraMuteInstalled) return;
+  window.__hexoraMuteInstalled = true;
+  var muted = true, ctxs = [], gains = [];
+  function pauseMedia(){
+    try {
+      var els = document.querySelectorAll('audio,video');
+      for (var i = 0; i < els.length; i++) { try { els[i].pause(); } catch (e) {} }
+    } catch (e) {}
+  }
+  try {
+    var proto = window.HTMLMediaElement && HTMLMediaElement.prototype;
+    if (proto && proto.play) {
+      var _play = proto.play;
+      proto.play = function(){
+        // 静音期间：暂停并「装作播放成功」。故意不 reject —— 否则游戏里没 catch 的
+        // play() 会往 console 里刷 Uncaught (in promise) 错误，AI 查 console_logs 时
+        // 会以为音效坏了，转头去改游戏代码。
+        if (muted) { try { this.pause(); } catch (e) {} return Promise.resolve(); }
+        return _play.apply(this, arguments);
+      };
+    }
+  } catch (e) {}
+  var AC = window.AudioContext || window.webkitAudioContext;
+  if (AC && AC.prototype) {
+    try {
+      var d = Object.getOwnPropertyDescriptor(AC.prototype, 'destination');
+      if (d && d.get) {
+        Object.defineProperty(AC.prototype, 'destination', {
+          configurable: true,
+          get: function(){
+            var real = d.get.call(this);
+            var g = this.__hexoraGain;
+            if (!g) {
+              try { g = this.createGain(); g.connect(real); } catch (e) { return real; }
+              this.__hexoraGain = g;
+              gains.push(g);
+            }
+            g.gain.value = muted ? 0 : 1;
+            return g;
+          }
+        });
+      }
+    } catch (e) {}
+    try {
+      var OrigAC = AC;
+      function PatchedAC(){
+        var c = new OrigAC(...Array.prototype.slice.call(arguments));
+        try { ctxs.push(c); if (muted) c.suspend(); } catch (e) {}
+        return c;
+      }
+      PatchedAC.prototype = OrigAC.prototype;
+      Object.setPrototypeOf(PatchedAC, OrigAC);
+      window.AudioContext = PatchedAC;
+      if (window.webkitAudioContext) window.webkitAudioContext = PatchedAC;
+    } catch (e) {}
+  }
+  window.__hexoraIsMuted = function(){ return muted; };
+  window.__hexoraSetMuted = function(v){
+    muted = !!v;
+    for (var i = 0; i < gains.length; i++) { try { gains[i].gain.value = muted ? 0 : 1; } catch (e) {} }
+    for (var j = 0; j < ctxs.length; j++) { try { muted ? ctxs[j].suspend() : ctxs[j].resume(); } catch (e) {} }
+    if (muted) pauseMedia();
+  };
+})();</script>
+""".trimIndent()
+
+/**
+ * 把上面的静音闸门插进 HTML 响应里。
+ *
+ * 只动 text/html，其它资源（js/css/图片/音频）原样透传，别把它们也读进内存。
+ */
+private class GameMuteInjectHandler(
+    private val inner: WebViewAssetLoader.PathHandler
+) : WebViewAssetLoader.PathHandler {
+    override fun handle(path: String): WebResourceResponse? {
+        val res = inner.handle(path) ?: return null
+        val mime = res.mimeType ?: return res
+        if (!mime.contains("html", ignoreCase = true)) return res
+        return runCatching {
+            val stream = res.data ?: return res
+            val html = stream.readBytes().toString(Charsets.UTF_8)
+            WebResourceResponse(
+                res.mimeType,
+                res.encoding ?: "utf-8",
+                ByteArrayInputStream((GAME_MUTE_BOOTSTRAP + html).toByteArray(Charsets.UTF_8))
+            )
+        }.getOrElse { res }
+    }
+}
+
 class MainActivity : AppCompatActivity(), GameUi {
 
     // ---------- 视图 ----------
@@ -176,6 +286,8 @@ class MainActivity : AppCompatActivity(), GameUi {
     private var runner: AgentRunner? = null
 
     private var activeTab = 0
+    /** 预览里现在该不该出声：默认静音，只有停在「预览」页时才放开 */
+    @Volatile private var previewMuted = true
 
     /** 最近一次导出的 zip，用于「分享 / 复制路径」 */
     @Volatile
@@ -333,6 +445,8 @@ class MainActivity : AppCompatActivity(), GameUi {
     override fun onPause() {
         super.onPause()
         runCatching { persistSessions() }
+        // 退到后台也别继续响：预览是常驻的 WebView，游戏音效不会自己停
+        applyPreviewMute(true)
         // 窗口不可见时 WebView 会节流甚至暂停页面里的 JS 定时器，
         // 这里显式续期一次，尽量让游戏循环继续跑（配合前台服务保活）
         if (::web.isInitialized) {
@@ -347,6 +461,8 @@ class MainActivity : AppCompatActivity(), GameUi {
             runCatching { web.onResume() }
             runCatching { web.resumeTimers() }
         }
+        // 回到前台：只有正停在「预览」页才恢复声音
+        applyPreviewMute(activeTab != 1)
         // 授权「所有文件访问」返回后，把项目根目录切到 /sdcard/Hexora
         if (rootInited && Environment.isExternalStorageManager() && !gameRoot.absolutePath.contains("Hexora")) {
             gameRoot = pickProjectRoot().apply { mkdirs() }
@@ -538,8 +654,36 @@ class MainActivity : AppCompatActivity(), GameUi {
         tintNav(navChat, tab == 0)
         tintNav(navPreview, tab == 1)
         tintNav(navPub, tab == 2)
+        // 声音纪律：预览 WebView 是常驻的（切页只是改 visibility），
+        // 不主动静音的话，游戏 BGM / 音效会在「对话」「发布」页一直响下去。
+        // 只有停在预览页时才允许发声；切走立刻掐掉。
+        applyPreviewMute(tab != 1)
         if (tab == 1) ensurePreviewFresh()
         if (tab == 2) refreshExportRow()
+    }
+
+    /**
+     * 预览静音开关。
+     *
+     * 两条路都要堵：<audio>/<video>/new Audio() 走 HTMLMediaElement，
+     * 合成音效 / BGM 多数走 Web Audio（AudioContext）—— 后者在页面里由注入的
+     * GAME_MUTE_BOOTSTRAP 接管（连「已经建好的」AudioContext 也能压住，
+     * 所以切换是立刻生效的，不需要重载页面）。
+     */
+    private fun applyPreviewMute(mute: Boolean) {
+        previewMuted = mute
+        if (::web.isInitialized) {
+            runCatching {
+                web.evaluateJavascript("window.__hexoraSetMuted&&window.__hexoraSetMuted($mute);", null)
+            }
+        }
+        // 试听用的 MediaPlayer 也一起收掉，别和预览里的声音叠在一起
+        if (mute) {
+            runCatching {
+                audioPlayer?.let { mp -> if (mp.isPlaying) mp.stop(); mp.release() }
+            }
+            audioPlayer = null
+        }
     }
 
     @Suppress("DEPRECATION")
@@ -3854,12 +3998,22 @@ makerRow1.addView(ghostBtnOf(ctx, pal, "扫码登录").apply {
             .addPathHandler("/assets/", WebViewAssetLoader.AssetsPathHandler(this))
             .addPathHandler(
                 "/games/",
-                WebViewAssetLoader.InternalStoragePathHandler(this, gameRoot)
+                // 包一层：每个游戏 HTML 的最前面插入「静音闸门」，
+                // 保证它先于游戏自己的脚本执行（AudioContext 一建出来就被接管）。
+                GameMuteInjectHandler(WebViewAssetLoader.InternalStoragePathHandler(this, gameRoot))
             )
             .addPathHandler("/lib/", WebViewAssetLoader.AssetsPathHandler(this))
             .build()
 
         web.webViewClient = object : WebViewClient() {
+            override fun onPageFinished(view: WebView, url: String) {
+                super.onPageFinished(view, url)
+                // 页面换了（重载 / 切项目）：注入脚本默认是安静的，这里把「当前该不该出声」
+                // 重新对齐一次 —— 停在「预览」页就放声，其它页保持静音，
+                // 否则重载后 BGM 会在对话页自己响起来。
+                applyPreviewMute(if (activeTab == 1) false else previewMuted)
+            }
+
             override fun shouldInterceptRequest(
                 view: WebView,
                 request: WebResourceRequest
