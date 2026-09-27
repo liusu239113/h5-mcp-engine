@@ -195,6 +195,20 @@ class McpHub {
 
     private fun prefixFor(s: McpServer): String = if (isMakerServer(s)) "maker_" else "mcp_"
 
+    /**
+     * 前缀只在「工具名还没有这个前缀」时补。
+     *
+     * Maker 自己已经带了两个 maker_ 开头的工具（maker_status_lite、maker_build_current_directory），
+     * 桥的本地工具也叫 maker_ensure_project / maker_list_apps —— 无脑拼前缀会变成
+     * maker_maker_ensure_project，跟提示词里写的名字对不上，模型反而更糊涂。
+     */
+    private fun expose(s: McpServer, toolName: String): String {
+        // H5 开放平台无条件加 mcp_：它自己也暴露了一个叫 maker_build_current_directory 的工具，
+        // 不加前缀会伪装成 Maker 的能力，正是用户骂的那种混乱。
+        if (!isMakerServer(s)) return "mcp_" + toolName
+        return if (toolName.startsWith("maker_")) toolName else "maker_" + toolName
+    }
+
 
     fun refresh(servers: List<McpServer>, log: (String) -> Unit) {
         index.clear()
@@ -207,7 +221,7 @@ class McpHub {
                 val c = McpClient(s.url)
                 c.initialize()
                 val list = c.listTools()
-                for (t in list) index[prefixFor(s) + t.name] = Entry(s, t)
+                for (t in list) index[expose(s, t.name)] = Entry(s, t)
                 clients[s.url] = c
                 okServers++
                 log("MCP「${s.name}」已连接：${list.size} 个工具")

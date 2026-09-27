@@ -91,14 +91,20 @@ class EngineTools(private val ui: GameUi, private val root: File) {
             // 社区写操作
             "like_current_app_review", "reply_current_app_review",
             // Maker 侧写操作
-            "maker_build_current_directory", "add_test_whitelist", "confirm_character_voice"
+            "maker_build_current_directory", "build_current_directory", "add_test_whitelist", "confirm_character_voice"
         )
 
         /** 门禁按「去掉前缀后的真名」判：现在 Maker 通道暴露成 maker_xxx、H5 通道是 mcp_xxx */
         private fun isWriteTool(name: String): Boolean {
+            if (MCP_WRITE_TOOLS.contains(name)) return true
             var s = name
-            for (p in listOf("mcp_", "maker_")) if (s.startsWith(p)) s = s.substring(p.length)
-            return MCP_WRITE_TOOLS.contains(s)
+            for (p in listOf("mcp_", "maker_")) {
+                if (s.startsWith(p)) {
+                    s = s.substring(p.length)
+                    if (MCP_WRITE_TOOLS.contains(s)) return true
+                }
+            }
+            return false
         }
 
         /**
