@@ -268,7 +268,7 @@ class AiClient(private val cfg: ProviderConfig) {
         if (msgs != null && msgs.length() > 6) {
             val arr = JSONArray()
             val first = msgs.optJSONObject(0)
-            if (first != null && first.optString("role") == "system") arr.put(first)
+            if (first != null && strOf(first, "role") == "system") arr.put(first)
             for (i in (msgs.length() - 6).coerceAtLeast(0) until msgs.length()) arr.put(msgs.get(i))
             o.put("messages", arr)
         }
@@ -463,14 +463,14 @@ class AiClient(private val cfg: ProviderConfig) {
                 val j = runCatching { JSONObject(payload) }.getOrNull() ?: continue
                 sawData = true
                 val d = j.optJSONArray("choices")?.optJSONObject(0)?.optJSONObject("delta") ?: continue
-                val t0 = d.optString("reasoning_content").ifBlank { d.optString("reasoning") }
-                    .ifBlank { d.optString("thinking") }
+                val t0 = strOf(d, "reasoning_content").ifBlank { strOf(d, "reasoning") }
+                    .ifBlank { strOf(d, "thinking") }
                 if (t0.isNotEmpty()) {
                     usable = true
                     think.append(t0)
                     emitDelta("think", think.toString())
                 }
-                val c0 = d.optString("content")
+                val c0 = strOf(d, "content")
                 if (c0.isNotEmpty()) {
                     usable = true
                     text.append(c0)
@@ -484,14 +484,14 @@ class AiClient(private val cfg: ProviderConfig) {
                             JSONObject().put("id", "").put("type", "function")
                                 .put("function", JSONObject().put("name", "").put("arguments", ""))
                         }
-                        val id0 = tc.optString("id")
+                        val id0 = strOf(tc, "id")
                         if (id0.isNotEmpty()) cur.put("id", id0)
                         val f = tc.optJSONObject("function") ?: continue
                         val fn = cur.getJSONObject("function")
-                        val nm = f.optString("name")
+                        val nm = strOf(f, "name")
                         if (nm.isNotEmpty()) fn.put("name", nm)
-                        val ar = f.optString("arguments")
-                        if (ar.isNotEmpty()) fn.put("arguments", fn.optString("arguments") + ar)
+                        val ar = strOf(f, "arguments")
+                        if (ar.isNotEmpty()) fn.put("arguments", strOf(fn, "arguments") + ar)
                     }
                 }
             }
@@ -503,9 +503,9 @@ class AiClient(private val cfg: ProviderConfig) {
                 val arr = JSONArray()
                 tools.toSortedMap().forEach { (_, v) ->
                     v.optJSONObject("function")?.let { f ->
-                        if (f.optString("name").isEmpty()) f.put("name", "unknown")
+                        if (strOf(f, "name").isEmpty()) f.put("name", "unknown")
                     }
-                    if (v.optString("id").isEmpty()) v.put("id", "call_" + System.nanoTime())
+                    if (strOf(v, "id").isEmpty()) v.put("id", "call_" + System.nanoTime())
                     arr.put(v)
                 }
                 msg.put("tool_calls", arr)
@@ -537,6 +537,18 @@ class AiClient(private val cfg: ProviderConfig) {
          * 从一个「可能还没收完」的 JSON 里取字符串字段。
          * 没闭合就返回已收到的部分 —— 这正是打字机效果需要的。
          */
+        /**
+         * org.json 的坑：字段值是 JSON null 时，optString 会吐出字面量字符串 "null"。
+         * DeepSeek 流式里「只出推理、还没开始写正文」的 chunk 就是 content:null，
+         * 用 optString 接会把几百个 "null" 拼进正文（界面上就是一大坨 null）。
+         */
+        private fun strOf(o: JSONObject?, k: String): String {
+            if (o == null) return ""
+            val v = o.opt(k) ?: return ""
+            if (v === JSONObject.NULL) return ""
+            return v.toString()
+        }
+
         private fun jsonField(json: String, key: String): String? {
             val k = "\"" + key + "\""
             var i = json.indexOf(k)
@@ -730,7 +742,7 @@ class AiClient(private val cfg: ProviderConfig) {
         // 第一遍：拆掉「响应不完整」的 tool_calls
         for (i in 0 until msgs.length()) {
             val m = msgs.optJSONObject(i) ?: continue
-            if (m.optString("role") != "assistant") continue
+            if (strOf(m, "role") != "assistant") continue
             val tcs = m.optJSONArray("tool_calls") ?: continue
             if (tcs.length() == 0) continue
             val need = HashSet<String>()
@@ -741,8 +753,8 @@ class AiClient(private val cfg: ProviderConfig) {
             var j = i + 1
             while (j < msgs.length()) {
                 val nm = msgs.optJSONObject(j) ?: break
-                if (nm.optString("role") != "tool") break
-                val tid = nm.optString("tool_call_id")
+                if (strOf(nm, "role") != "tool") break
+                val tid = strOf(nm, "tool_call_id")
                 if (tid.isNotEmpty()) need.remove(tid)
                 j++
             }
@@ -760,11 +772,11 @@ class AiClient(private val cfg: ProviderConfig) {
         }
         for (i in 0 until msgs.length()) {
             val m = msgs.optJSONObject(i) ?: continue
-            if (m.optString("role") != "tool") continue
-            if (m.optString("tool_call_id") in known) continue
+            if (strOf(m, "role") != "tool") continue
+            if (strOf(m, "tool_call_id") in known) continue
             m.put("role", "user")
             m.remove("tool_call_id")
-            val c = m.optString("content")
+            val c = strOf(m, "content")
             m.put("content", "（历史工具结果，对应的调用记录已丢失）\n" + c)
         }
         return msgs
@@ -785,7 +797,9 @@ class AiClient(private val cfg: ProviderConfig) {
             val o = JSONObject().put("role", m.role)
             if (m.role == "tool") {
                 o.put("tool_call_id", m.toolCallId ?: "")
-                o.put("content", contentOrParts(m.text, m.images))
+                // 旧版本的坑：历史里可能已经存进了字面量 "null"，
+                // 这里统一抹掉，免得模型读到一坨 null 之后自己也糊了。
+                o.put("content", contentOrParts(m.text?.replace("null", ""), m.images))
             } else if (m.toolCalls.isNotEmpty()) {
                 o.put("content", m.text ?: JSONObject.NULL)
                 val tcs = JSONArray()
@@ -800,7 +814,9 @@ class AiClient(private val cfg: ProviderConfig) {
                 }
                 o.put("tool_calls", tcs)
             } else {
-                o.put("content", contentOrParts(m.text, m.images))
+                // 旧版本的坑：历史里可能已经存进了字面量 "null"，
+                // 这里统一抹掉，免得模型读到一坨 null 之后自己也糊了。
+                o.put("content", contentOrParts(m.text?.replace("null", ""), m.images))
             }
             msgs.put(o)
         }
@@ -855,7 +871,7 @@ class AiClient(private val cfg: ProviderConfig) {
                 val f = t.getJSONObject("function")
                 ts.put(
                     JSONObject().put("name", f.getString("name"))
-                        .put("description", f.optString("description"))
+                        .put("description", strOf(f, "description"))
                         .put("input_schema", f.getJSONObject("parameters"))
                 )
             }
@@ -982,7 +998,7 @@ class AiClient(private val cfg: ProviderConfig) {
                 val f = t.getJSONObject("function")
                 decls.put(
                     JSONObject().put("name", f.getString("name"))
-                        .put("description", f.optString("description"))
+                        .put("description", strOf(f, "description"))
                         .put("parameters", f.getJSONObject("parameters"))
                 )
             }
@@ -1033,8 +1049,8 @@ class AiClient(private val cfg: ProviderConfig) {
                 tcs += ToolCall(
                     // 有些中转会把 id 回成空串，这时 optString 的默认值不会生效 ——
                     // 空 id 会让 tool 消息无法与 tool_calls 配对，服务商直接 400。
-                    item.optString("id").ifBlank { UUID.randomUUID().toString() },
-                    f.optString("name"),
+                    strOf(item, "id").ifBlank { UUID.randomUUID().toString() },
+                    strOf(f, "name"),
                     f.optString("arguments", "{}")
                 )
             }
@@ -1061,11 +1077,11 @@ class AiClient(private val cfg: ProviderConfig) {
         val tcs = mutableListOf<ToolCall>()
         for (i in 0 until parts.length()) {
             val p = parts.getJSONObject(i)
-            when (p.optString("type")) {
-                "text" -> sb.append(p.optString("text"))
+            when (strOf(p, "type")) {
+                "text" -> sb.append(strOf(p, "text"))
                 "tool_use" -> tcs += ToolCall(
                     p.optString("id", UUID.randomUUID().toString()),
-                    p.optString("name"),
+                    strOf(p, "name"),
                     p.optJSONObject("input")?.toString() ?: "{}"
                 )
             }
@@ -1092,7 +1108,7 @@ class AiClient(private val cfg: ProviderConfig) {
             val t = p.optString("text", "")
             if (t.isNotBlank()) sb.append(t)
             p.optJSONObject("functionCall")?.let {
-                val name = it.optString("name")
+                val name = strOf(it, "name")
                 tcs += ToolCall(name, name, it.optJSONObject("args")?.toString() ?: "{}")
             }
         }
