@@ -27,8 +27,16 @@ object McpStore {
     private const val KEY = "servers"
 
     fun defaultServers(): MutableList<McpServer> = mutableListOf(
-        McpServer("TapTap 小游戏（官方 MCP）", McpRt.URL_BASE, true)
+        McpServer("TapTap 小游戏（官方 MCP）", McpRt.URL_BASE, true),
+        McpServer("TapTap Maker（本地制造开发）", McpRt.MAKER_URL_BASE, true)
     )
+
+    /** 老用户配置里没有 Maker 这条：自动补上，不动他已有的增删 */
+    private fun ensureMaker(list: MutableList<McpServer>) {
+        if (list.none { it.url.contains(McpRt.MAKER_PORT.toString()) }) {
+            list += McpServer("TapTap Maker（本地制造开发）", McpRt.MAKER_URL_BASE, true)
+        }
+    }
 
     fun load(ctx: Context): MutableList<McpServer> {
         val sp = ctx.getSharedPreferences(PREF, Context.MODE_PRIVATE)
@@ -37,7 +45,10 @@ object McpStore {
             val arr = JSONArray(raw)
             val out = mutableListOf<McpServer>()
             for (i in 0 until arr.length()) out += McpServer.from(arr.getJSONObject(i))
-            if (out.isEmpty()) defaultServers() else out
+            if (out.isEmpty()) defaultServers() else {
+                ensureMaker(out)
+                out
+            }
         } catch (t: Throwable) {
             defaultServers()
         }

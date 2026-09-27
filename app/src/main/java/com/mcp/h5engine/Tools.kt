@@ -51,16 +51,19 @@ interface GameUi {
 class EngineTools(private val ui: GameUi, private val root: File) {
 
     data class ToolResult(val text: String, val images: List<ByteArray> = emptyList())
-
     companion object {
         /** MCP 工具桥（TapTap 小游戏等），App 启动时注入；声明与执行都会带上它 */
         @Volatile
         var mcp: McpHub? = null
 
         /**
-         * MCP 工具准入开关。默认 false —— AI 平时【看不到】这些工具，也就无从"自动识别/自动调一圈"。
-         * 只有用户话里明确出现 TapTap / 广告 / 排行榜 这类意图时，才临时放行（且纪律上只读）。
-         * 原因：部分 TapTap 接口会顺带发布，AI 自己都不知道自己发布了。
+         * MCP 工具准入开关：**默认关**。
+         *
+         * AI 平时【看不到】这些工具声明，也就无从「自动识别 / 自动调一圈」。
+         * 只有用户这轮明确表达相关意图（广告 / 排行榜 / TapTap / 素材 / 构建…）才临时放行。
+         *
+         * 原因：TapTap 部分接口会在「只是改个信息」时**顺带把游戏发布上线**，回执还不提示，
+         * 模型自己都不知道已经发布了。所以宁可平时不给它工具。
          */
         @Volatile
         var mcpAllowed: Boolean = false
@@ -154,7 +157,12 @@ class EngineTools(private val ui: GameUi, private val root: File) {
         )
     }
 
-    /** allow 为 null 或空集合都表示全开；MCP 工具始终附带（技能白名单只管引擎工具） */
+    /**
+     * allow 为 null 或空集合都表示全开；技能白名单只管引擎工具。
+     *
+     * MCP 工具**默认不附带**：只有本轮用户明确表达了相关意图（mcpAllowed=true）才注入声明，
+     * 否则模型连这些工具的存在都看不到 —— 从源头杜绝「自动识别一圈 / 顺手发布」。
+     */
     fun specs(allow: Set<String>? = null): List<JSONObject> {
         val base = if (allow.isNullOrEmpty()) allSpecs
         else allSpecs.filter { allow.contains(it.getJSONObject("function").getString("name")) }
@@ -167,8 +175,11 @@ class EngineTools(private val ui: GameUi, private val root: File) {
     // ==================== 执行 ====================
 
     fun call(name: String, argsJson: String): ToolResult {
-        // MCP 工具（TapTap 等）直接转给对应服务器
-        mcp?.let { hub -> if (hub.handles(name)) return ToolResult(hub.call(name, argsJson)) }
+        // MCP 工具（TapTap 等）转给对应服务器；但**默认不放行** —— 模型可能凭记忆猜工具名，
+        // 猜中就等于绕过了「默认不给工具」的闸门。
+        if (mcpAllowed) {
+            mcp?.let { hub -> if (hub.handles(name)) return ToolResult(hub.call(name, argsJson)) }
+        }
         return try {
             exec(name, runCatching { JSONObject(argsJson) }.getOrDefault(JSONObject()))
         } catch (t: Throwable) {

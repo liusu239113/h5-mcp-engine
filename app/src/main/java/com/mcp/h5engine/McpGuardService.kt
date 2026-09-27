@@ -46,8 +46,9 @@ class McpGuardService : Service() {
                 try {
                     Thread.sleep(12_000)
                     if (!alive) break
-                    if (McpRt.health()) continue
-                    // 掉了：ensure 是幂等的，会把 node 拉起来并重新挂工具
+                    // 两条服务都活着才算健康（Maker 挂了同样要拉起来 —— 它管素材生成）
+                    if (McpRt.health() && McpRt.makerHealth()) continue
+                    // 掉了：ensure 是幂等的，会把服务拉起来并重新挂工具
                     McpBoot.ensure(this) { }
                     runCatching { startForeground(NOTI_ID, build()) }
                 } catch (t: Throwable) {

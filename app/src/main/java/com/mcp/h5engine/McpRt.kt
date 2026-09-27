@@ -21,15 +21,39 @@ import java.util.concurrent.atomic.AtomicBoolean
  * 以 Streamable HTTP 模式在 127.0.0.1:3000 起服务，App 再用 MCP 客户端去连。
  */
 object McpRt {
-    private const val STAMP = "2"
+    /**
+     * 运行时版本戳。**改了 rt.tar 内容就必须升这个值**：
+     * 已装设备靠它判断「要不要重新解包」，不升的话 ready() 一直返回 true，新文件永远进不去。
+     *   2 → 官方 MCP
+     *   3 → 追加 @taptap/maker（本地制造开发）+ bridge.js（stdio→HTTP 桥）
+     */
+    private const val STAMP = "3"
     const val PORT = 3000
     const val URL_BASE = "http://127.0.0.1:3000/"
+
+    /**
+     * Maker 只提供 stdio，而 stdio 管道绑死在父进程上（主界面被冻结就一起死）。
+     * 所以经 bridge.js 包成 HTTP，挂到独立进程里，才能和官方 MCP 享受同一套自愈保护。
+     */
+    const val MAKER_PORT = 3011
+    const val MAKER_URL_BASE = "http://127.0.0.1:3011/"
 
     @Volatile
     var process: Process? = null
         private set
 
+    /** Maker 桥进程（和官方 MCP 分开，一个坏了不影响另一个） */
+    @Volatile
+    var makerProcess: Process? = null
+        private set
+
+    /** 桥当前绑定的项目目录：切项目要重启它，Maker 才知道素材该落进哪个工程 */
+    @Volatile
+    var makerProject: String = ""
+        private set
+
     private val busy = AtomicBoolean(false)
+    private val makerBusy = AtomicBoolean(false)
 
     fun rtDir(ctx: Context): File = File(ctx.filesDir, "hexrt")
 
@@ -159,6 +183,102 @@ object McpRt {
             runCatching { obj.put(h, java.net.InetAddress.getByName(h).hostAddress) }
         }
         runCatching { File(rtDir(ctx), "dns.map").writeText(obj.toString()) }
+    }
+
+    // ==================== Maker（本地制造开发）：stdio → HTTP 桥 ====================
+
+    /** 桥的健康检查（守护巡检直接用这个） */
+    fun makerHealth(): Boolean = try {
+        val c = URL("http://127.0.0.1:$MAKER_PORT/health").openConnection() as HttpURLConnection
+        c.connectTimeout = 1500
+        c.readTimeout = 1500
+        val code = c.responseCode
+        c.disconnect()
+        code == 200
+    } catch (t: Throwable) {
+        false
+    }
+
+    /** 桥是否已在为「这个项目」服务（换项目就得重启，路径写在启动参数里） */
+    fun makerReady(projectDir: String): Boolean =
+        makerProcess?.isAlive == true && makerHealth() && makerProject == projectDir
+
+    /**
+     * 启动 Maker（阻塞，放子线程）。
+     *
+     * projectDir = 当前工程根目录：生成的美术 / 音乐 / 音效素材会直接落进这个工程，
+     * 不用你手动搬来搬去（桥那边把 target_dir 自动补上了）。
+     */
+    fun startMaker(ctx: Context, log: (String) -> Unit, projectDir: String): String? {
+        if (makerReady(projectDir)) return null
+        if (!makerBusy.compareAndSet(false, true)) return "Maker 启动中，请稍候"
+        return try {
+            val dir = rtDir(ctx)
+            val ld = loader(ctx)
+            val node = File(dir, "node")
+            val bridge = File(dir, "bridge.js")
+            val maker = File(dir, "maker/dist/maker.js")
+            if (!ld.isFile) return "缺少 libmuslrt.so（本包只支持 arm64 设备）"
+            if (!bridge.isFile || !maker.isFile) return "Maker 未随运行时解包（需重新安装本版本）"
+            stopMaker()
+            val home = File(dir, "home").apply { mkdirs() }
+            writeDnsMap(ctx)
+            val pb = ProcessBuilder(
+                ld.absolutePath, "--library-path", dir.absolutePath,
+                node.absolutePath,
+                "--use-bundled-ca",
+                "-r", File(dir, "dnsfix.js").absolutePath,
+                bridge.absolutePath,
+                maker.absolutePath,
+                MAKER_PORT.toString(),
+                "--cwd", projectDir,
+                "--project", projectDir
+            )
+            pb.directory(dir)
+            pb.redirectErrorStream(true)
+            val env = pb.environment()
+            env["HOME"] = home.absolutePath
+            env["TMPDIR"] = home.absolutePath
+            env["PATH"] = dir.absolutePath
+            // Maker 自己的家目录也塞私有目录，免得它往沙箱外写
+            env["TAPTAP_MAKER_HOME"] = File(home, "maker").apply { mkdirs() }.absolutePath
+            log("正在启动 Maker（本地制造开发）…")
+            val p = pb.start()
+            makerProcess = p
+            makerProject = projectDir
+            val logFile = File(dir, "maker.log")
+            runCatching { if (logFile.length() > 200_000) logFile.writeText("") }
+            Thread {
+                runCatching {
+                    p.inputStream.bufferedReader().forEachLine { line ->
+                        runCatching {
+                            if (logFile.length() > 200_000) logFile.writeText("")
+                            logFile.appendText(line + "\n")
+                        }
+                    }
+                }
+            }.apply { isDaemon = true }.start()
+            val deadline = System.currentTimeMillis() + 60_000
+            while (System.currentTimeMillis() < deadline) {
+                if (makerHealth()) {
+                    log("Maker 已就绪（18 个工具 · 素材直接落进当前项目）")
+                    return null
+                }
+                if (!p.isAlive) return "Maker 启动失败（退出码 ${p.exitValue()}）"
+                Thread.sleep(600)
+            }
+            "Maker 启动超时"
+        } catch (t: Throwable) {
+            "Maker 启动失败：${t.message}"
+        } finally {
+            makerBusy.set(false)
+        }
+    }
+
+    fun stopMaker() {
+        runCatching { makerProcess?.destroy() }
+        makerProcess = null
+        makerProject = ""
     }
 
     fun stop() {

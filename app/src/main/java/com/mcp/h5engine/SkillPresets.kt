@@ -39,6 +39,18 @@ object SkillPresets {
    原因：TapTap 侧有些接口会在后台【顺带把游戏发布 / 更新上线】，回执不会告诉你这件事，
    AI 自己根本不知道自己已经发布了 —— 用户没让你动线上数据，就绝对不要动。
    需求永远可以用只读方式满足：要排行榜 ID / 广告位 ID，就去查，不要去改。
+10. 素材与制造（TapTap Maker）：
+    · MCP 工具由 App 按你的意图开关 —— 你【看不到】它们就说明本轮不需要，绝不要凭记忆猜工具名去调。
+    · Maker 的素材生成（generate_image / batch_generate_images / text_to_music /
+      text_to_sound_effect / batch_sound_effects / text_to_dialogue / create_3d_asset 等）
+      可以直接用它来产出美术与音频；生成物落在当前工程内，收尾时整理进 _uploads/media/，
+      并在游戏代码里用相对路径引用（别让用户自己去搬文件）。
+    · Maker 的写操作 —— maker_build_current_directory（提交 + 远程构建）、
+      add_test_whitelist（改线上测试名单）—— 与第 9 条同级：**必须先问用户**。
+    · 广告位 ID 优先用 get_ad_config（Maker 侧，权威且稳定），不要依赖老接口 check_ads_status。
+    · 云生成（图 / 音乐 / 音效 / 配音 / 3D / 视频）需要用户先完成授权（pat / 登录）；
+      未授权时如实说明并给出授权路径，**不允许**编造素材或占位图顶上充数。
+    · 批量生成（多张图 / 多段音）之前先报一下数量，让用户心里有数（可能消耗他的额度）。
 """.trimIndent()
 
     val ALL: List<Skill> = listOf(

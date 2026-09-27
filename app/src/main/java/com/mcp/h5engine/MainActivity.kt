@@ -933,17 +933,31 @@ class MainActivity : AppCompatActivity(), GameUi {
         val adWanted = listOf("广告", "激励视频", "发奖", "变现", "adunitid", "adkit", "rewarded")
             .any { text.toLowerCase().contains(it) }
 
-        // MCP（TapTap）工具准入：默认【关】—— 平白无故它不该"自动识别"一通（有些接口会顺带发布）。
-        // 只有这轮话里确实涉及平台能力时才放行，且纪律上只读；一切写入必须先问用户。
+        // ==================== MCP 工具准入（默认关，按意图临时放行） ====================
+        // 平时 AI 连这些工具的声明都看不到 —— 从源头杜绝「自动识别一圈」「顺手把游戏发布上线」。
+        // 只有你这一轮明确表达了相关意图，才把工具给它；一旦涉及写接口，纪律要求它先问你。
         val mcpWanted = listOf(
-            "广告", "激励视频", "发奖", "变现", "adunitid", "adkit", "rewarded",
-            "排行榜", "排行", "leaderboard", "taptap", "tap", "上传", "发布",
-            "开发者", "space_id", "spaceid", "审核", "小游戏平台"
+            // 广告 / 变现
+            "广告", "激励视频", "发奖", "变现", "adunitid", "adkit", "rewarded", "广告位",
+            // 排行榜
+            "排行榜", "榜单", "leaderboard", "排行",
+            // TapTap 平台
+            "taptap", "tap", "开发者", "应用信息", "appid", "app_id", "商店", "审核", "上架", "发布", "上传",
+            // 素材生产（Maker 云能力）
+            "生图", "画图", "出图", "生成图", "图片素材", "立绘", "图标", "贴图", "背景图", "美术",
+            "音乐", "bgm", "配乐", "音效", "配音", "语音", "音频素材", "音色",
+            "3d", "三维", "模型素材", "视频素材", "生成视频",
+            // 制造开发流程
+            "素材", "构建", "打包", "预览", "二维码", "测试白名单", "maker"
         ).any { text.lowercase().contains(it) }
         EngineTools.mcpAllowed = mcpWanted
-        if (mcpWanted && currentGame.isNotBlank()) {
-            addSystemLine("已为本轮临时开放 TapTap 查询工具（只读；上传/发布/改信息都会先问你）")
+        if (mcpWanted) {
+            addSystemLine("本轮已放行 TapTap / Maker 工具：只读查询与素材生成可直接做；构建、上传、发布这类写操作它会先问你")
+        } else if (EngineTools.mcp != null) {
+            // 不打扰：只在确实连着服务时提一句，让你知道它不是坏了，而是被纪律锁着
+            android.util.Log.i("Hexora", "本轮未放行 MCP 工具（无相关意图）")
         }
+
         val skill =
             if (adWanted) SkillPresets.byId("ads") else SkillPresets.byId(cfgStore.skillId)
         if (adWanted && cfgStore.skillId != "ads") {
@@ -3329,6 +3343,9 @@ class MainActivity : AppCompatActivity(), GameUi {
         cfgStore.lastGame = id   // 落盘：供下次冷启动 / 覆盖安装后恢复
         val dir = File(gameRoot, id).apply { mkdirs() }
         bridge.setSandbox(dir)
+        // Maker 桥把项目路径写在启动参数里：切项目必须重启它，
+        // 否则你让它生图，素材会落进「上一个项目」。
+        Thread { runCatching { McpBoot.ensure(this@MainActivity) { } } }.start()
         lastLoadedGame = id
         lastLoadedStamp = dirStamp(dir)
         val url = "https://appassets.androidplatform.net/games/$id/index.html"
