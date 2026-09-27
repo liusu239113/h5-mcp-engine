@@ -108,7 +108,16 @@ class MainActivity : AppCompatActivity(), GameUi {
     private var fullDlg: Dialog? = null                       // 全屏预览 Dialog
     private lateinit var previewWrapHolder: FrameLayout       // 预览 WebView 的容器（全屏时搬家）
     private lateinit var previewSlot: LinearLayout            // 预览容器原位（退出全屏搬回来）
-    private val sessStore by lazy { SessionStore(this) }
+    private var sessStore: SessionStore? = null
+
+    /** 会话库按项目取：项目变了就换库，新项目 = 全新上下文 */
+    private fun ss(): SessionStore {
+        val cur = sessStore
+        if (cur != null && cur.proj == currentGame) return cur
+        val s = SessionStore(this, currentGame).also { it.migrateLegacy() }
+        sessStore = s
+        return s
+    }
     private lateinit var sessionBtn: TextView
     private val pendingShots = mutableListOf<ByteArray>()
     private val cfgStore by lazy { AiConfigStore(this) }
@@ -696,26 +705,76 @@ class MainActivity : AppCompatActivity(), GameUi {
 
     // ==================== 气泡 ====================
 
+    /** 段落里识别出来的链接（http/https），供「复制链接」用 */
+    private val LINK_REGEX = Regex("https?://[^\\s\"'<>\\u3002\\uff0c\\uff09\\uff08\\u3010\\u3011]+")
+
+
     private fun addBubble(text: String, fromUser: Boolean) {
-        val tv = TextView(this).apply {
-            setText(text)
-            textSize = if (fromUser) 14f else 13.5f
-            setTextColor(if (fromUser) pal.userText else pal.aiText)
-            setPadding(dp(13), dp(10), dp(13), dp(10))
-            setTextIsSelectable(true)
-            if (fromUser) {
-                background = roundCard(this@MainActivity, pal.userBubble, pal.userBubble, 16, 0)
-            } else {
-                background = roundCard(this@MainActivity, pal.aiBubble, pal.border, 16)
-            }
+        // 一条消息 = 一个气泡；内部按空行切段，每段自带「复制」，含链接的段落多一个「复制链接」
+        val card = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(13), dp(10), dp(13), dp(8))
+            background = if (fromUser) roundCard(this@MainActivity, pal.userBubble, pal.userBubble, 16, 0)
+            else roundCard(this@MainActivity, pal.aiBubble, pal.border, 16)
         }
-        chatList.addView(tv, LinearLayout.LayoutParams(-2, -2).apply {
+        val paras = text.split(Regex("\n{2,}")).map { it.trim() }.filter { it.isNotEmpty() }
+            .ifEmpty { listOf(text) }
+        for ((i, seg) in paras.withIndex()) {
+            if (i > 0) card.addView(View(this), LinearLayout.LayoutParams(-1, dp(7)))
+            card.addView(TextView(this).apply {
+                setText(seg)
+                textSize = if (fromUser) 14f else 13.5f
+                setTextColor(if (fromUser) pal.userText else pal.aiText)
+                setTextIsSelectable(true)
+            })
+            val links = LINK_REGEX.findAll(seg).map { it.value }.toList()
+            val ops = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.END
+            }
+            ops.addView(tinyOp("复制") { copyToClip(seg) })
+            if (links.isNotEmpty()) {
+                ops.addView(tinyOp(if (links.size == 1) "复制链接" else "复制链接 ${links.size}") {
+                    if (links.size == 1) copyToClip(links[0]) else pickLink(links)
+                })
+            }
+            card.addView(ops, LinearLayout.LayoutParams(-1, -2))
+        }
+        chatList.addView(card, LinearLayout.LayoutParams(-2, -2).apply {
             gravity = if (fromUser) Gravity.END else Gravity.START
             topMargin = dp(5)
             bottomMargin = dp(5)
             if (fromUser) leftMargin = dp(46) else rightMargin = dp(30)
         })
         scrollChatToBottom()
+    }
+
+    /** 段落末尾的小操作：低调、不抢内容 */
+    private fun tinyOp(label: String, onTap: () -> Unit): TextView = TextView(this).apply {
+        text = label
+        textSize = 11f
+        setTextColor(pal.faint)
+        setPadding(dp(9), dp(3), dp(1), 0)
+        setOnClickListener { onTap() }
+    }
+
+    private fun copyToClip(v: String) {
+        runCatching {
+            val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+            cm.setPrimaryClip(ClipData.newPlainText("hexora", v))
+            toast("已复制")
+        }.onFailure { toast("复制失败：${it.message}") }
+    }
+
+    /** 一段里有多个链接时，让用户挑一个复制 */
+    private fun pickLink(links: List<String>) {
+        AlertDialog.Builder(themed())
+            .setTitle("选择要复制的链接")
+            .setItems(links.map { if (it.length > 64) it.take(64) + "…" else it }.toTypedArray()) { _, i ->
+                copyToClip(links[i])
+            }
+            .setNegativeButton("取消", null)
+            .show()
     }
 
     private fun addSystemLine(text: String) {
@@ -873,6 +932,18 @@ class MainActivity : AppCompatActivity(), GameUi {
         // 一句「帮我接广告」就自动切到广告技能，不用用户自己去翻设置
         val adWanted = listOf("广告", "激励视频", "发奖", "变现", "adunitid", "adkit", "rewarded")
             .any { text.toLowerCase().contains(it) }
+
+        // MCP（TapTap）工具准入：默认【关】—— 平白无故它不该"自动识别"一通（有些接口会顺带发布）。
+        // 只有这轮话里确实涉及平台能力时才放行，且纪律上只读；一切写入必须先问用户。
+        val mcpWanted = listOf(
+            "广告", "激励视频", "发奖", "变现", "adunitid", "adkit", "rewarded",
+            "排行榜", "排行", "leaderboard", "taptap", "tap", "上传", "发布",
+            "开发者", "space_id", "spaceid", "审核", "小游戏平台"
+        ).any { text.lowercase().contains(it) }
+        EngineTools.mcpAllowed = mcpWanted
+        if (mcpWanted && currentGame.isNotBlank()) {
+            addSystemLine("已为本轮临时开放 TapTap 查询工具（只读；上传/发布/改信息都会先问你）")
+        }
         val skill =
             if (adWanted) SkillPresets.byId("ads") else SkillPresets.byId(cfgStore.skillId)
         if (adWanted && cfgStore.skillId != "ads") {
@@ -1072,14 +1143,20 @@ class MainActivity : AppCompatActivity(), GameUi {
 
     /** 载入会话（没有就建一个），并渲染出历史气泡 */
     private fun initSessions() {
-        val loaded = sessStore.load()
-        if (loaded.isEmpty()) loaded += ChatSession(newId(), "新对话")
+        reloadSessionsForProject()
+    }
+
+    /** 装载当前项目的会话列表（切项目后调用：界面上的上下文整体换掉，互不串味） */
+    private fun reloadSessionsForProject() {
+        if (!::chatList.isInitialized) return
+        val loaded = ss().load().ifEmpty { mutableListOf(ChatSession(newId(), "新对话")) }
         sessions.clear()
         sessions.addAll(loaded)
         activeSession = 0
         history = sessions[0].msgs
-        updateSessionBtn()
+        chatList.removeAllViews()
         renderHistory()
+        updateSessionBtn()
     }
 
     private fun updateSessionBtn() {
@@ -1093,7 +1170,7 @@ class MainActivity : AppCompatActivity(), GameUi {
             it.msgs = history
             it.updated = System.currentTimeMillis()
         }
-        sessStore.save(sessions)
+        ss().save(sessions)
     }
 
     private fun newChat() {
@@ -3243,6 +3320,11 @@ class MainActivity : AppCompatActivity(), GameUi {
     override fun currentGameId(): String = currentGame
 
     override fun openGame(id: String) {
+        if (id != currentGame) {
+            // 切项目 = 换一份会话库：先把旧项目这轮对话落盘，再切新库
+            runCatching { persistSessions() }
+            sessStore = null
+        }
         currentGame = id
         cfgStore.lastGame = id   // 落盘：供下次冷启动 / 覆盖安装后恢复
         val dir = File(gameRoot, id).apply { mkdirs() }
@@ -3252,6 +3334,8 @@ class MainActivity : AppCompatActivity(), GameUi {
         val url = "https://appassets.androidplatform.net/games/$id/index.html"
         main.post {
             logs.add("[system] 打开项目 $id")
+            // 该项目的对话历史重新装载（项目之间绝不共享上下文）
+            reloadSessionsForProject()
             if (File(dir, "index.html").exists()) {
                 web.loadUrl(url)
             } else {
