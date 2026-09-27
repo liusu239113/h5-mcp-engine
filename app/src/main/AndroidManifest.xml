@@ -37,10 +37,13 @@
             android:name=".RunGuardService"
             android:exported="false"
             android:foregroundServiceType="dataSync" />
-        <!-- 内置 MCP 的常驻守护：防冻结/回收，掉了自动拉回来 -->
+        <!-- 内置 MCP 的常驻守护：防冻结/回收，掉了自动拉回来。
+            关键：跑在独立进程 :mcp —— 主界面进程被系统冻结/回收时它不受影响，
+            node 与巡检线程都在这个进程里，所以「没人能救自己」的问题不存在了。 -->
         <service
             android:name=".McpGuardService"
             android:exported="false"
+            android:process=":mcp"
             android:foregroundServiceType="dataSync" />
         <provider
             android:name="androidx.core.content.FileProvider"
