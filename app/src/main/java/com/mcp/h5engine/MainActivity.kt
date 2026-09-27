@@ -1862,6 +1862,7 @@ class MainActivity : AppCompatActivity(), GameUi {
     }
 
     private var lastProgressAt = 0L
+    private var lastAutoScrollAt = 0L
 
     /**
      * 把流式进度画到思考面板上。
@@ -1874,17 +1875,25 @@ class MainActivity : AppCompatActivity(), GameUi {
         if (now - lastProgressAt < 120) return
         lastProgressAt = now
         val head = if (kind == "think") "思考中…" else "正在写回答…"
-        b.text = head + "\n" + text.takeLast(6000)
+        // 内容没变就别重新 setText —— TextView 被设成同样的文本也会重排，看着就是闪
+        val painted = head + "\n" + text.takeLast(6000)
+        if (painted != b.text?.toString()) b.text = painted
         latestActivity = if (kind == "think") "思考中（已 " + text.length + " 字）"
         else "写回答中（已 " + text.length + " 字）"
         // 面板若还是收起的，就顺手摊开 —— 让人看得见字在长；
         // 用户自己点过「收起」的话就尊重他。
         if (!userCollapsedThinking && !bodyExpanded) {
             bodyExpanded = true
-            b.visibleIf(true)
+            // 已经是 VISIBLE 就别再设：设可见性会触发 requestLayout，闪就是这么来的
+            if (b.visibility != View.VISIBLE) b.visibleIf(true)
             runToggle?.text = "▾"
         }
-        scrollChatToBottom()
+        // 自动滚动也要节流：原来每 120ms 滚一次 → 屏幕「一闪一闪」。
+        // 现在最多 450ms 一次，且只在用户本来就贴着底部时才滚。
+        if (now - lastAutoScrollAt > 450 && stickBottom) {
+            lastAutoScrollAt = now
+            scrollChatToBottom()
+        }
     }
 
     private fun startTicker() {
@@ -4840,24 +4849,9 @@ makerRow1.addView(ghostBtnOf(ctx, pal, "扫码登录").apply {
         return if (ok) holder.get() else "\"超时 (${timeoutMs}ms)\""
     }
 
-    // ---------------- 切页（给 AI 用） ----------------
+    // ---------------- 当前页（只读，给 AI 用） ----------------
+    // 注意：**不给 AI 切页能力** —— 切页会动用户正在看的屏幕（用户明确不许）。
     override fun currentTab(): Int = activeTab
-
-    /**
-     * 切页。模型点不到原生控件，只能靠这个。
-     * 切完等一会儿再返回 —— 让 WebView 把游戏画面重绘出来，
-     * 否则紧接着的 screenshot 很可能还是上一帧（白图/旧图）。
-     */
-    override fun switchTab(tab: Int): String {
-        val t = tab.coerceIn(0, 2)
-        main.post { showTab(t) }
-        runCatching { Thread.sleep(700) }
-        return when (t) {
-            0 -> "已切到「对话」页"
-            1 -> "已切到「游戏预览」页 —— 现在截图就能看到游戏画面了"
-            else -> "已切到「发布」页"
-        }
-    }
 
     override fun snapshotCss(maxWidth: Int, quality: Int): ByteArray? {
         if (Looper.myLooper() == Looper.getMainLooper()) return null

@@ -113,10 +113,10 @@ interface GameUi {
     /**
      * 切到某一页。
      * **对话 / 预览 / 发布 这三页是 App 的原生控件，不在 webview 的 DOM 里**，
-     * 所以模型用 click / js_eval 永远点不到它们 —— 想截图验证游戏画面，
-     * 只能走这个工具先切过去，再调 screenshot。
+     * 所以模型用 click / js_eval 永远点不到它们。
+     * **这里不提供切页能力** —— 切页会动用户正在看的屏幕（用户明确不许）。
+     * 只提供只读的 currentTab()，让 AI 知道自己截到的到底是哪一页。
      */
-    fun switchTab(tab: Int): String = "当前版本不支持切页"
 }
 
 /**
@@ -242,11 +242,6 @@ class EngineTools(private val ui: GameUi, private val root: File) {
                 """{"code":{"type":"string","description":"表达式或 IIFE，返回值需可 JSON 化"}}""",
                 listOf("code")),
 
-            fn("switch_tab", "切换 App 的主页面：对话 / 游戏预览 / 发布。" +
-                "**这三页是 App 的原生控件，不在网页里**，click / js_eval 点不到它们；" +
-                "要看游戏跑起来的样子、要截图验证画面/有没有白屏错位，先用它切到 preview。" +
-                """{"tab":{"type":"string","description":"chat=对话, preview=游戏预览, pub=发布"}}""",
-                listOf("tab")),
             fn("screenshot", "截取**整屏**画面（跟手机自带截图一样，含 App 顶栏/底栏/游戏画面，返回图片）。" +
                 "用它检查 UI 有没有白屏/错位/遮挡。返回文本里带「图内坐标 → 点击坐标」的换算，" +
                 "也可以直接把图内像素喂给 tap(space=\"shot\")",
@@ -619,25 +614,15 @@ class EngineTools(private val ui: GameUi, private val root: File) {
 
         "js_eval" -> ToolResult(ui.runJsSync(a.getString("code")).take(6000))
 
-        "switch_tab" -> {
-            val wish = a.optString("tab", "preview").lowercase()
-            val idx = when (wish) {
-                "chat", "0", "对话" -> 0
-                "pub", "publish", "2", "发布" -> 2
-                else -> 1
-            }
-            ToolResult(ui.switchTab(idx) + "（当前页：${ui.currentTab()}）")
-        }
         "screenshot" -> {
-            // 带 tab 参数 = 先切页再截（最常用：切到 preview 截游戏画面）。
-            // 不给也行，那就截当前停留的那一页。
-            a.optString("tab").takeIf { it.isNotBlank() }?.let { wish ->
-                val idx = when (wish.lowercase()) {
-                    "chat", "0", "对话" -> 0
-                    "pub", "publish", "2", "发布" -> 2
-                    else -> 1
-                }
-                ui.switchTab(idx)
+            // 只截「用户当前停留的那一页」，**绝不切页**。
+            // 但要老实告诉模型它截到了什么，否则它会拿聊天界面当游戏画面自欺欺人。
+            val pageHint = when (ui.currentTab()) {
+                1 -> ""
+                0 -> "\n⚠这张图是「对话」页，**不是游戏画面**。" +
+                    "要看游戏画面请用 game_shot（离屏抓，不动用户屏幕）；" +
+                    "验证逻辑也可用 js_eval / console_logs / engine_status。\n"
+                else -> "\n（这张图是「发布」页，不是游戏画面；要看游戏请用 game_shot）\n"
             }
             val w = a.optInt("maxWidth", 720)
             val img = ui.snapshotCss(w)
@@ -659,7 +644,7 @@ class EngineTools(private val ui: GameUi, private val root: File) {
                     val r = (m[4] + m[6]) * scale
                     val b = (m[5] + m[7]) * scale
                     val s3 = Math.round(scale * 1000f) / 1000.0
-                    "整屏图 ${iw}x${ih}（设备窗口 ${m[1].toInt()}x${m[2].toInt()}，缩放 ${s3}）；" +
+                    "整屏图 ${iw}x${ih}（设备窗口 ${m[1].toInt()}x${m[2].toInt()}，缩放 ${s3}）；" + pageHint +
                         "图中游戏画面在 x ${l.toInt()}~${r.toInt()}、y ${t.toInt()}~${b.toInt()}。" +
                         "要点击游戏里的东西，最省事的是直接把图内像素喂给它：tap(x=图内x, y=图内y, space=\"shot\")；" +
                         "要用 CSS 坐标则是 css=(图内坐标/${'$'}scale-画面左上角)/${'$'}d，d=${d}。"
