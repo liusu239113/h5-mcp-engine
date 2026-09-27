@@ -907,7 +907,7 @@ class MainActivity : AppCompatActivity(), GameUi {
     private val LINK_BLUE = 0xFF2E6BE6.toInt()
 
 
-    private fun addBubble(text: String, fromUser: Boolean) {
+    private fun addBubble(text: String, fromUser: Boolean, thumbs: List<ByteArray> = emptyList()) {
         // 一条消息 = 一个气泡；内部按空行切段，每段自带「复制」，含链接的段落多一个「复制链接」
         val card = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -915,6 +915,8 @@ class MainActivity : AppCompatActivity(), GameUi {
             background = if (fromUser) roundCard(this@MainActivity, pal.userBubble, pal.userBubble, 16, 0)
             else roundCard(this@MainActivity, pal.aiBubble, pal.border, 16)
         }
+        // 用户发的图：直接把缩略图放进气泡里（以前只在下面挂一行「[附件] xx.jpg」文字，等于看不到图）
+        if (thumbs.isNotEmpty()) bubbleThumbRow(card, thumbs)
         val paras = text.split(Regex("\n{2,}")).map { it.trim() }.filter { it.isNotEmpty() }
             .ifEmpty { listOf(text) }
         for ((i, seg) in paras.withIndex()) {
@@ -962,6 +964,78 @@ class MainActivity : AppCompatActivity(), GameUi {
      * 段落末尾的小操作：**手绘风图标**（用户要求不要文字按钮）。
      * 触摸目标 ≥ 36dp；长按给一句人话说明，避免纯图标看不懂。
      */
+    /**
+     * 用户发的图：在气泡里给缩略图。
+     * 以前只在下面挂一行「[附件] xx.jpg」文字，用户反馈"看不到图，很不好"。
+     * 点一下看大图、长按存到本地 —— 和素材卡一套手感。
+     */
+    private fun bubbleThumbRow(card: LinearLayout, thumbs: List<ByteArray>) {
+        val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        val side = dp(96)
+        for ((i, raw) in thumbs.withIndex()) {
+            val iv = ImageView(this).apply {
+                scaleType = ImageView.ScaleType.CENTER_CROP
+                background = roundCard(this@MainActivity, pal.cardAlt, pal.border, 10)
+                clipToOutline = true
+                contentDescription = "我发的图 ${i + 1}"
+                val bmp = runCatching { decodeSmallBytes(raw, side) }.getOrNull()
+                if (bmp != null) {
+                    setImageBitmap(bmp)
+                } else {
+                    setImageDrawable(LineIcon("image", pal.faint, dp(2).toFloat()))
+                    setPadding(dp(8), dp(8), dp(8), dp(8))
+                }
+                setOnClickListener { showBytesFull(raw) }
+                setOnLongClickListener { saveBytesToLocal(raw); true }
+            }
+            row.addView(iv, LinearLayout.LayoutParams(side, side).apply { rightMargin = dp(6) })
+        }
+        val hs = HorizontalScrollView(this).apply {
+            isHorizontalScrollBarEnabled = false
+            addView(row, ViewGroup.LayoutParams(-2, -2))
+        }
+        card.addView(hs, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(7) })
+    }
+
+    /** 按目标边长采样解码「内存里的图」（对话里的图可能好几 MB，不能整张读进内存） */
+    private fun decodeSmallBytes(raw: ByteArray, target: Int): Bitmap? {
+        val o = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeByteArray(raw, 0, raw.size, o)
+        if (o.outWidth <= 0) return null
+        var s = 1
+        while (o.outWidth / (s * 2) >= target && o.outHeight / (s * 2) >= target) s *= 2
+        return BitmapFactory.decodeByteArray(raw, 0, raw.size, BitmapFactory.Options().apply { inSampleSize = s })
+    }
+
+    /** 点缩略图看大图（全屏，点一下关掉，长按存本地） */
+    private fun showBytesFull(raw: ByteArray) {
+        val bmp = runCatching { BitmapFactory.decodeByteArray(raw, 0, raw.size) }.getOrNull()
+        if (bmp == null) {
+            toast("这张图打不开了")
+            return
+        }
+        val d = Dialog(this, android.R.style.Theme_Black_NoTitleBar_Fullscreen)
+        val iv = ImageView(this).apply {
+            setImageBitmap(bmp)
+            adjustViewBounds = true
+            scaleType = ImageView.ScaleType.FIT_CENTER
+            setOnClickListener { d.dismiss() }
+            setOnLongClickListener { saveBytesToLocal(raw); true }
+        }
+        d.setContentView(iv)
+        d.show()
+    }
+
+    /** 存「我发出去的那张图」：先落一个临时文件，再复用文件那条 MediaStore 通路 */
+    private fun saveBytesToLocal(raw: ByteArray) {
+        val f = File(cacheDir, "sent_${System.currentTimeMillis()}.jpg")
+        if (!runCatching { f.writeBytes(raw) }.isSuccess) {
+            toast("保存失败：临时文件写不进去")
+            return
+        }
+        saveToLocal(f)
+    }
+
     private fun iconOp(kind: String, desc: String, onTap: () -> Unit): ImageView = ImageView(this).apply {
         setImageDrawable(LineIcon(kind, pal.sub, dp(2).toFloat()))
         setPadding(dp(8), dp(8), dp(8), dp(8))
@@ -1440,7 +1514,8 @@ class MainActivity : AppCompatActivity(), GameUi {
         addBubble(
             (text.ifEmpty { if (images.isEmpty()) "（看附件）" else "（看这张图）" }) +
                 docs.joinToString("") { "\n[附件] ${it.name}" },
-            true
+            true,
+            images
         )
         if (images.isNotEmpty()) addSystemLine("（附带 ${images.size} 张图片）")
         if (docs.isNotEmpty()) addSystemLine("（附带 ${docs.size} 个文档）")
@@ -1772,7 +1847,7 @@ class MainActivity : AppCompatActivity(), GameUi {
         chatList = fresh
         for (m in history) {
             when (m.role) {
-                "user" -> addBubble(m.text ?: "（图片）", true)
+                "user" -> addBubble(m.text ?: "（图片）", true, m.images)
                 "assistant" -> if (!m.text.isNullOrBlank()) addBubble(m.text, false)
                 else -> addSystemLine(m.text ?: "")
             }
