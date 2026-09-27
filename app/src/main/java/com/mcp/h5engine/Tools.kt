@@ -56,6 +56,14 @@ class EngineTools(private val ui: GameUi, private val root: File) {
         /** MCP 工具桥（TapTap 小游戏等），App 启动时注入；声明与执行都会带上它 */
         @Volatile
         var mcp: McpHub? = null
+
+        /**
+         * MCP 工具准入开关。默认 false —— AI 平时【看不到】这些工具，也就无从"自动识别/自动调一圈"。
+         * 只有用户话里明确出现 TapTap / 广告 / 排行榜 这类意图时，才临时放行（且纪律上只读）。
+         * 原因：部分 TapTap 接口会顺带发布，AI 自己都不知道自己发布了。
+         */
+        @Volatile
+        var mcpAllowed: Boolean = false
     }
 
     // ==================== 工具声明 ====================
@@ -150,7 +158,7 @@ class EngineTools(private val ui: GameUi, private val root: File) {
     fun specs(allow: Set<String>? = null): List<JSONObject> {
         val base = if (allow.isNullOrEmpty()) allSpecs
         else allSpecs.filter { allow.contains(it.getJSONObject("function").getString("name")) }
-        val extra = mcp?.specs() ?: emptyList()
+        val extra = if (mcpAllowed) (mcp?.specs() ?: emptyList()) else emptyList()
         return if (extra.isEmpty()) base else base + extra
     }
 
