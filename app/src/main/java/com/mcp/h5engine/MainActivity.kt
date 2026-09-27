@@ -732,13 +732,21 @@ class MainActivity : AppCompatActivity(), GameUi {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.END
             }
-            ops.addView(tinyOp("复制") { copyToClip(seg) })
+            ops.addView(tinyOp("复制本段") { copyToClip(seg) })
             if (links.isNotEmpty()) {
                 ops.addView(tinyOp(if (links.size == 1) "复制链接" else "复制链接 ${links.size}") {
                     if (links.size == 1) copyToClip(links[0]) else pickLink(links)
                 })
             }
             card.addView(ops, LinearLayout.LayoutParams(-1, -2))
+        }
+        // 分段多的时候一段段点太烦，末尾再给一个整条复制
+        if (paras.size > 1) {
+            card.addView(LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.END
+                addView(tinyOp("复制全文") { copyToClip(text) })
+            }, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(2) })
         }
         chatList.addView(card, LinearLayout.LayoutParams(-2, -2).apply {
             gravity = if (fromUser) Gravity.END else Gravity.START
@@ -749,12 +757,16 @@ class MainActivity : AppCompatActivity(), GameUi {
         scrollChatToBottom()
     }
 
-    /** 段落末尾的小操作：低调、不抢内容 */
+    /** 段落末尾的小操作：低调，但触摸目标要够大（原来点不准） */
     private fun tinyOp(label: String, onTap: () -> Unit): TextView = TextView(this).apply {
         text = label
-        textSize = 11f
-        setTextColor(pal.faint)
-        setPadding(dp(9), dp(3), dp(1), 0)
+        textSize = 11.5f
+        setTextColor(pal.sub)
+        gravity = Gravity.CENTER
+        setPadding(dp(14), dp(7), dp(14), dp(7))
+        minHeight = dp(34)
+        minWidth = dp(66)
+        background = roundCard(this@MainActivity, pal.cardAlt, pal.border, 10)
         setOnClickListener { onTap() }
     }
 
@@ -2893,6 +2905,78 @@ class MainActivity : AppCompatActivity(), GameUi {
             }
         }
         col.addView(themeRow)
+
+        // ---------- TapTap Maker（素材生产线） ----------
+        // 为什么放这里：AI 跑在 WebView 沙箱里，没有任何 exec 通道，
+        // 授权（pat/login）与绑定工程（init）只能由 App 本体代跑。
+        section("TapTap Maker（生图 / 音乐 / 音效 / 配音）")
+        col.addView(TextView(ctx).apply {
+            text = "素材生成走 TapTap 云端，需要先授权一次。这里由 App 帮你跑命令，你不用敲终端。"
+            textSize = 12f
+            setTextColor(pal.sub)
+            setPadding(dp(2), 0, 0, dp(8))
+        })
+
+        val makerOut = TextView(ctx).apply {
+            text = "点下面任意按钮开始；「自检」能看出现在到底缺哪一步。"
+            textSize = 11.5f
+            setTextColor(pal.sub)
+            setTextIsSelectable(true)
+            setPadding(dp(12), dp(10), dp(12), dp(10))
+            background = roundCard(ctx, pal.cardAlt, pal.border, 12)
+        }
+
+        fun makerRun(cmd: List<String>, stdin: String?, tip: String) {
+            makerOut.text = "执行中：$tip …"
+            Thread {
+                val r = MakerCli.run(ctx, cmd, stdin)
+                main.post {
+                    makerOut.text = (if (r.ok) "✅ " else "❌ ") + tip + "\n" + r.output.takeLast(900)
+                }
+            }.start()
+        }
+
+        val patEt = input("粘贴 PAT（也可用右边的扫码登录）", "")
+        col.addView(patEt, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(2) })
+
+        val makerRow1 = LinearLayout(ctx).apply { orientation = LinearLayout.HORIZONTAL }
+        makerRow1.addView(ghostBtnOf(ctx, pal, "保存 PAT").apply {
+            setOnClickListener {
+                val v = patEt.text.toString().trim()
+                if (v.isEmpty()) {
+                    toast("先把 PAT 粘进上面的输入框")
+                } else {
+                    makerRun(listOf("pat", "set", "--pat-stdin"), v + "\n", "写入 PAT")
+                }
+            }
+        }, LinearLayout.LayoutParams(-2, -2).apply { rightMargin = dp(8) })
+        makerRow1.addView(ghostBtnOf(ctx, pal, "扫码登录").apply {
+            setOnClickListener { makerRun(listOf("login", "--json"), null, "获取登录链接") }
+        }, LinearLayout.LayoutParams(-2, -2).apply { rightMargin = dp(8) })
+        makerRow1.addView(ghostBtnOf(ctx, pal, "自检").apply {
+            setOnClickListener { makerRun(listOf("doctor", "--json"), null, "Maker 自检") }
+        }, LinearLayout.LayoutParams(-2, -2))
+        col.addView(makerRow1, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(8) })
+
+        val makerRow2 = LinearLayout(ctx).apply { orientation = LinearLayout.HORIZONTAL }
+        makerRow2.addView(ghostBtnOf(ctx, pal, "绑定当前项目").apply {
+            setOnClickListener {
+                val proj = File(gameRoot, currentGame).absolutePath
+                makerRun(
+                    listOf(
+                        "init", "--create", "--name", currentGame,
+                        "--target-dir", proj, "--skip-confirm", "--skip-mcp-install", "--json"
+                    ),
+                    null, "绑定项目「$currentGame」"
+                )
+            }
+        }, LinearLayout.LayoutParams(-2, -2).apply { rightMargin = dp(8) })
+        makerRow2.addView(ghostBtnOf(ctx, pal, "查看我的应用").apply {
+            setOnClickListener { makerRun(listOf("apps", "--json"), null, "列出 Maker 应用") }
+        }, LinearLayout.LayoutParams(-2, -2))
+        col.addView(makerRow2, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(8) })
+
+        col.addView(makerOut, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(8) })
 
         // ---------- 厂商 ----------
         section("厂商（国内外主流已预设，Key 各家独立保存）")
