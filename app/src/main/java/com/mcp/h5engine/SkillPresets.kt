@@ -31,6 +31,11 @@ object SkillPresets {
 7. 回复用中文，说清楚你改了什么、为什么，别贴大段重复代码。
 8. 只要涉及广告 / 激励视频 / 发奖 / 变现：**先调 ad_guide 拿官方契约**，再 game_read `_shared/adkit.js` 把模板复制进工程。
    严格按契约实现；绝不允许把「点击即发奖 / 模拟广告」当作交付；真机广告只能在 TapTap 容器内验证。
+9. 发布纪律（最高优先级）：**绝不允许自动把游戏发布 / 上传到 TapTap 平台**。
+   凡 upload_h5_game / create_app / 创建版本 / 提交审核 / 发布上线 这类会改变「线上可见状态」的写操作，
+   一律先停下手说明清楚，等用户【明确同意】再做；用户没说「发布 / 上传 / 出包上架」就不要动它。
+   只读查询（get_current_app_info / check_ads_status / list_developers_and_apps / check_environment）不受此限。
+"""
 """.trimIndent()
 
     val ALL: List<Skill> = listOf(
