@@ -3583,9 +3583,9 @@ class MainActivity : AppCompatActivity(), GameUi {
             setTextColor(pal.faint)
         }, LinearLayout.LayoutParams(0, -2, 1f))
         if (total > 0) {
-            b.addView(ghostBtnOf(this, pal, "删除 ($total)") {
-                setOnClickListener { confirmDeleteSelected() }
-            }, LinearLayout.LayoutParams(-2, -2).apply { rightMargin = dp(8) })
+            val delBtn = ghostBtnOf(this, pal, "删除 ($total)")
+            delBtn.setOnClickListener { confirmDeleteSelected() }
+            b.addView(delBtn, LinearLayout.LayoutParams(-2, -2).apply { rightMargin = dp(8) })
             b.addView(primaryBtnOf(this, pal, "加入对话 ($total)").apply {
                 setOnClickListener { queueSelected() }
             })
