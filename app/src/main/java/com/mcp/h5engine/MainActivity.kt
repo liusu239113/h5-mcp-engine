@@ -274,6 +274,9 @@ class MainActivity : AppCompatActivity(), GameUi {
     private var runSteps = 0
     private var bodyExpanded = false
     private var latestActivity = ""
+    private var runToggle: TextView? = null
+    /** 用户手动收起了思考面板：那就别再自动摊开 */
+    private var userCollapsedThinking = false
     private var runSeq = 0
     private var runWrote = false
 
@@ -1746,7 +1749,9 @@ class MainActivity : AppCompatActivity(), GameUi {
 
         runHead = stat
         runBody = body
+        runToggle = toggle
         bodyExpanded = true
+        userCollapsedThinking = false
         latestActivity = ""
         runStartAt = SystemClock.elapsedRealtime()
         stat.text = "启动中…"
@@ -1759,9 +1764,41 @@ class MainActivity : AppCompatActivity(), GameUi {
             bodyExpanded = !bodyExpanded
             body.visibleIf(bodyExpanded)
             toggle.text = if (bodyExpanded) "收起" else "展开"
+            // 记住用户的手动选择：他自己收起了，流式进度就不要再强行摊开
+            userCollapsedThinking = !bodyExpanded
             if (bodyExpanded) scrollChatToBottom()
         }
         startTicker()
+        // 模型正在流回来的「思考 / 正文」实时打进面板。
+        // 不接这个回调的话，思考版模型长时间推理时面板只有「思考中…」，
+        // 用户只能以为它卡死了。
+        AiClient.onProgress = { kind, text -> main.post { paintProgress(kind, text) } }
+        scrollChatToBottom()
+    }
+
+    private var lastProgressAt = 0L
+
+    /**
+     * 把流式进度画到思考面板上。
+     * 节流 120ms：响应的 chunk 可能只有几十字节，每个都刷会拖慢主线程。
+     */
+    private fun paintProgress(kind: String, text: String) {
+        val b = runBody ?: return
+        if (text.isEmpty()) return
+        val now = SystemClock.elapsedRealtime()
+        if (now - lastProgressAt < 120) return
+        lastProgressAt = now
+        val head = if (kind == "think") "思考中…" else "正在写回答…"
+        b.text = head + "\n" + text.takeLast(6000)
+        latestActivity = if (kind == "think") "思考中（已 " + text.length + " 字）"
+        else "写回答中（已 " + text.length + " 字）"
+        // 面板若还是收起的，就顺手摊开 —— 让人看得见字在长；
+        // 用户自己点过「收起」的话就尊重他。
+        if (!userCollapsedThinking && !bodyExpanded) {
+            bodyExpanded = true
+            b.visibleIf(true)
+            runToggle?.text = "收起"
+        }
         scrollChatToBottom()
     }
 
@@ -1798,6 +1835,7 @@ class MainActivity : AppCompatActivity(), GameUi {
 
     private fun finishRun() {
         running = false
+        AiClient.onProgress = null
         runTicker?.let { main.removeCallbacks(it) }
         stopBtn.visibleIf(false)
         val ms = SystemClock.elapsedRealtime() - runStartAt

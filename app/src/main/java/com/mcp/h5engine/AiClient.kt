@@ -297,7 +297,11 @@ class AiClient(private val cfg: ProviderConfig) {
         inflight = call
         return try {
             call.execute().use { r ->
-                val text = r.body?.string() ?: ""
+                // 边收边回显：把正在流回来的「思考 / 正文」实时交给界面。
+                // 思考版模型长时间推理时可能几十秒不吐正文，没有这个回调，
+                // 用户看到的只有一句「思考中…」，只能以为卡死。
+                val text = if (r.isSuccessful) readWithProgress(r.body)
+                else (r.body?.string() ?: "")
                 if (!r.isSuccessful) {
                     // 把「这条请求到底发给了谁、带了多大东西」一并带出来。
                     // 以前只显示服务商原文，用户和 AI 都无从判断是 Key / Base URL / 请求体量哪一环的问题
@@ -364,6 +368,105 @@ class AiClient(private val cfg: ProviderConfig) {
     }
 
     companion object {
+
+        /**
+         * 实时进度回调：kind = "think" / "text"，text = 目前已收到的完整文本（覆盖式，不是增量）。
+         * UI 侧直接整段 setText 即可，不用自己拼。
+         */
+        @Volatile
+        var onProgress: ((String, String) -> Unit)? = null
+
+        /** 边收边回显：读响应体的同时把已收到的部分解析出「思考 / 正文」，节流丢给界面 */
+        fun readWithProgress(b: okhttp3.ResponseBody?): String {
+            if (b == null) return ""
+            val sb = StringBuilder()
+            val ins = java.io.InputStreamReader(b.byteStream(), Charsets.UTF_8)
+            val buf = CharArray(4096)
+            var lastPaint = 0L
+            try {
+                while (true) {
+                    val n = ins.read(buf, 0, buf.size)
+                    if (n <= 0) break
+                    sb.append(buf, 0, n)
+                    val now = System.currentTimeMillis()
+                    if (now - lastPaint >= 150) {
+                        lastPaint = now
+                        emitProgress(sb.toString())
+                    }
+                }
+            } catch (t: Throwable) {
+                // 被 cancel / 网络断：把已收到的先吐出去，再照原样抛给上层按错误处理
+                runCatching { emitProgress(sb.toString()) }
+                throw t
+            }
+            runCatching { emitProgress(sb.toString()) }
+            return sb.toString()
+        }
+
+        private fun emitProgress(full: String) {
+            val cb = onProgress ?: return
+            if (full.isEmpty()) return
+            val think = jsonField(full, "reasoning_content") ?: jsonField(full, "reasoning")
+            val text = jsonField(full, "content") ?: jsonField(full, "text")
+            if (!think.isNullOrEmpty()) runCatching { cb("think", think) }
+            if (!text.isNullOrEmpty()) runCatching { cb("text", text) }
+        }
+
+        /**
+         * 从一个「可能还没收完」的 JSON 里取字符串字段。
+         * 没闭合就返回已收到的部分 —— 这正是打字机效果需要的。
+         */
+        private fun jsonField(json: String, key: String): String? {
+            val k = "\"" + key + "\""
+            var i = json.indexOf(k)
+            while (i >= 0) {
+                var j = i + k.length
+                while (j < json.length && json[j].isWhitespace()) j++
+                if (j >= json.length) return null
+                if (json[j] == ':') {
+                    j++
+                    while (j < json.length && json[j].isWhitespace()) j++
+                    if (j >= json.length) return null
+                    if (json[j] != '"') return null      // 数组 / 对象形式，交给整段解析
+                    val sb = StringBuilder()
+                    j++
+                    while (j < json.length) {
+                        val c = json[j]
+                        if (c == '\\') {
+                            if (j + 1 >= json.length) break
+                            val e = json[j + 1]
+                            when (e) {
+                                'n' -> sb.append('\n')
+                                't' -> sb.append('\t')
+                                'r' -> sb.append('\r')
+                                '"' -> sb.append('"')
+                                '\\' -> sb.append('\\')
+                                '/' -> sb.append('/')
+                                'b' -> sb.append('\b')
+                                'f' -> sb.append('\u000C')
+                                'u' -> {
+                                    if (j + 5 < json.length) {
+                                        val v = json.substring(j + 2, j + 6).toIntOrNull(16)
+                                        if (v != null) sb.append(v.toChar()) else sb.append(e)
+                                        j += 4
+                                    } else break
+                                }
+                                else -> sb.append(e)
+                            }
+                            j += 2
+                        } else if (c == '"') {
+                            return sb.toString()
+                        } else {
+                            sb.append(c)
+                            j++
+                        }
+                    }
+                    return sb.toString()   // 还没收完：先给已收到的部分
+                }
+                i = json.indexOf(k, i + k.length)
+            }
+            return null
+        }
 
         private val NET_HINTS = listOf(
             "socket", "connection abort", "connection reset", "broken pipe",
