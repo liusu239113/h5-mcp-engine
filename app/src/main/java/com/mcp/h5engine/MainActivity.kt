@@ -53,6 +53,7 @@ import org.json.JSONObject
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.io.File
+import java.io.FileOutputStream
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
@@ -2635,7 +2636,7 @@ class MainActivity : AppCompatActivity(), GameUi {
     // 列的是磁盘上真实存在的文件，重启 / 覆盖安装后还在，可预览、可多选、可反复加入对话。
 
     private var wsDlg: Dialog? = null
-    private var wsTab = "media"        // media / doc / skill / code
+    private var wsTab = "media"        // media / doc / style / skill / code
     private var wsKind = "image"       // 素材页内：image / audio / video
     private var wsGrid = false         // 列表 / 网格
     private var wsSort = 0             // 0 名称 / 1 大小 / 2 时间
@@ -2712,7 +2713,7 @@ class MainActivity : AppCompatActivity(), GameUi {
 
         tabs.removeAllViews()
         for ((t, label) in listOf(
-            "media" to "素材", "doc" to "文档", "skill" to "技能", "code" to "代码"
+            "media" to "素材", "doc" to "文档", "style" to "风格", "skill" to "技能", "code" to "代码"
         )) {
             tabs.addView(
                 chipOf(this, pal, label, t == wsTab).apply {
@@ -2730,10 +2731,104 @@ class MainActivity : AppCompatActivity(), GameUi {
         when (wsTab) {
             "media" -> renderMediaTab(body)
             "doc" -> renderDocTab(body, "doc")
+            "style" -> renderUiTab(body)
             "skill" -> renderDocTab(body, "skill")
             else -> renderCodeTab(body)
         }
         renderWsBottom()
+    }
+
+    // ---------- UI 风格页（预制主题，一键换肤） ----------
+
+    /** 读 assets 里的 kit.json 索引 */
+    private fun kitIndexJson(): JSONObject? = runCatching {
+        JSONObject(assets.open("ui-kits/kit.json").use { String(it.readBytes(), Charsets.UTF_8) })
+    }.getOrNull()
+
+    /** 当前项目用的是哪套皮肤（读 <项目>/ui/.kit.json） */
+    private fun currentKitId(): String = runCatching {
+        JSONObject(File(projDir(), "ui/.kit.json").readText()).optString("id")
+    }.getOrDefault("")
+
+    /** 把 assets 下的一个目录（递归）复制到 dst，返回写入的文件数 */
+    private fun copyAssetTree(assetPath: String, dst: File): Int {
+        val kids = runCatching { assets.list(assetPath) }.getOrNull() ?: return 0
+        if (kids.isEmpty()) {
+            dst.parentFile?.mkdirs()
+            return runCatching {
+                assets.open(assetPath).use { ins -> FileOutputStream(dst).use { ins.copyTo(it) } }
+                1
+            }.getOrDefault(0)
+        }
+        var n = 0
+        for (c in kids) n += copyAssetTree("$assetPath/$c", File(dst, c))
+        return n
+    }
+
+    /** 落地一套主题到当前项目 ui/：与桥里的 maker_ui_apply_kit 走同一套目录结构 */
+    private fun applyUiKit(id: String): Int {
+        val dst = File(projDir(), "ui")
+        val n = copyAssetTree("ui-kits/$id", dst) + copyAssetTree("ui-kits/_shared", dst)
+        runCatching {
+            File(dst, ".kit.json").writeText("""{"id":"$id","at":${System.currentTimeMillis()}}""")
+        }
+        return n
+    }
+
+    private fun renderUiTab(body: LinearLayout) {
+        val idx = kitIndexJson()
+        if (idx == null) {
+            body.addView(emptyHint("没有找到预制 UI 风格包（assets/ui-kits 缺失，请更新到本版本）"))
+            return
+        }
+        val cur = currentKitId()
+        body.addView(
+            emptyHint(
+                "每个项目一套皮肤。换肤只换 ui/theme.css，游戏结构一行不用改；" +
+                    "AI 也会按题材自动挑（提示词里已写死纪律）。"
+            )
+        )
+        val arr = idx.optJSONArray("kits") ?: org.json.JSONArray()
+        for (i in 0 until arr.length()) {
+            val k = arr.optJSONObject(i) ?: continue
+            val id = k.optString("id")
+            if (id.isBlank()) continue
+            val on = id == cur
+            val scenes = k.optJSONArray("scenes")
+            val sceneTxt =
+                if (scenes == null) ""
+                else (0 until minOf(scenes.length(), 6)).joinToString(" / ") { scenes.optString(it) }
+            val card = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(dp(12), dp(10), dp(12), dp(10))
+                background = roundCard(this@MainActivity, if (on) pal.cardAlt else pal.card, pal.border, 12)
+                isClickable = true
+                setOnClickListener {
+                    val n = runCatching { applyUiKit(id) }.getOrDefault(0)
+                    if (n <= 0) {
+                        toast("换肤失败：写入 ui/ 出错")
+                        return@setOnClickListener
+                    }
+                    runCatching { reloadGame() }
+                    toast("已应用「${k.optString("name")}」· 写入 $n 个文件")
+                    renderWs()
+                }
+            }
+            card.addView(TextView(this).apply {
+                text = k.optString("name") + if (on) " · 使用中" else ""
+                textSize = 14.5f
+                setTextColor(if (on) pal.accent else pal.text)
+                setTypeface(null, Typeface.BOLD)
+            })
+            card.addView(TextView(this).apply {
+                text = k.optString("mood") + if (sceneTxt.isNotEmpty()) "\n适用：$sceneTxt" else ""
+                textSize = 12.5f
+                setTextColor(pal.sub)
+                setPadding(0, dp(3), 0, 0)
+            })
+            body.addView(card, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(8) })
+        }
+        body.addView(emptyHint("换肤后页面里应引用 ui/theme.css 与 ui/components.css，颜色写 var(--hx-*)。"))
     }
 
     // ---------- 素材页 ----------
