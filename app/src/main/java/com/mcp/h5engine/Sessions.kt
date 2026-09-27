@@ -59,7 +59,24 @@ class SessionStore(private val ctx: Context, val proj: String = "") {
                 val ma = o.optJSONArray("msgs") ?: JSONArray()
                 for (j in 0 until ma.length()) {
                     val m = ma.optJSONObject(j) ?: continue
-                    msgs += ChatMsg(m.optString("role", "user"), m.optString("text"))
+                    // tool_calls / tool_call_id 必须一起回来：否则 assistant 的调用记录丢了、
+                    // tool 消息成了孤儿，下一轮请求会被服务端 400 掉（整个会话再也发不出去）。
+                    val tcs = mutableListOf<ToolCall>()
+                    m.optJSONArray("toolCalls")?.let { ta ->
+                        for (k in 0 until ta.length()) {
+                            val t = ta.optJSONObject(k) ?: continue
+                            val id = t.optString("id")
+                            if (id.isBlank()) continue
+                            tcs += ToolCall(id, t.optString("name"), t.optString("args", "{}"))
+                        }
+                    }
+                    msgs += ChatMsg(
+                        m.optString("role", "user"),
+                        m.optString("text").ifBlank { null },
+                        emptyList(),
+                        tcs,
+                        m.optString("toolCallId").ifBlank { null }
+                    )
                 }
                 out += ChatSession(
                     o.optString("id", "s$i"),
@@ -78,8 +95,22 @@ class SessionStore(private val ctx: Context, val proj: String = "") {
             for (s in list) {
                 val ma = JSONArray()
                 for (m in s.msgs.takeLast(300)) {
-                    if (m.text.isNullOrBlank()) continue
-                    ma.put(JSONObject().put("role", m.role).put("text", m.text))
+                    // 只跳过「既没文字、也没工具调用」的空壳。
+                    // 注意别把带 tool_calls 的 assistant 消息漏掉 —— 那正是上次 400 的元凶。
+                    if (m.text.isNullOrBlank() && m.toolCalls.isEmpty()) continue
+                    val jo = JSONObject().put("role", m.role).put("text", m.text ?: "")
+                    m.toolCallId?.let { jo.put("toolCallId", it) }
+                    if (m.toolCalls.isNotEmpty()) {
+                        val tcs = JSONArray()
+                        for (t in m.toolCalls) {
+                            tcs.put(
+                                JSONObject().put("id", t.id).put("name", t.name)
+                                    .put("args", t.argsJson.take(4000))
+                            )
+                        }
+                        jo.put("toolCalls", tcs)
+                    }
+                    ma.put(jo)
                 }
                 arr.put(
                     JSONObject()

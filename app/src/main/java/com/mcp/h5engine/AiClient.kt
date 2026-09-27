@@ -77,8 +77,58 @@ class AiClient(private val cfg: ProviderConfig) {
      * 重试只针对「网络类」错误（切后台 / 切网 / 连接被系统掐断），
      * 鉴权、模型名这种硬错误会立刻返回，不做无意义重试。
      */
-    fun chat(history: List<ChatMsg>, tools: List<JSONObject>): ChatReply {
+    /**
+     * 历史清洗：保证 tool_calls / tool 消息严格成对。
+     *
+     * 触发场景：会话落盘时旧版本只存了 role+text，assistant 的 tool_calls 丢了，
+     * 回读后 tool 消息变成「孤儿」，DeepSeek 直接 400：
+     *   Messages with role 'tool' must be a response to a preceding message with 'tool_calls'
+     * 这里统一兜底：一轮工具调用只要没拿全响应，就整轮拆掉（退化成纯文本），
+     * 孤儿 tool 消息降级成一条注明出处的 user 文本 —— 宁可少点上下文，也不要整段会话打不开。
+     * 注意：UI 渲染用的是原始 history，这里只影响发出去的请求体。
+     */
+    private fun sanitizeHistory(src: List<ChatMsg>): List<ChatMsg> {
+        if (src.none { it.role == "tool" || it.toolCalls.isNotEmpty() }) return src
+        // 第一遍：一轮工具调用必须「每个 id 都有响应」才算完整
+        val ok = BooleanArray(src.size)
+        for (i in src.indices) {
+            val m = src[i]
+            if (m.role != "assistant" || m.toolCalls.isEmpty()) continue
+            val missing = m.toolCalls.map { it.id }.toMutableSet()
+            var j = i + 1
+            while (j < src.size && src[j].role == "tool") {
+                src[j].toolCallId?.let { missing.remove(it) }
+                j++
+            }
+            ok[i] = missing.isEmpty()
+        }
+        // 第二遍：按顺序重建
+        val out = ArrayList<ChatMsg>(src.size)
+        for (i in src.indices) {
+            val m = src[i]
+            when {
+                // 残缺的一轮：拆掉 tool_calls，只留文本
+                m.role == "assistant" && m.toolCalls.isNotEmpty() && !ok[i] ->
+                    if (!m.text.isNullOrBlank()) out += ChatMsg("assistant", m.text, m.images)
+
+                m.role == "tool" -> {
+                    val prev = out.lastOrNull()
+                    val paired = prev != null && prev.role == "assistant" && m.toolCallId != null &&
+                        prev.toolCalls.any { it.id == m.toolCallId }
+                    if (paired) out += m
+                    else if (!m.text.isNullOrBlank())
+                        out += ChatMsg("user", "（历史工具结果，对应的调用记录已丢失）\n" + m.text)
+                }
+
+                else -> out += m
+            }
+        }
+        return out
+    }
+
+    fun chat(rawHistory: List<ChatMsg>, tools: List<JSONObject>): ChatReply {
         aborted = false
+        val history = sanitizeHistory(rawHistory)
         val body = when (cfg.provider.protocol) {
             Protocol.OPENAI -> bodyOpenAi(history, tools)
             Protocol.ANTHROPIC -> bodyAnthropic(history, tools)
