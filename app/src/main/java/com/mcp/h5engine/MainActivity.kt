@@ -510,31 +510,45 @@ class MainActivity : AppCompatActivity(), GameUi {
             addView(chatList)
         }
 
-        // 工作区入口：素材 / 文档 / 技能 / 代码（Maker 那种完整操作区，不是三个小方按钮）
-        // 代码卡：单击 = 文件列表，长按 = 直接开 index.html（原来 folder 图标的快捷没丢）
+        // 工作区入口：只留一个（原来「素材/文档/技能/代码」四张卡片和面板里四个页签重复了）
+        // 单击 = 打开工作区（默认上次看的那一类），进去后面板里有四个页签可切
         val toolRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             setPadding(dp(14), dp(2), dp(14), dp(8))
         }
-        toolRow.addView(
-            entryTile(this, pal, "image", "素材") { openWorkspace("media") },
-            LinearLayout.LayoutParams(0, -2, 1f).apply { rightMargin = dp(6) }
-        )
-        toolRow.addView(
-            entryTile(this, pal, "doc", "文档") { openWorkspace("doc") },
-            LinearLayout.LayoutParams(0, -2, 1f).apply { rightMargin = dp(6) }
-        )
-        toolRow.addView(
-            entryTile(this, pal, "skill", "技能") { openWorkspace("skill") },
-            LinearLayout.LayoutParams(0, -2, 1f).apply { rightMargin = dp(6) }
-        )
-        toolRow.addView(
-            entryTile(this, pal, "code", "代码", onLongClick = { editMainCode() }) {
-                openWorkspace("code")
-            },
-            LinearLayout.LayoutParams(0, -2, 1f)
-        )
+        toolRow.addView(LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(8), dp(7), dp(12), dp(7))
+            background = pressable(roundCard(this@MainActivity, pal.cardAlt, pal.border, 12), 0x14000000)
+            isClickable = true
+            addView(ImageView(this@MainActivity).apply {
+                setImageDrawable(LineIcon("code", pal.sub, dp(2).toFloat()))
+                setPadding(dp(8), dp(8), dp(8), dp(8))
+            }, LinearLayout.LayoutParams(dp(38), dp(38)))
+            addView(LinearLayout(this@MainActivity).apply {
+                orientation = LinearLayout.VERTICAL
+                addView(TextView(this@MainActivity).apply {
+                    text = "工作区"
+                    textSize = 13f
+                    setTextColor(pal.text)
+                    typeface = MEDIUM
+                })
+                addView(TextView(this@MainActivity).apply {
+                    text = "素材 / 文档 / 技能 / 代码"
+                    textSize = 10.5f
+                    setTextColor(pal.faint)
+                    setPadding(0, dp(2), 0, 0)
+                })
+            }, LinearLayout.LayoutParams(0, -2, 1f).apply { leftMargin = dp(2) })
+            addView(TextView(this@MainActivity).apply {
+                text = "❯"
+                textSize = 13f
+                setTextColor(pal.faint)
+            })
+            setOnClickListener { openWorkspace(wsTab) }
+        }, LinearLayout.LayoutParams(-1, -2))
         page.addView(toolRow)
 
         // 待发送区：一行一个附件（小图标 + 文件名 + ×）；点条目 = 加入对话
@@ -1800,27 +1814,17 @@ class MainActivity : AppCompatActivity(), GameUi {
         val host = previewWrapHolder.parent as? ViewGroup ?: return
         host.removeView(previewWrapHolder)
 
-        val box = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setBackgroundColor(pal.bg)
-        }
-        val fullBar = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(14), dp(8), dp(12), dp(8))
-            setBackgroundColor(pal.navBg)
-        }
-        fullBar.addView(TextView(this).apply {
-            text = "全屏预览 · $currentGame"
-            textSize = 13f
-            setTextColor(pal.text)
-            typeface = MEDIUM
-        }, LinearLayout.LayoutParams(0, -2, 1f))
-        fullBar.addView(chipOf(this, pal, "退出全屏", false).apply {
+        val box = FrameLayout(this).apply { setBackgroundColor(pal.bg) }
+        box.addView(previewWrapHolder, FrameLayout.LayoutParams(-1, -1))
+        // 真全屏：没有标题栏，预览容器直接铺满整屏；屏内只留一个悬浮「缩小」按钮
+        box.addView(chipOf(this, pal, "缩小", false).apply {
+            alpha = 0.82f
             setOnClickListener { fullDlg?.dismiss() }
+        }, FrameLayout.LayoutParams(-2, -2).apply {
+            gravity = Gravity.TOP or Gravity.END
+            topMargin = dp(16)
+            rightMargin = dp(14)
         })
-        box.addView(fullBar, LinearLayout.LayoutParams(-1, -2))
-        box.addView(previewWrapHolder, LinearLayout.LayoutParams(-1, 0, 1f))
 
         val dlg = Dialog(this, android.R.style.Theme_Material_NoActionBar_Fullscreen)
         dlg.setContentView(box)
@@ -1828,13 +1832,15 @@ class MainActivity : AppCompatActivity(), GameUi {
         fullDlg = dlg
         dlg.show()
         dlg.window?.setLayout(-1, -1)
-        // 只做「铺满屏幕」的扩展，不旋转屏幕（用户明确不要横屏）
+        // 真全屏：内容铺到状态栏/导航栏底下（LAYOUT_*），再把系统栏藏掉；不旋转屏幕
         @Suppress("DEPRECATION")
         dlg.window?.decorView?.systemUiVisibility =
             View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY or
                 View.SYSTEM_UI_FLAG_FULLSCREEN or
                 View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or
-                View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+                View.SYSTEM_UI_FLAG_LAYOUT_STABLE or
+                View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN or
+                View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
     }
 
     /** 退出全屏：把预览容器搬回预览页原位 */
