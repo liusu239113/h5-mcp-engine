@@ -643,7 +643,14 @@ class MainActivity : AppCompatActivity(), GameUi {
         addBubble(if (text.isEmpty()) "（看这张图）" else text, true)
         if (images.isNotEmpty()) addSystemLine("（附带 ${images.size} 张图片）")
 
-        val skill = SkillPresets.byId(cfgStore.skillId)
+        // 一句「帮我接广告」就自动切到广告技能，不用用户自己去翻设置
+        val adWanted = listOf("广告", "激励视频", "发奖", "变现", "adunitid", "adkit", "rewarded")
+            .any { text.toLowerCase().contains(it) }
+        val skill =
+            if (adWanted) SkillPresets.byId("ads") else SkillPresets.byId(cfgStore.skillId)
+        if (adWanted && cfgStore.skillId != "ads") {
+            addSystemLine("识别到广告需求：本轮自动使用「广告接入（TapTap 激励视频）」技能，按官方契约执行")
+        }
         val tools = EngineTools(this, gameRoot)
         val r = AgentRunner(
             cfg = cfg,

@@ -131,7 +131,12 @@ class EngineTools(private val ui: GameUi, private val root: File) {
             fn("game_libs", "查看内置的 H5 游戏框架（Phaser/PixiJS/Three/Matter/p5/Howler）及用法。" +
                 "写较完整的游戏前先调它，别自己从零造轮子",
                 "{}", emptyList()),
-            fn("lib_usage", "同 game_libs：查看内置框架清单与引用方式", "{}", emptyList())
+            fn("lib_usage", "同 game_libs：查看内置框架清单与引用方式", "{}", emptyList()),
+
+            fn("ad_guide",
+                "【接广告必调】一次给全：TapTap 激励视频官方契约 + adkit.js 模板位置 + 八条硬纪律 + 验收清单。" +
+                    "用户只要提到广告 / 激励视频 / 发奖 / 变现，先调它，别凭印象写，更不许用「模拟广告」糊过去",
+                "{}", emptyList())
         )
     }
 
@@ -150,6 +155,31 @@ class EngineTools(private val ui: GameUi, private val root: File) {
         ToolResult("工具执行失败 ${t.javaClass.simpleName}: ${t.message}")
     }
 
+    /** 广告硬纪律：即使文档读不到，也要把正确做法塞给模型 */
+    private val AD_DISCIPLINE = """
+1. 只有用户点击能触发广告，文件加载期零副作用；
+2. 单飞：同一时间只允许一条流程，重复点击只提示、不重复拉起；
+3. 成功唯一定义：onClose(res) 里 res.isEnded === true（另一条通道为 code===200 且 data.rewarded===true）；
+4. 失败绝不补发奖励；
+5. 看门狗 90s：平台 Promise 永不 settle 时复位，否则玩家只能刷新页面；
+6. 流程纪元：迟到结果丢弃，防一次广告发两份奖励；
+7. 配额只在 onReward 回调里消耗（失败不扣，玩家可重试）；
+8. 每条出口都有玩家可读的中文提示，绝不静默。
+""".trimIndent()
+
+    private val AD_GUIDE_FALLBACK = """
+【TapTap 小游戏激励视频：官方契约】
+- 创建：tap.createRewardedVideoAd({ adUnitId }) —— 单例组件，只创建一次全程复用；
+- 创建后自动拉素材：成功 onLoad()，失败 onError(err)；
+- 播放：show() 返回 Promise；素材未就绪会 rejected → 按官方建议 load().then(show) 重试一次；
+- 发奖判据只有一条：onClose(res) 里 res.isEnded === true；中途关掉不发奖；
+- 开发者不能主动隐藏或关闭广告；看完或关闭后素材清空并自动加载下一份；
+- 第二条通道（本 App 场景）：window.ColorboxAI.vatask.completeRewardVideo()，恒零参数，成功判据 code===200 且 data.rewarded===true；
+- 两条桥都探测不到（纯网页 / 预览环境）：mode() 返回 blocked / broken → 只提示、不发奖，
+  绝不允许降级成「点击即发奖」或「模拟广告」当作交付；
+- 真机真实广告必须在 TapTap 容器内验证；本地联调用地址后加 ?admock=1，发布前把 adkit.js 里 MOCK_ENABLED 改为 false。
+""".trimIndent()
+
     private fun gameDir(game: String?): File {
         val g = game?.takeIf { it.isNotBlank() } ?: ui.currentGameId()
         return File(root, g)
@@ -161,6 +191,22 @@ class EngineTools(private val ui: GameUi, private val root: File) {
         val f = File(b, rel).canonicalFile
         require(!rel.contains("..") && f.path.startsWith(b.path)) { "非法路径: $rel" }
         return f
+    }
+
+    /**
+     * 解析文件路径。
+     * 关键：adkit.js / AD_KIT.md / engine.js 都在项目根的 _shared/ 里，
+     * 原来只会去「当前游戏目录」找，导致 AI 按技能提示去读却永远「文件不存在」，
+     * 最后自己发明了模拟广告。这里允许 _shared/ 前缀（以及裸文件名）直接命中共享资产。
+     */
+    private fun resolve(game: String?, rel: String): File {
+        val r = rel.trim().trimStart('/')
+        return when {
+            r == "_shared" -> File(root, "_shared")
+            r.startsWith("_shared/") -> safe(File(root, "_shared"), r.removePrefix("_shared/"))
+            r == "adkit.js" || r == "AD_KIT.md" -> safe(File(root, "_shared"), r)
+            else -> safe(gameDir(game), r)
+        }
     }
 
     private fun tree(dir: File, base: File = dir): String {
@@ -210,11 +256,15 @@ class EngineTools(private val ui: GameUi, private val root: File) {
 
         "game_write" -> {
             val rel = a.getString("path")
-            val f = safe(gameDir(a.optString("game")), rel)
+            val f = resolve(a.optString("game"), rel)
             f.parentFile?.mkdirs()
             f.writeText(a.getString("content"))
-            ui.reloadGame()
-            ToolResult("已写入 $rel（${f.length()} 字节），并已热重载")
+            val isShared = rel.trim().trimStart('/').startsWith("_shared/")
+            if (!isShared) ui.reloadGame()
+            ToolResult(
+                "已写入 $rel（${f.length()} 字节）" +
+                    if (isShared) "（共享资产，不需要重载）" else "，并已热重载"
+            )
         }
 
         "game_read" -> {
@@ -222,20 +272,44 @@ class EngineTools(private val ui: GameUi, private val root: File) {
             val p = a.optString("path")
             if (p.isBlank()) {
                 val d = gameDir(g)
-                if (!d.exists()) ToolResult("游戏目录不存在: ${d.name}")
-                else ToolResult("${d.name} 文件清单：\n" + tree(d))
+                val sh = File(root, "_shared")
+                val head =
+                    if (!d.exists()) "游戏目录不存在: ${d.name}"
+                    else "${d.name} 文件清单：\n" + tree(d)
+                val shared = if (sh.isDirectory && sh.listFiles()?.isNotEmpty() == true)
+                    "\n\n_shared/ 共享资产（用 game_read path=_shared/xxx 读）：\n" + tree(sh)
+                else ""
+                ToolResult(head + shared)
             } else {
-                val f = safe(gameDir(g), p)
+                val f = resolve(g, p)
                 ToolResult(
-                    if (!f.exists()) "文件不存在: $p"
+                    if (!f.exists())
+                        "文件不存在: $p（共享资产要带 _shared/ 前缀，例如 _shared/adkit.js）"
                     else "```\n${f.readText().take(60000)}\n```"
                 )
             }
         }
 
+        "ad_guide" -> {
+            val doc = File(root, "_shared/AD_KIT.md")
+            val kit = File(root, "_shared/adkit.js")
+            val sb = StringBuilder()
+            sb.append("=== 广告接入官方契约（严格照做，禁止自创降级方案）===\n")
+            sb.append(if (doc.exists()) doc.readText().take(26000) else AD_GUIDE_FALLBACK)
+            sb.append("\n\n=== 八条硬纪律 ===\n").append(AD_DISCIPLINE)
+            if (kit.exists()) {
+                sb.append("\n\n=== adkit.js 模板开头（全文用 game_read path=_shared/adkit.js 读）===\n```js\n")
+                sb.append(kit.readText().lineSequence().take(30).joinToString("\n"))
+                sb.append("\n```\n把 adkit.js 整份复制进游戏工程（发布必须自包含）。")
+            } else {
+                sb.append("\n\n_shared/adkit.js 不存在：让用户重开一次 App 释放资产。")
+            }
+            ToolResult(sb.toString())
+        }
+
         "game_patch" -> {
             val fnPath = a.getString("path")
-            val f = safe(gameDir(a.optString("game")), fnPath)
+            val f = resolve(a.optString("game"), fnPath)
             require(f.exists()) { "文件不存在: $fnPath" }
             val s = a.getInt("startLine") - 1
             val e = a.getInt("endLine")
