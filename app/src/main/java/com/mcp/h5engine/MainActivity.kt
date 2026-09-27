@@ -4672,17 +4672,6 @@ makerRow1.addView(ghostBtnOf(ctx, pal, "扫码登录").apply {
         }
     }
 
-    private fun copyAssetTree(assetPath: String, dst: File) {
-        val children = assets.list(assetPath) ?: return
-        if (children.isEmpty()) {
-            dst.parentFile?.mkdirs()
-            assets.open(assetPath).use { input -> dst.outputStream().use { input.copyTo(it) } }
-            return
-        }
-        dst.mkdirs()
-        for (c in children) copyAssetTree("$assetPath/$c", File(dst, c))
-    }
-
     /** 所有游戏共用一份运行时 engine.js，每次启动覆盖刷新 */
     private fun seedSharedRuntime() {
         val dir = File(gameRoot, "_shared").apply { mkdirs() }
