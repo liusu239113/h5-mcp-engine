@@ -4853,24 +4853,6 @@ makerRow1.addView(ghostBtnOf(ctx, pal, "扫码登录").apply {
     // 注意：**不给 AI 切页能力** —— 切页会动用户正在看的屏幕（用户明确不许）。
     override fun currentTab(): Int = activeTab
 
-    /** 抽样看这张图是不是纯色/空白（离屏画 WebView 失败时就是一张纯色图） */
-    private fun looksBlank(b: android.graphics.Bitmap): Boolean {
-        val sx = (b.width / 16).coerceAtLeast(1)
-        val sy = (b.height / 16).coerceAtLeast(1)
-        val first = b.getPixel(sx, sy)
-        var diff = 0
-        var x = sx
-        while (x < b.width) {
-            var y = sy
-            while (y < b.height) {
-                if (b.getPixel(x, y) != first) diff++
-                y += sy
-            }
-            x += sx
-        }
-        return diff < 3
-    }
-
     /**
      * 离屏抓「游戏预览」画面 —— **完全不动用户眼前的界面**（不切页、不改可见性、不点击）。
      * 先把常驻的游戏 WebView 按屏幕尺寸排一次版，draw 到内存 Bitmap，再还原尺寸。
