@@ -106,9 +106,14 @@ class EngineBridge(
 
     private fun mcpOpen(d: JSONObject): JSONObject {
         val url = d.getString("url")
-        val headers = d.optJSONObject("headers")?.let { h ->
-            h.keys().associateWith { k -> h.optString(k) }
-        } ?: emptyMap()
+        val headers = HashMap<String, String>()
+        d.optJSONObject("headers")?.let { h ->
+            val it = h.keys()
+            while (it.hasNext()) {
+                val k = it.next()
+                headers[k] = h.optString(k)
+            }
+        }
 
         val client = McpClient(url, headers)
         val info = client.initialize(d.optString("name", "h5-game"), "1.0.0")
