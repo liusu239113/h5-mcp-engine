@@ -1522,6 +1522,44 @@ class MainActivity : AppCompatActivity(), GameUi {
                 pendingBox.addView(row, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(6) })
             }
         }
+        // 已加入本轮对话的附件 / 截图：也要能一条条删掉。
+        // 用户反馈：从工作区加进来之后就只剩「发出去」这一条路，没有 ×，不合理。
+        if (::pendingBox.isInitialized) {
+            for (a in java.util.ArrayList(queued)) {
+                val row = attachRowOf(this, pal, a.kind, a.name, tail = "×", onTail = {
+                    queued.remove(a)
+                    updateAttachInfo()
+                })
+                row.setOnClickListener {
+                    queued.remove(a)
+                    updateAttachInfo()
+                }
+                pendingBox.addView(
+                    row,
+                    LinearLayout.LayoutParams(
+                        android.view.ViewGroup.LayoutParams.MATCH_PARENT,
+                        android.view.ViewGroup.LayoutParams.WRAP_CONTENT
+                    )
+                )
+            }
+            for (i in pendingShots.indices.reversed()) {
+                val row = attachRowOf(this, pal, "image", "截图 ${i + 1}", tail = "×", onTail = {
+                    if (i < pendingShots.size) pendingShots.removeAt(i)
+                    updateAttachInfo()
+                })
+                row.setOnClickListener {
+                    if (i < pendingShots.size) pendingShots.removeAt(i)
+                    updateAttachInfo()
+                }
+                pendingBox.addView(
+                    row,
+                    LinearLayout.LayoutParams(
+                        android.view.ViewGroup.LayoutParams.MATCH_PARENT,
+                        android.view.ViewGroup.LayoutParams.WRAP_CONTENT
+                    )
+                )
+            }
+        }
         if (attached.isEmpty() && queued.isEmpty() && pendingShots.isEmpty()) {
             attachInfo.visibility = View.GONE
             return
@@ -1531,7 +1569,7 @@ class MainActivity : AppCompatActivity(), GameUi {
             if (attached.isNotEmpty()) append("待发送 ${attached.size} 项：直接发送会一起带上，× 移除")
             if (queued.isNotEmpty()) {
                 if (isNotEmpty()) append(" · ")
-                append("已加入对话 ${queued.size} 项")
+                append("已加入对话 ${queued.size} 项（点在 × 上可移除）")
             }
             if (pendingShots.isNotEmpty()) {
                 if (isNotEmpty()) append(" · ")
@@ -2485,6 +2523,12 @@ class MainActivity : AppCompatActivity(), GameUi {
                 setPadding(dp(4), dp(2), dp(4), dp(8))
             })
         }
+        col.addView(TextView(this).apply {
+            text = "长按某个项目可删除（当前项目要先切到别的项目）"
+            textSize = 11f
+            setTextColor(pal.faint)
+            setPadding(dp(4), 0, dp(4), dp(6))
+        })
         for (p in projects) {
             val row = listRowOf(
                 this, pal,
@@ -2494,6 +2538,36 @@ class MainActivity : AppCompatActivity(), GameUi {
             row.setOnClickListener {
                 switchProject(p.name)
                 projectDlg?.dismiss()
+            }
+            // 长按项目 = 删除该项目。用户反馈：项目列表里根本没有删除入口，
+            // 建过的项目只能一直堆着。删当前项目先拦住（避免把正在跑的东西抽掉）。
+            row.setOnLongClickListener {
+                if (p.name == currentGame) {
+                    android.widget.Toast.makeText(
+                        this, "这是当前项目，先切到别的项目再删",
+                        android.widget.Toast.LENGTH_SHORT
+                    ).show()
+                } else {
+                    AlertDialog.Builder(themed())
+                        .setTitle("删除项目「${p.name}」？")
+                        .setMessage(
+                            p.absolutePath + "\n\n" +
+                                "整个目录会删掉：代码 / 素材 / 技能 / 存档都没了，不可恢复。"
+                        )
+                        .setPositiveButton("删除") { _, _ ->
+                            val ok = runCatching { p.deleteRecursively() }.getOrDefault(false)
+                            android.widget.Toast.makeText(
+                                this,
+                                if (ok) "已删除「${p.name}」" else "删除失败（可能被占用）",
+                                android.widget.Toast.LENGTH_SHORT
+                            ).show()
+                            projectDlg?.dismiss()
+                            refreshHeader()
+                        }
+                        .setNegativeButton("取消", null)
+                        .show()
+                }
+                true
             }
             col.addView(row, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(8) })
         }
@@ -3460,6 +3534,45 @@ class MainActivity : AppCompatActivity(), GameUi {
 
     // ---------- 底部「加入对话」 ----------
 
+    /**
+     * 删除工作区里勾选的文件。
+     * 用户反馈：工作区的素材放进去就删不掉了 —— 这里跟「加入对话」同一个勾选入口，
+     * 勾上点删除即可（图片/音频/文档/技能/代码都一样）。
+     */
+    private fun confirmDeleteSelected() {
+        val rels = wsSel.toList()
+        if (rels.isEmpty()) return
+        AlertDialog.Builder(themed())
+            .setTitle("删除 ${rels.size} 个文件？")
+            .setMessage(
+                rels.take(12).joinToString("\n") +
+                    (if (rels.size > 12) "\n…共 ${rels.size} 个" else "") +
+                    "\n\n从磁盘删除，不可恢复。"
+            )
+            .setPositiveButton("删除") { _, _ ->
+                Thread {
+                    var n = 0
+                    for (rel in rels) {
+                        val f = File(gameRoot, rel)
+                        val ok = runCatching {
+                            if (f.isDirectory) f.deleteRecursively() else f.delete()
+                        }.getOrDefault(false)
+                        if (ok) n++
+                    }
+                    val cnt = n
+                    main.post {
+                        wsSel.clear()
+                        android.widget.Toast.makeText(
+                            this, "已删除 $cnt 个文件", android.widget.Toast.LENGTH_SHORT
+                        ).show()
+                        renderWs()
+                    }
+                }.start()
+            }
+            .setNegativeButton("取消", null)
+            .show()
+    }
+
     private fun renderWsBottom() {
         val b = wsBottom ?: return
         b.removeAllViews()
@@ -3470,6 +3583,9 @@ class MainActivity : AppCompatActivity(), GameUi {
             setTextColor(pal.faint)
         }, LinearLayout.LayoutParams(0, -2, 1f))
         if (total > 0) {
+            b.addView(ghostBtnOf(this, pal, "删除 ($total)") {
+                setOnClickListener { confirmDeleteSelected() }
+            }, LinearLayout.LayoutParams(-2, -2).apply { rightMargin = dp(8) })
             b.addView(primaryBtnOf(this, pal, "加入对话 ($total)").apply {
                 setOnClickListener { queueSelected() }
             })
