@@ -37,7 +37,8 @@ data class ProviderConfig(
 )
 
 /**
- * 大模型预设（2026 版）。
+ * 大模型预设（2026-09 版）。注意：厂商改名很快，设置页有「拉取最新模型列表」
+ * 可以直接问厂商要当前可用模型，比任何硬编码预设都准。
  *
  * 约定：
  *  - 自带视觉的模型一律 vision = true，默认就开，不需要手动打开；
@@ -53,10 +54,11 @@ object AiProviders {
         Provider(
             "deepseek", "DeepSeek 深度求索", "https://api.deepseek.com/v1",
             models = listOf(
-                ModelSpec("deepseek-chat", "DeepSeek V3.2"),
-                ModelSpec("deepseek-reasoner", "DeepSeek V3.2 思考版"),
-                ModelSpec("deepseek-vl", "DeepSeek VL（看图）", vision = true),
-                ModelSpec("deepseek-coder", "DeepSeek Coder")
+                // V4.1 Flash 起原生多模态，名字就是 deepseek-flash
+                ModelSpec("deepseek-flash", "DeepSeek V4.1 Flash（原生多模态·便宜）", vision = true),
+                ModelSpec("deepseek-chat", "DeepSeek Chat / V4 Pro"),
+                ModelSpec("deepseek-reasoner", "DeepSeek 思考版"),
+                ModelSpec("deepseek-v4-flash-vision-exp", "DeepSeek V4 Flash Vision（旧名）", vision = true)
             )
         ),
 
@@ -189,10 +191,10 @@ object AiProviders {
             "openai", "OpenAI", "https://api.openai.com/v1",
             group = "国外",
             models = listOf(
-                ModelSpec("gpt-5.2", "GPT-5.2（看图）", vision = true),
-                ModelSpec("gpt-5.2-mini", "GPT-5.2 mini（看图）", vision = true),
-                ModelSpec("gpt-5.2-codex", "GPT-5.2 Codex（看图）", vision = true),
-                ModelSpec("o5-mini", "o5-mini（推理·看图）", vision = true)
+                ModelSpec("gpt-6-astra", "GPT-6 Astra（最强·看图）", vision = true),
+                ModelSpec("gpt-6-sol", "GPT-6 Sol（看图）", vision = true),
+                ModelSpec("gpt-6-luna", "GPT-6 Luna（快·便宜·看图）", vision = true),
+                ModelSpec("gpt-5.6-terra", "GPT-5.6 Terra（看图）", vision = true)
             )
         ),
 
@@ -298,8 +300,9 @@ object AiProviders {
     fun guessVision(model: String): Boolean {
         val m = model.lowercase()
         val hints = listOf(
-            "vl", "vision", "omni", "gpt-5", "gpt-4", "gemini", "claude",
-            "grok", "doubao", "seed", "glm-4.6v", "llama-4", "agnes-2"
+            "vl", "vision", "omni", "gpt-6", "gpt-5", "gpt-4", "gemini", "claude",
+            "grok", "doubao", "seed", "glm-4.6v", "llama-4", "agnes-2",
+            "deepseek-flash", "v4-flash", "astra", "sol", "luna"
         )
         return hints.any { m.contains(it) }
     }

@@ -89,7 +89,13 @@ class MainActivity : AppCompatActivity(), GameUi {
 
     private val main = Handler(Looper.getMainLooper())
     private val logs = LogBuffer()
-    private val history = mutableListOf<ChatMsg>()
+    /** 当前会话的消息（切会话时整体替换） */
+    private var history: MutableList<ChatMsg> = mutableListOf()
+    private val sessions = mutableListOf<ChatSession>()
+    private var activeSession = 0
+    private val attachedDocs = mutableListOf<DocAttach>()
+    private val sessStore by lazy { SessionStore(this) }
+    private lateinit var sessionBtn: TextView
     private val pendingShots = mutableListOf<ByteArray>()
     private val cfgStore by lazy { AiConfigStore(this) }
 
@@ -237,6 +243,7 @@ class MainActivity : AppCompatActivity(), GameUi {
 
     override fun onPause() {
         super.onPause()
+        runCatching { persistSessions() }
         // 窗口不可见时 WebView 会节流甚至暂停页面里的 JS 定时器，
         // 这里显式续期一次，尽量让游戏循环继续跑（配合前台服务保活）
         if (::web.isInitialized) {
@@ -314,6 +321,29 @@ class MainActivity : AppCompatActivity(), GameUi {
             textSize = 11.5f
         }
         top.addView(subTv, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(3) })
+
+        // 顶部工具栏：会话切换 / 新对话 / 目录 / 代码 —— 对齐 TapTap Maker 的形态
+        val tools = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, dp(9), 0, 0)
+        }
+        sessionBtn = TextView(this).apply {
+            textSize = 12.5f
+            setTextColor(pal.text)
+            setPadding(dp(11), dp(7), dp(11), dp(7))
+            background = pressable(roundCard(this@MainActivity, pal.cardAlt, pal.border, 10), 0x14000000)
+            setOnClickListener { showSessions() }
+        }
+        tools.addView(sessionBtn, LinearLayout.LayoutParams(0, -2, 1f))
+        val newBtn = chipOf(this, pal, "＋新对话", false).apply { setOnClickListener { newChat() } }
+        val treeBtn = chipOf(this, pal, "目录", false).apply { setOnClickListener { showTree() } }
+        val codeBtn = chipOf(this, pal, "代码", false).apply { setOnClickListener { showCode() } }
+        tools.addView(newBtn, LinearLayout.LayoutParams(-2, -2).apply { leftMargin = dp(6) })
+        tools.addView(treeBtn, LinearLayout.LayoutParams(-2, -2).apply { leftMargin = dp(6) })
+        tools.addView(codeBtn, LinearLayout.LayoutParams(-2, -2).apply { leftMargin = dp(6) })
+        top.addView(tools)
+        updateSessionBtn()
         // 发丝分隔线：顶栏与内容之间一道 1dp 线，比投影更安静
         top.addView(View(this).apply { setBackgroundColor(pal.border) },
             LinearLayout.LayoutParams(-1, dp(1)).apply { topMargin = dp(12) })
@@ -398,6 +428,12 @@ class MainActivity : AppCompatActivity(), GameUi {
             }
         }
     }
+
+    /** 选文档：txt / md / json / zip / docx… 都能选 */
+    private val pickFile =
+        registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+            onDocPicked(uri)
+        }
 
     private fun showTab(tab: Int) {
         activeTab = tab
@@ -488,8 +524,21 @@ class MainActivity : AppCompatActivity(), GameUi {
             setPadding(0, dp(8), 0, 0)
         }
 
-        val attachBtn = chipOf(this, pal, "＋ 图片", false).apply {
-            setOnClickListener { pickImage.launch("image/*") }
+        val attachBtn = chipOf(this, pal, "＋ 附件", false).apply {
+            setOnClickListener {
+                AlertDialog.Builder(themed())
+                    .setTitle("添加附件")
+                    .setItems(
+                        arrayOf("从相册选图片", "选文档（txt / md / json / zip / docx…）", "当前游戏画面")
+                    ) { _, i ->
+                        when (i) {
+                            0 -> pickImage.launch("image/*")
+                            1 -> pickDoc()
+                            else -> attachScreenshot()
+                        }
+                    }
+                    .show()
+            }
         }
         val shotBtn = chipOf(this, pal, "当前画面", false).apply {
             setOnClickListener { attachScreenshot() }
@@ -519,6 +568,7 @@ class MainActivity : AppCompatActivity(), GameUi {
         box.addView(row)
 
         page.addView(box, LinearLayout.LayoutParams(-1, -2))
+        initSessions()
         return page
     }
 
@@ -600,15 +650,23 @@ class MainActivity : AppCompatActivity(), GameUi {
     }
 
     private fun updateAttachInfo() {
-        if (pendingShots.isEmpty()) {
+        if (pendingShots.isEmpty() && attachedDocs.isEmpty()) {
             attachInfo.visibility = View.GONE
-        } else {
-            attachInfo.visibility = View.VISIBLE
-            attachInfo.text = "已附 ${pendingShots.size} 张图 · 点这里清除"
-            attachInfo.setOnClickListener {
-                pendingShots.clear()
-                updateAttachInfo()
+            return
+        }
+        attachInfo.visibility = View.VISIBLE
+        attachInfo.text = buildString {
+            if (pendingShots.isNotEmpty()) append("已附 ${pendingShots.size} 张图")
+            if (attachedDocs.isNotEmpty()) {
+                if (isNotEmpty()) append(" · ")
+                append("文档 " + attachedDocs.joinToString("、") { it.name }.take(42))
             }
+            append(" · 点这里清除")
+        }
+        attachInfo.setOnClickListener {
+            pendingShots.clear()
+            attachedDocs.clear()
+            updateAttachInfo()
         }
     }
 
@@ -624,7 +682,7 @@ class MainActivity : AppCompatActivity(), GameUi {
             toast("已中断上一轮，接着发新的")
         }
         val text = inputEt.text.toString().trim().ifEmpty { lastUserText }
-        if (text.isEmpty() && pendingShots.isEmpty()) return
+        if (text.isEmpty() && pendingShots.isEmpty() && attachedDocs.isEmpty()) return
 
         val cfg = cfgStore.active()
         val local = cfg.baseUrl.contains("127.0.0.1") || cfg.baseUrl.contains("localhost")
@@ -635,13 +693,29 @@ class MainActivity : AppCompatActivity(), GameUi {
         }
 
         val images = pendingShots.toList()
+        val docs = attachedDocs.toList()
         pendingShots.clear()
+        attachedDocs.clear()
         updateAttachInfo()
         inputEt.setText("")
         lastUserText = text
 
-        addBubble(if (text.isEmpty()) "（看这张图）" else text, true)
+        val docBlock = docs.joinToString("") { d ->
+            "\n\n【用户上传的文档：${d.name}】" +
+                (if (d.rel.isNotEmpty()) "（已保存到 ${d.rel}，可用 game_read path=${d.rel} 读原文件）" else "") +
+                if (d.text.isNotEmpty()) "\n```\n${d.text}\n```"
+                else "\n（二进制内容，App 解析不出正文，若需要请让用户转成 txt/md）"
+        }
+
+        addBubble(
+            (text.ifEmpty { if (images.isEmpty()) "（看附件）" else "（看这张图）" }) +
+                docs.joinToString("") { "\n[附件] ${it.name}" },
+            true
+        )
         if (images.isNotEmpty()) addSystemLine("（附带 ${images.size} 张图片）")
+        if (docs.isNotEmpty()) addSystemLine("（附带 ${docs.size} 个文档）")
+        maybeAutoTitle(text)
+        persistSessions()
 
         // 一句「帮我接广告」就自动切到广告技能，不用用户自己去翻设置
         val adWanted = listOf("广告", "激励视频", "发奖", "变现", "adunitid", "adkit", "rewarded")
@@ -671,7 +745,11 @@ class MainActivity : AppCompatActivity(), GameUi {
 
         Thread {
             try {
-                r.run(history, text.ifEmpty { "请看我发的图片，并按图片内容改进游戏。" }, images)
+                r.run(
+                    history,
+                    (text + docBlock).ifBlank { "请看我发的图片/文档，并按里面的内容改进游戏。" },
+                    images
+                )
             } catch (t: Throwable) {
                 main.post {
                     if (mySeq == runSeq) addErrorCard(AiClient.friendly("${t.javaClass.simpleName}: ${t.message}"))
@@ -833,6 +911,307 @@ class MainActivity : AppCompatActivity(), GameUi {
         lastNotiSec = -1L
         stopGuard()
         if (runWrote) ensurePreviewFresh()
+    }
+
+    // ==================== 会话管理（像 Maker 那样开多个对话） ====================
+
+    private fun newId(): String = "s" + System.currentTimeMillis()
+
+    /** 载入会话（没有就建一个），并渲染出历史气泡 */
+    private fun initSessions() {
+        val loaded = sessStore.load()
+        if (loaded.isEmpty()) loaded += ChatSession(newId(), "新对话")
+        sessions.clear()
+        sessions.addAll(loaded)
+        activeSession = 0
+        history = sessions[0].msgs
+        updateSessionBtn()
+        renderHistory()
+    }
+
+    private fun updateSessionBtn() {
+        if (!::sessionBtn.isInitialized) return
+        val t = sessions.getOrNull(activeSession)?.title ?: "新对话"
+        sessionBtn.text = "会话 · $t ▾"
+    }
+
+    private fun persistSessions() {
+        sessions.getOrNull(activeSession)?.let {
+            it.msgs = history
+            it.updated = System.currentTimeMillis()
+        }
+        sessStore.save(sessions)
+    }
+
+    private fun newChat() {
+        persistSessions()
+        val s = ChatSession(newId(), "新对话")
+        sessions.add(0, s)
+        activeSession = 0
+        history = s.msgs
+        chatList.removeAllViews()
+        addSystemLine("已开新对话：上下文互不干扰；旧对话可从「会话」里切回来")
+        updateSessionBtn()
+        persistSessions()
+    }
+
+    private fun switchTo(i: Int) {
+        if (i == activeSession) return
+        persistSessions()
+        activeSession = i
+        history = sessions[i].msgs
+        renderHistory()
+        updateSessionBtn()
+        toast("已切到「${sessions[i].title}」")
+    }
+
+    private fun deleteSession(i: Int) {
+        if (sessions.size <= 1) {
+            toast("至少留一个会话")
+            return
+        }
+        sessions.removeAt(i)
+        if (activeSession >= sessions.size) activeSession = sessions.size - 1
+        history = sessions[activeSession].msgs
+        renderHistory()
+        updateSessionBtn()
+        persistSessions()
+    }
+
+    private fun renderHistory() {
+        chatList.removeAllViews()
+        for (m in history) {
+            when (m.role) {
+                "user" -> addBubble(m.text ?: "（图片）", true)
+                "assistant" -> if (!m.text.isNullOrBlank()) addBubble(m.text, false)
+                else -> addSystemLine(m.text ?: "")
+            }
+        }
+    }
+
+    /** 第一条用户消息顺便当标题，省得一堆「新对话」 */
+    private fun maybeAutoTitle(t: String) {
+        val s = sessions.getOrNull(activeSession) ?: return
+        if (s.title == "新对话" && t.isNotBlank()) {
+            s.title = t.replace("\n", " ").take(14)
+            updateSessionBtn()
+        }
+    }
+
+    private fun showSessions() {
+        persistSessions()
+        val labels = sessions.mapIndexed { i, s ->
+            (if (i == activeSession) "当前 · " else "") + s.title + "（${s.msgs.size} 条）"
+        }.toTypedArray()
+        AlertDialog.Builder(themed())
+            .setTitle("会话（${sessions.size}）")
+            .setItems(labels) { _, i -> switchTo(i) }
+            .setPositiveButton("＋新对话") { _, _ -> newChat() }
+            .setNeutralButton("重命名") { _, _ ->
+                val et = EditText(this).apply {
+                    setText(sessions[activeSession].title)
+                    setSelection(text.length)
+                }
+                AlertDialog.Builder(themed())
+                    .setTitle("重命名会话")
+                    .setView(et)
+                    .setPositiveButton("好") { _, _ ->
+                        sessions[activeSession].title = et.text.toString().take(24)
+                        updateSessionBtn()
+                        persistSessions()
+                    }
+                    .setNegativeButton("取消", null)
+                    .show()
+            }
+            .setNegativeButton("删除当前") { _, _ -> deleteSession(activeSession) }
+            .show()
+    }
+
+    // ==================== 上传文档 ====================
+
+    private fun pickDoc() {
+        runCatching { pickFile.launch(arrayOf("*/*")) }
+            .onFailure { toast("这台机器没有可用的文件选择器") }
+    }
+
+    private fun onDocPicked(uri: Uri?) {
+        if (uri == null) return
+        Thread {
+            val info = runCatching { readDoc(uri) }.getOrNull()
+            main.post {
+                if (info == null) {
+                    toast("读取失败，换个文件试试")
+                    return@main
+                }
+                attachedDocs += info
+                updateAttachInfo()
+                toast("已附上 ${info.name}")
+            }
+        }.start()
+    }
+
+    /**
+     * 选中的文档复制进项目里的 _uploads/，能提文本的把正文提出来。
+     * 这样 AI 不用猜：内容直接进消息，原文件也能用 game_read path=_uploads/xxx 读。
+     */
+    private fun readDoc(uri: Uri): DocAttach {
+        val name = queryName(uri) ?: "doc_${System.currentTimeMillis()}.txt"
+        val bytes = contentResolver.openInputStream(uri)?.use { it.readBytes() } ?: ByteArray(0)
+        val dir = File(gameRoot, "_uploads").apply { mkdirs() }
+        val dst = File(dir, name.replace("/", "_"))
+        runCatching { dst.writeBytes(bytes) }
+        val text = extractText(name, bytes).take(60000)
+        return DocAttach(name, "_uploads/${dst.name}", text)
+    }
+
+    private fun queryName(uri: Uri): String? = runCatching {
+        contentResolver.query(uri, null, null, null, null)?.use { c ->
+            val i = c.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
+            if (i >= 0 && c.moveToFirst()) c.getString(i) else null
+        }
+    }.getOrNull()
+
+    private fun extractText(name: String, bytes: ByteArray): String {
+        val n = name.lowercase()
+        val textExt = listOf(
+            ".txt", ".md", ".markdown", ".json", ".js", ".ts", ".html", ".htm", ".css",
+            ".csv", ".log", ".xml", ".yml", ".yaml", ".lua", ".py", ".kt", ".java",
+            ".ini", ".toml", ".sh", ".sql", ".c", ".cpp", ".h"
+        )
+        return when {
+            textExt.any { n.endsWith(it) } -> String(bytes, Charsets.UTF_8)
+            n.endsWith(".docx") -> runCatching {
+                java.util.zip.ZipInputStream(bytes.inputStream()).use { zin ->
+                    var e = zin.nextEntry
+                    var xml = ""
+                    while (e != null) {
+                        if (e.name == "word/document.xml") {
+                            xml = zin.readBytes().toString(Charsets.UTF_8)
+                            break
+                        }
+                        e = zin.nextEntry
+                    }
+                    xml.replace(Regex("<[^>]+>"), " ").replace(Regex("\\s+"), " ").trim()
+                }
+            }.getOrDefault("")
+            n.endsWith(".zip") -> runCatching {
+                java.util.zip.ZipInputStream(bytes.inputStream()).use { zin ->
+                    val names = mutableListOf<String>()
+                    var e = zin.nextEntry
+                    while (e != null) {
+                        names += e.name
+                        if (names.size >= 300) break
+                        e = zin.nextEntry
+                    }
+                    "（zip 内条目）\n" + names.joinToString("\n")
+                }
+            }.getOrDefault("")
+            n.endsWith(".pdf") ->
+                "（PDF 不能直接解析正文：有要参考的内容请复制成 txt/md 再上传；" +
+                    "原文件已存到 _uploads/，路径见上）"
+            else -> ""
+        }
+    }
+
+    // ==================== 看 / 改代码（顶部「代码」） ====================
+
+    private fun showCode() {
+        Thread {
+            val dir = File(gameRoot, currentGame)
+            val files = dir.walkTopDown().filter { it.isFile }
+                .filterNot { it.path.contains("/_shots/") }
+                .sortedBy { it.path }.take(200).toList()
+            main.post {
+                if (files.isEmpty()) {
+                    toast("这个项目还没有文件")
+                    return@main
+                }
+                val labels = files.map { it.relativeTo(dir).path + "  (${it.length()}B)" }
+                    .toTypedArray()
+                AlertDialog.Builder(themed())
+                    .setTitle("$currentGame · 选文件看代码")
+                    .setItems(labels) { _, i -> openFileEditor(files[i], dir) }
+                    .setNegativeButton("关闭", null)
+                    .show()
+            }
+        }.start()
+    }
+
+    private fun openFileEditor(f: File, base: File) {
+        val body = runCatching { f.readText() }.getOrDefault("")
+        val et = EditText(this).apply {
+            setText(body)
+            textSize = 12.5f
+            typeface = android.graphics.Typeface.MONOSPACE
+            setTextColor(pal.text)
+            gravity = Gravity.TOP or Gravity.START
+            setPadding(dp(10), dp(10), dp(10), dp(10))
+        }
+        AlertDialog.Builder(themed())
+            .setTitle(f.relativeTo(base).path)
+            .setView(ScrollView(this).apply { addView(et) })
+            .setPositiveButton("保存") { _, _ ->
+                runCatching {
+                    f.writeText(et.text.toString())
+                    reloadGame()
+                    toast("已保存并热重载")
+                }.onFailure { toast("保存失败：${it.message}") }
+            }
+            .setNeutralButton("复制全文") { _, _ -> copyToClipboard(et.text.toString()) }
+            .setNegativeButton("关闭", null)
+            .show()
+    }
+
+    // ==================== 拉取厂商真实模型列表 ====================
+
+    /** 预设永远追不上厂商改名，这里直接问厂商「你现在有哪些模型」 */
+    private fun fetchModels(p: Provider) {
+        val key = cfgStore.keyOf(p.id)
+        if (key.isBlank() && !p.baseUrl.contains("127.0.0.1")) {
+            toast("先在设置里填好 ${p.label} 的 Key")
+            return
+        }
+        toast("正在拉取 ${p.label} 的模型列表…")
+        Thread {
+            val ids = runCatching {
+                val url = java.net.URL(cfgStore.effectiveBaseUrl(p).trimEnd('/') + "/models")
+                val conn = (url.openConnection() as java.net.HttpURLConnection).apply {
+                    requestMethod = "GET"
+                    connectTimeout = 15000
+                    readTimeout = 20000
+                    setRequestProperty("Authorization", "Bearer $key")
+                    setRequestProperty("Accept", "application/json")
+                }
+                val txt = conn.inputStream.use { it.readBytes().toString(Charsets.UTF_8) }
+                conn.disconnect()
+                val jo = org.json.JSONObject(txt)
+                val arr = jo.optJSONArray("data") ?: jo.optJSONArray("models")
+                val list = mutableListOf<String>()
+                if (arr != null) {
+                    for (i in 0 until arr.length()) {
+                        val o = arr.optJSONObject(i) ?: continue
+                        val id = o.optString("id").ifBlank { o.optString("name") }
+                        if (id.isNotBlank()) list += id
+                    }
+                }
+                list.sorted()
+            }.getOrElse { emptyList() }
+            main.post {
+                if (ids.isEmpty()) {
+                    toast("没拉到模型：可能是协议不支持（Anthropic / Gemini），或 Key / 地址不对")
+                    return@main
+                }
+                AlertDialog.Builder(themed())
+                    .setTitle("${p.label} 可用模型（${ids.size}）")
+                    .setItems(ids.toTypedArray()) { _, i ->
+                        cfgStore.setModel(p.id, ids[i])
+                        refreshHeader()
+                        toast("已记为 ${ids[i]}，设置页点「保存」即可生效")
+                    }
+                    .setNegativeButton("关闭", null)
+                    .show()
+            }
+        }.start()
     }
 
     // ==================== 后台保活 ====================
@@ -1224,6 +1603,9 @@ class MainActivity : AppCompatActivity(), GameUi {
             Triple("查看 console 输出", "游戏里的 log / warn / error", { showConsole() }),
             Triple("切换 / 新建项目", "一个项目一个目录，互不干扰", { showProjects() }),
             Triple("后台保活设置", "切后台 / 锁屏 AI 继续跑（需要关掉电池优化）", { askKeepAlive() }),
+            Triple("看 / 改代码", "列出工程文件，直接看和改，改完自动热重载", { showCode() }),
+            Triple("拉取最新模型列表", "问厂商要当前可用模型，预设过期就靠它",
+                { fetchModels(AiProviders.byId(cfgStore.providerId)) }),
             Triple("复制工程路径", gameRoot.absolutePath, { copyToClipboard(gameRoot.absolutePath) }),
             Triple("清空对话历史", "AI 会忘掉之前的上下文", { clearHistory() })
         )

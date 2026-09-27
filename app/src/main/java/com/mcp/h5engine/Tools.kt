@@ -205,6 +205,8 @@ class EngineTools(private val ui: GameUi, private val root: File) {
             r == "_shared" -> File(root, "_shared")
             r.startsWith("_shared/") -> safe(File(root, "_shared"), r.removePrefix("_shared/"))
             r == "adkit.js" || r == "AD_KIT.md" -> safe(File(root, "_shared"), r)
+            r == "_uploads" -> File(root, "_uploads")
+            r.startsWith("_uploads/") -> safe(File(root, "_uploads"), r.removePrefix("_uploads/"))
             else -> safe(gameDir(game), r)
         }
     }
@@ -279,7 +281,11 @@ class EngineTools(private val ui: GameUi, private val root: File) {
                 val shared = if (sh.isDirectory && sh.listFiles()?.isNotEmpty() == true)
                     "\n\n_shared/ 共享资产（用 game_read path=_shared/xxx 读）：\n" + tree(sh)
                 else ""
-                ToolResult(head + shared)
+                val up = File(root, "_uploads")
+                val ups = if (up.isDirectory && up.listFiles()?.isNotEmpty() == true)
+                    "\n\n_uploads/ 用户上传的文档（用 game_read path=_uploads/xxx 读）：\n" + tree(up)
+                else ""
+                ToolResult(head + shared + ups)
             } else {
                 val f = resolve(g, p)
                 ToolResult(
