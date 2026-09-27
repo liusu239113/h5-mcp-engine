@@ -798,7 +798,7 @@ class AiClient(private val cfg: ProviderConfig) {
                 o.put("tool_call_id", m.toolCallId ?: "")
                 // 旧版本的坑：历史里可能已经存进了字面量 "null"，
                 // 这里统一抹掉，免得模型读到一坨 null 之后自己也糊了。
-                o.put("content", contentOrParts(m.text?.replace("null", ""), m.images))
+                o.put("content", contentOrParts(t, m.images))
             } else if (m.toolCalls.isNotEmpty()) {
                 o.put("content", if (t.isEmpty()) JSONObject.NULL else t)
                 val tcs = JSONArray()
@@ -815,7 +815,7 @@ class AiClient(private val cfg: ProviderConfig) {
             } else {
                 // 旧版本的坑：历史里可能已经存进了字面量 "null"，
                 // 这里统一抹掉，免得模型读到一坨 null 之后自己也糊了。
-                o.put("content", contentOrParts(m.text?.replace("null", ""), m.images))
+                o.put("content", contentOrParts(t, m.images))
             }
             msgs.put(o)
         }
