@@ -97,6 +97,13 @@ interface GameUi {
      */
     fun lastShotMeta(): FloatArray = FloatArray(0)
 
+    /**
+     * **离屏**抓一张「游戏预览」画面：不切页、不改可见性、不点屏幕。
+     * 这是 AI 自己的调试眼 —— 用户明确要求"截图验证必须有"，但"不许动我的屏幕"。
+     * 返回 null = 拿不到（游戏页没加载过 / 该机型不允许离屏画 WebView / 图是纯色空白）。
+     */
+    fun snapshotGameOffscreen(maxWidth: Int = 720): ByteArray? = null
+
     /** 把「截图里的像素坐标」换算成网页 CSS 坐标；没截过图返回 null */
     fun shotToCss(x: Float, y: Float): FloatArray? = null
 
@@ -242,6 +249,12 @@ class EngineTools(private val ui: GameUi, private val root: File) {
                 """{"code":{"type":"string","description":"表达式或 IIFE，返回值需可 JSON 化"}}""",
                 listOf("code")),
 
+            fn("game_shot", "**离屏抓一张「游戏画面」**（不切页、不动用户屏幕、不点击）。" +
+                "这是你自己的调试眼：用来确认游戏画面有没有白屏 / 错位 / 被遮挡 / 有没有渲染出来。" +
+                "返回的是游戏 WebView 当前渲染内容的截图；拿不到图（纯色空白）会在文字里说明，" +
+                "**不要**据此断言「游戏坏了」。" +
+                """{"maxWidth":{"type":"integer","description":"图片最长边，默认 720"}}""",
+                emptyList()),
             fn("screenshot", "截取**整屏**画面（跟手机自带截图一样，含 App 顶栏/底栏/游戏画面，返回图片）。" +
                 "用它检查 UI 有没有白屏/错位/遮挡。返回文本里带「图内坐标 → 点击坐标」的换算，" +
                 "也可以直接把图内像素喂给 tap(space=\"shot\")",
@@ -614,6 +627,23 @@ class EngineTools(private val ui: GameUi, private val root: File) {
 
         "js_eval" -> ToolResult(ui.runJsSync(a.getString("code")).take(6000))
 
+        "game_shot" -> {
+            val img = ui.snapshotGameOffscreen(a.optInt("maxWidth", 720))
+            if (img == null || img.size < 128) {
+                ToolResult(
+                    "离屏抓游戏画面没拿到图（${img?.size ?: 0} 字节）。这条路不切页、不动用户屏幕，" +
+                        "失败通常是：游戏页还没打开过、该机型不允许离屏画 WebView、或者抓到的是一张纯色图。\n" +
+                        "→ 先用 js_eval / console_logs / engine_status 验证逻辑；" +
+                        "要眼见为实，可以请用户手动切到「预览」页后再调用 screenshot。"
+                )
+            } else {
+                ToolResult(
+                    "已离屏抓到游戏画面（${img.size / 1024} KB）—— 用户屏幕没有被切换、没有被动过。\n" +
+                        "看图确认：有没有白屏、布局是否完整、有没有被系统栏压住、素材有没有加载出来。",
+                    listOf(img)
+                )
+            }
+        }
         "screenshot" -> {
             // 只截「用户当前停留的那一页」，**绝不切页**。
             // 但要老实告诉模型它截到了什么，否则它会拿聊天界面当游戏画面自欺欺人。

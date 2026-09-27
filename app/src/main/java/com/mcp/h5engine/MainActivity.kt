@@ -4853,6 +4853,81 @@ makerRow1.addView(ghostBtnOf(ctx, pal, "扫码登录").apply {
     // 注意：**不给 AI 切页能力** —— 切页会动用户正在看的屏幕（用户明确不许）。
     override fun currentTab(): Int = activeTab
 
+    /** 抽样看这张图是不是纯色/空白（离屏画 WebView 失败时就是一张纯色图） */
+    private fun looksBlank(b: android.graphics.Bitmap): Boolean {
+        val sx = (b.width / 16).coerceAtLeast(1)
+        val sy = (b.height / 16).coerceAtLeast(1)
+        val first = b.getPixel(sx, sy)
+        var diff = 0
+        var x = sx
+        while (x < b.width) {
+            var y = sy
+            while (y < b.height) {
+                if (b.getPixel(x, y) != first) diff++
+                y += sy
+            }
+            x += sx
+        }
+        return diff < 3
+    }
+
+    /**
+     * 离屏抓「游戏预览」画面 —— **完全不动用户眼前的界面**（不切页、不改可见性、不点击）。
+     * 先把常驻的游戏 WebView 按屏幕尺寸排一次版，draw 到内存 Bitmap，再还原尺寸。
+     * WebView 是硬件加速的，离屏 draw 在部分机型上会拿到纯色图 —— 那种情况直接返回 null。
+     */
+    override fun snapshotGameOffscreen(maxWidth: Int): ByteArray? {
+        if (!::web.isInitialized) return null
+        if (Looper.myLooper() == Looper.getMainLooper()) return null
+        val dm = resources.displayMetrics
+        val w = dm.widthPixels.coerceAtLeast(1)
+        val h = dm.heightPixels.coerceAtLeast(1)
+        var shot: android.graphics.Bitmap? = null
+        val latch = java.util.concurrent.CountDownLatch(1)
+        main.post {
+            runCatching {
+                val ow = web.width
+                val oh = web.height
+                val need = ow < dp(80) || oh < dp(80)
+                if (need) {
+                    web.measure(
+                        android.view.View.MeasureSpec.makeMeasureSpec(w, android.view.View.MeasureSpec.EXACTLY),
+                        android.view.View.MeasureSpec.makeMeasureSpec(h, android.view.View.MeasureSpec.EXACTLY)
+                    )
+                    web.layout(0, 0, w, h)
+                }
+                val b = android.graphics.Bitmap.createBitmap(w, h, android.graphics.Bitmap.Config.ARGB_8888)
+                web.draw(android.graphics.Canvas(b))
+                shot = b
+                if (need && ow > 0 && oh > 0) {
+                    web.measure(
+                        android.view.View.MeasureSpec.makeMeasureSpec(ow, android.view.View.MeasureSpec.EXACTLY),
+                        android.view.View.MeasureSpec.makeMeasureSpec(oh, android.view.View.MeasureSpec.EXACTLY)
+                    )
+                    web.layout(0, 0, ow, oh)
+                }
+            }
+            latch.countDown()
+        }
+        runCatching { latch.await(3, java.util.concurrent.TimeUnit.SECONDS) }
+        val b = shot ?: return null
+        if (looksBlank(b)) {
+            b.recycle()
+            return null
+        }
+        return runCatching {
+            val tw = maxWidth.coerceIn(160, w)
+            val scaled =
+                if (tw < w) android.graphics.Bitmap.createScaledBitmap(b, tw, (h * tw / w).coerceAtLeast(1), true)
+                else b
+            val baos = java.io.ByteArrayOutputStream()
+            scaled.compress(android.graphics.Bitmap.CompressFormat.JPEG, 72, baos)
+            if (scaled !== b) scaled.recycle()
+            b.recycle()
+            baos.toByteArray()
+        }.getOrNull()
+    }
+
     override fun snapshotCss(maxWidth: Int, quality: Int): ByteArray? {
         if (Looper.myLooper() == Looper.getMainLooper()) return null
 
