@@ -45,6 +45,16 @@ const childExtra = (process.env.MAKER_CHILD_ARGS || '')
   .split(/\s+/)
   .filter(Boolean);
 
+// 子进程的启动前缀（App 侧注入）。
+// 关键：hexrt/node 是 musl 链接的，PT_INTERP 指向 ld-musl-aarch64.so.1（Android 上不存在），
+// 直接 exec 它必然失败（表现就是「child 退出 code=1」）。App 自己能跑 node 是因为套了
+// libmuslrt.so --library-path <rt> 这层加载器 —— 子进程必须走同一套前缀。
+const prefix = (process.env.MAKER_CHILD_PREFIX || '')
+  .split(/\s+/)
+  .filter(Boolean);
+const childExe = prefix.length ? prefix[0] : process.execPath;
+const childLead = prefix.length ? prefix.slice(1) : [];
+
 // ---------------- 子进程（stdio MCP server） ----------------
 let child = null;
 let childAlive = false;
@@ -52,6 +62,17 @@ let restarts = 0;
 let lastExit = '';
 let buf = '';
 const pending = new Map(); // jsonrpc id -> resolve(msg)
+
+// 子进程的原始输出留一份尾巴：它要是起不来，我们得能看见原因，
+// 而不是只能去翻 App 私有目录里的日志（shell 根本读不到）。
+const logs = [];
+function pushLog(d) {
+  logs.push(d.toString('utf8'));
+  if (logs.length > 80) logs.shift();
+}
+function logTail() {
+  return logs.join('').slice(-1600);
+}
 
 function failPending(msg) {
   for (const [, done] of pending) {
@@ -62,7 +83,7 @@ function failPending(msg) {
 
 function startChild() {
   try {
-    child = spawn(process.execPath, [...childExtra, target], {
+    child = spawn(childExe, [...childLead, ...childExtra, target], {
       stdio: ['pipe', 'pipe', 'pipe'],
       cwd,
       env: process.env,
@@ -89,7 +110,8 @@ function startChild() {
       try {
         msg = JSON.parse(line);
       } catch {
-        continue; // 非 JSON（日志等）直接忽略
+        pushLog(line + '\n'); // 非 JSON（日志等）
+        continue;
       }
       if (msg.id !== undefined && pending.has(msg.id)) {
         const done = pending.get(msg.id);
@@ -99,7 +121,10 @@ function startChild() {
     }
   });
 
-  child.stderr.on('data', (d) => process.stderr.write(d));
+  child.stderr.on('data', (d) => {
+    pushLog(d);
+    process.stderr.write(d);
+  });
   child.on('error', (e) => {
     lastExit = 'child error: ' + e.message;
   });
@@ -119,13 +144,16 @@ function startChild() {
 function scheduleRestart() {
   if (restarts >= 500) return;
   restarts++;
+  // 前几次快速重试（子进程偶发崩溃能立刻救回来）；一直起不来就拉长间隔，
+  // 免得每 1.5 秒硬撞一个 60MB 的 node，白烧电。
+  const delay = restarts <= 4 ? 1500 : 10000;
   setTimeout(() => {
     // 上一次留下的管道先收干净，避免句柄泄漏
     try {
       if (child && child.stdin && !child.stdin.destroyed) child.stdin.destroy();
     } catch {}
     startChild();
-  }, 1500);
+  }, delay);
 }
 
 startChild();
@@ -152,9 +180,15 @@ const server = http.createServer((req, res) => {
       child: child && child.pid,
       restarts: restarts,
       lastExit: lastExit,
+      tail: logTail(),
       target: targetArg,
       project: projectDir,
     });
+    return;
+  }
+  if (req.url === '/logs') {
+    // 子进程起不来时唯一的现场：shell 读不到 App 私有目录里的日志，从这里拿
+    send(res, 200, { ok: childAlive, lastExit: lastExit, restarts: restarts, tail: logTail() });
     return;
   }
   if (req.method !== 'POST') {

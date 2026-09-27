@@ -264,6 +264,12 @@ object McpRt {
             // 不给它带上 CA / DNS 修正，它自己发起的网络请求（生图、音乐、配音都要联网）
             // 会因为 musl 读不到 Android DNS、找不到 CA 而全部失败。
             env["MAKER_CHILD_ARGS"] = "--use-bundled-ca -r " + File(dir, "dnsfix.js").absolutePath
+            // 更要命的一条：hexrt/node 是 musl 链接的（PT_INTERP = ld-musl-aarch64.so.1，
+            // Android 上没有这个文件），**直接 exec 它必然失败** —— 症状就是桥的 /health 一直报
+            // child 退出 code=1、然后无限重启，Maker 工具永远是 0 个。
+            // App 自己能跑 node 是靠 libmuslrt.so 这层加载器，所以子进程也得套同一套前缀。
+            env["MAKER_CHILD_PREFIX"] =
+                ld.absolutePath + " --library-path " + dir.absolutePath + " " + node.absolutePath
             log("正在启动 Maker（本地制造开发）…")
             val p = pb.start()
             makerProcess = p
