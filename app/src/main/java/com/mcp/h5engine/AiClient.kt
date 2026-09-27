@@ -280,6 +280,10 @@ class AiClient(private val cfg: ProviderConfig) {
     }
 
     private fun once(body: JSONObject, direct: Boolean = false, note: String = ""): ChatReply {
+        // 流式优先：OpenAI 兼容协议默认开 stream —— 让「正在生成」的字实时出现在对话里。
+        // 服务商不认 stream 时 readSse 返回 null，下面自动退回非流式整段读（只多花一次请求）。
+        val wantStream = cfg.provider.protocol == Protocol.OPENAI && !body.has("stream")
+        if (wantStream) body.put("stream", true)
         val rb = Request.Builder().url(endpoint)
             .header("Connection", "close")
             .post(body.toString().toRequestBody("application/json".toMediaType()))
@@ -297,6 +301,13 @@ class AiClient(private val cfg: ProviderConfig) {
         inflight = call
         return try {
             call.execute().use { r ->
+                if (wantStream && r.isSuccessful && r.body != null) {
+                    val sj = runCatching { readSse(r.body) }.getOrNull()
+                    if (sj != null) return parse(sj)
+                    // 服务商没按 SSE 回：去掉 stream 重发一次，走下面的整段读
+                    body.remove("stream")
+                    return once(body, direct, note)
+                }
                 // 边收边回显：把正在流回来的「思考 / 正文」实时交给界面。
                 // 思考版模型长时间推理时可能几十秒不吐正文，没有这个回调，
                 // 用户看到的只有一句「思考中…」，只能以为卡死。
@@ -413,6 +424,102 @@ class AiClient(private val cfg: ProviderConfig) {
             }
             runCatching { emitProgress(sb.toString()) }
             return sb.toString()
+        }
+
+        /** 流式（SSE）节流时间戳 */
+        @Volatile
+        private var lastDeltaAt = 0L
+
+        /** 流式增量直接推给界面（节流 120ms） */
+        private fun emitDelta(kind: String, text: String) {
+            val cb = onProgress ?: return
+            if (text.isEmpty()) return
+            val now = System.currentTimeMillis()
+            if (now - lastDeltaAt < 120) return
+            lastDeltaAt = now
+            runCatching { cb(kind, text) }
+        }
+
+        /**
+         * 读 SSE（stream:true）流：把正在生成的正文/思考实时推给界面，
+         * 同时把增量拼成一份标准响应体，交回 parse() 复用解析。
+         * 返回 null = 服务商没按 SSE 回 —— 调用方退回非流式整段读。
+         */
+        private fun readSse(b: okhttp3.ResponseBody?): String? {
+            if (b == null) return null
+            val src = b.source()
+            val text = StringBuilder()
+            val think = StringBuilder()
+            val tools = LinkedHashMap<Int, JSONObject>()
+            var sawData = false
+            var usable = false
+            while (true) {
+                val line = runCatching { src.readUtf8Line() }.getOrNull() ?: break
+                if (line.isEmpty() || !line.startsWith("data:")) continue
+                val payload = line.substring(5).trim()
+                if (payload.isEmpty() || payload == "[DONE]") {
+                    if (payload == "[DONE]") break else continue
+                }
+                val j = runCatching { JSONObject(payload) }.getOrNull() ?: continue
+                sawData = true
+                val d = j.optJSONArray("choices")?.optJSONObject(0)?.optJSONObject("delta") ?: continue
+                val t0 = d.optString("reasoning_content").ifBlank { d.optString("reasoning") }
+                    .ifBlank { d.optString("thinking") }
+                if (t0.isNotEmpty()) {
+                    usable = true
+                    think.append(t0)
+                    emitDelta("think", think.toString())
+                }
+                val c0 = d.optString("content")
+                if (c0.isNotEmpty()) {
+                    usable = true
+                    text.append(c0)
+                    emitDelta("text", text.toString())
+                }
+                d.optJSONArray("tool_calls")?.let { arr ->
+                    for (k in 0 until arr.length()) {
+                        val tc = arr.optJSONObject(k) ?: continue
+                        val idx = tc.optInt("index", tools.size)
+                        val cur = tools.getOrPut(idx) {
+                            JSONObject().put("id", "").put("type", "function")
+                                .put("function", JSONObject().put("name", "").put("arguments", ""))
+                        }
+                        val id0 = tc.optString("id")
+                        if (id0.isNotEmpty()) cur.put("id", id0)
+                        val f = tc.optJSONObject("function") ?: continue
+                        val fn = cur.getJSONObject("function")
+                        val nm = f.optString("name")
+                        if (nm.isNotEmpty()) fn.put("name", nm)
+                        val ar = f.optString("arguments")
+                        if (ar.isNotEmpty()) fn.put("arguments", fn.optString("arguments") + ar)
+                    }
+                }
+            }
+            if (!sawData) return null
+            if (!usable && tools.isEmpty()) return null
+            val msg = JSONObject().put("role", "assistant").put("content", text.toString())
+            if (think.isNotEmpty()) msg.put("reasoning_content", think.toString())
+            if (tools.isNotEmpty()) {
+                val arr = JSONArray()
+                tools.toSortedMap().forEach { (_, v) ->
+                    v.optJSONObject("function")?.let { f ->
+                        if (f.optString("name").isEmpty()) f.put("name", "unknown")
+                    }
+                    if (v.optString("id").isEmpty()) v.put("id", "call_" + System.nanoTime())
+                    arr.put(v)
+                }
+                msg.put("tool_calls", arr)
+            }
+            android.util.Log.i(
+                "hexoraAi",
+                "sse ok text=" + text.length + " think=" + think.length + " tools=" + tools.size
+            )
+            return JSONObject().put(
+                "choices",
+                JSONArray().put(
+                    JSONObject().put("index", 0).put("message", msg).put("finish_reason", "stop")
+                )
+            ).toString()
         }
 
         private fun emitProgress(full: String) {
