@@ -256,6 +256,45 @@ class LineIcon(
                 path.moveTo(12f, 17.6f)
                 path.lineTo(12f, 18.6f)
             }
+            // 复制：两张叠在一起的纸（手绘感靠起收笔的圆头 + 不闭合的左上角）
+            "copy" -> {
+                path.moveTo(9.2f, 8.6f)
+                path.lineTo(19f, 8.6f)
+                path.lineTo(19f, 19.4f)
+                path.lineTo(9.2f, 19.4f)
+                path.close()
+                path.moveTo(15.4f, 5.2f)
+                path.lineTo(5.2f, 5.2f)
+                path.lineTo(5.2f, 15.2f)
+            }
+            // 链接：两个相互扣住的环
+            "link" -> {
+                path.addCircle(9.6f, 12f, 3.4f, Path.Direction.CW)
+                path.addCircle(14.4f, 12f, 3.4f, Path.Direction.CW)
+                path.moveTo(11.4f, 12f)
+                path.lineTo(12.6f, 12f)
+            }
+            // 打开：方框 + 冲出右上角的箭头
+            "open" -> {
+                path.moveTo(9.4f, 7.2f)
+                path.lineTo(5f, 7.2f)
+                path.lineTo(5f, 19f)
+                path.lineTo(16.8f, 19f)
+                path.lineTo(16.8f, 14.6f)
+                path.moveTo(11.6f, 5f)
+                path.lineTo(19f, 5f)
+                path.lineTo(19f, 12.4f)
+                path.moveTo(19f, 5f)
+                path.lineTo(10.6f, 13.4f)
+            }
+            // 向下箭头：回到底部按钮
+            "down" -> {
+                path.moveTo(12f, 5.2f)
+                path.lineTo(12f, 18.6f)
+                path.moveTo(6.6f, 13.2f)
+                path.lineTo(12f, 18.6f)
+                path.lineTo(17.4f, 13.2f)
+            }
         }
         canvas.drawPath(path, p)
         canvas.restore()

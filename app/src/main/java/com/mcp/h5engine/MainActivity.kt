@@ -160,6 +160,11 @@ class MainActivity : AppCompatActivity(), GameUi {
     private var flushScheduled = false
     private var scrollPending = false
 
+    /** 是否跟随到底部：用户往上翻就停下（免得边看边被拽走），滑回底部附近自动恢复 */
+    private var stickBottom = true
+    private var scrollBtn: ImageView? = null
+    private var chatWrap: FrameLayout? = null
+
     /** 预览页：上次加载的项目与目录指纹，用来判断要不要自动重载 */
     private var lastLoadedGame = ""
     private var lastLoadedStamp = 0L
@@ -567,6 +572,29 @@ class MainActivity : AppCompatActivity(), GameUi {
         chatScroll = ScrollView(this).apply {
             isFillViewport = true
             addView(chatList)
+            // 手指滑动时实时判断「还在不在底部」
+            setOnScrollChangeListener { _, _, _, _, _ -> updateScrollBtn() }
+        }
+
+        // 对话区外面套一层 FrameLayout：用来把「回到底部」悬浮按钮叠在右下角
+        chatWrap = FrameLayout(this).apply {
+            addView(chatScroll, FrameLayout.LayoutParams(-1, -1))
+            val fab = ImageView(this@MainActivity).apply {
+                setImageDrawable(LineIcon("down", pal.bg, dp(2).toFloat()))
+                setPadding(dp(10), dp(10), dp(10), dp(10))
+                background = pressable(roundCard(this@MainActivity, pal.text, pal.text, 21, 0), 0x33000000)
+                contentDescription = "回到底部"
+                visibility = View.GONE
+                setOnClickListener {
+                    stickBottom = true
+                    scrollChatToBottom(true)
+                }
+            }
+            scrollBtn = fab
+            addView(fab, FrameLayout.LayoutParams(dp(42), dp(42), Gravity.END or Gravity.BOTTOM).apply {
+                rightMargin = dp(14)
+                bottomMargin = dp(14)
+            })
         }
 
         // 工作区入口：只留一个（原来「素材/文档/技能/代码」四张卡片和面板里四个页签重复了）
@@ -617,7 +645,7 @@ class MainActivity : AppCompatActivity(), GameUi {
         }
         page.addView(pendingBox)
 
-        page.addView(chatScroll, LinearLayout.LayoutParams(-1, 0, 1f))
+        page.addView(chatWrap, LinearLayout.LayoutParams(-1, 0, 1f))
 
         page.addView(View(this).apply { setBackgroundColor(pal.border) },
             LinearLayout.LayoutParams(-1, dp(1)))
@@ -743,13 +771,12 @@ class MainActivity : AppCompatActivity(), GameUi {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.END
             }
-            ops.addView(tinyOp("复制本段") { copyToClip(seg) })
+            ops.addView(iconOp("copy", "复制本段") { copyToClip(seg, "本段") })
             if (links.size == 1) {
-                // 单个链接：给一个明显的按钮能点开（段落里的蓝字也能点）
-                ops.addView(tinyOp("打开链接") { openExternal(links[0]) })
-                ops.addView(tinyOp("复制链接") { copyToClip(links[0]) })
+                ops.addView(iconOp("open", "用浏览器打开链接") { openExternal(links[0]) })
+                ops.addView(iconOp("link", "复制链接地址") { copyToClip(links[0], "链接") })
             } else if (links.isNotEmpty()) {
-                ops.addView(tinyOp("复制链接 ${links.size}") { pickLink(links) })
+                ops.addView(iconOp("link", "复制链接（${links.size} 个，点开可选）") { pickLink(links) })
             }
             card.addView(ops, LinearLayout.LayoutParams(-1, -2))
         }
@@ -758,7 +785,7 @@ class MainActivity : AppCompatActivity(), GameUi {
             card.addView(LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.END
-                addView(tinyOp("复制全文") { copyToClip(text) })
+                addView(iconOp("doc", "复制整条对话（全文）") { copyToClip(text, "全文") })
             }, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(2) })
         }
         chatList.addView(card, LinearLayout.LayoutParams(-2, -2).apply {
@@ -767,27 +794,31 @@ class MainActivity : AppCompatActivity(), GameUi {
             bottomMargin = dp(5)
             if (fromUser) leftMargin = dp(46) else rightMargin = dp(30)
         })
-        scrollChatToBottom()
+        // 自己发的消息永远贴底；AI 的消息只在用户本来就在底部时跟随（免得看一半被拽走）
+        if (fromUser) stickBottom = true
+        scrollChatToBottom(fromUser)
     }
 
-    /** 段落末尾的小操作：低调，但触摸目标要够大（原来点不准） */
-    private fun tinyOp(label: String, onTap: () -> Unit): TextView = TextView(this).apply {
-        text = label
-        textSize = 11.5f
-        setTextColor(pal.sub)
-        gravity = Gravity.CENTER
-        setPadding(dp(14), dp(7), dp(14), dp(7))
-        minHeight = dp(34)
-        minWidth = dp(66)
-        background = roundCard(this@MainActivity, pal.cardAlt, pal.border, 10)
+    /**
+     * 段落末尾的小操作：**手绘风图标**（用户要求不要文字按钮）。
+     * 触摸目标 ≥ 36dp；长按给一句人话说明，避免纯图标看不懂。
+     */
+    private fun iconOp(kind: String, desc: String, onTap: () -> Unit): ImageView = ImageView(this).apply {
+        setImageDrawable(LineIcon(kind, pal.sub, dp(2).toFloat()))
+        setPadding(dp(8), dp(8), dp(8), dp(8))
+        minimumWidth = dp(36)
+        minimumHeight = dp(36)
+        contentDescription = desc
+        background = pressable(roundCard(this@MainActivity, pal.cardAlt, pal.border, 10), 0x14000000)
         setOnClickListener { onTap() }
+        setOnLongClickListener { toast(desc); true }
     }
 
-    private fun copyToClip(v: String) {
+    private fun copyToClip(v: String, what: String = "") {
         runCatching {
             val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
             cm.setPrimaryClip(ClipData.newPlainText("hexora", v))
-            toast("已复制")
+            toast(if (what.isBlank()) "已复制" else "已复制$what")
         }.onFailure { toast("复制失败：${it.message}") }
     }
 
@@ -893,8 +924,8 @@ class MainActivity : AppCompatActivity(), GameUi {
         card.addView(LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.END
-            addView(tinyOp("打开授权页") { openExternal(url) })
-            addView(tinyOp("复制链接") { copyToClip(url) })
+            addView(iconOp("open", "用浏览器打开授权页") { openExternal(url) })
+            addView(iconOp("link", "复制授权链接") { copyToClip(url, "授权链接") })
         })
         val st = TextView(this).apply {
             text = "点完「创建 token」这里会自动变成已授权（流程最长等 10 分钟）"
@@ -1094,13 +1125,36 @@ class MainActivity : AppCompatActivity(), GameUi {
     }
 
     /** 同一帧内多次滚动请求合并：事件密集时不再反复 fullScroll（卡顿主因之一） */
-    private fun scrollChatToBottom() {
+    /**
+     * 滚到底。
+     *
+     * 原来只 post 一次 fullScroll —— 但新加进去的 View 这时**还没测量**，
+     * fullScroll 算出来的是「旧内容的底部」，所以看起来老是往上弹、不在底部。
+     * 现在：先等 chatList 布局，滚一次，再补一次（字体/图片异步测量完再对一次）。
+     *
+     * @param force true = 不管用户有没有往上翻，都强制贴底（发消息、切会话用）
+     */
+    private fun scrollChatToBottom(force: Boolean = false) {
+        if (!::chatList.isInitialized || !::chatScroll.isInitialized) return
+        if (!force && !stickBottom) return
         if (scrollPending) return
         scrollPending = true
-        chatScroll.post {
+        chatList.post {
             scrollPending = false
             chatScroll.fullScroll(View.FOCUS_DOWN)
+            chatList.post {
+                chatScroll.fullScroll(View.FOCUS_DOWN)
+                updateScrollBtn()
+            }
         }
+    }
+
+    /** 离底 80dp 内算「贴底」；据此决定新消息是否自动跟随、以及悬浮按钮是否出现 */
+    private fun updateScrollBtn() {
+        if (!::chatList.isInitialized || !::chatScroll.isInitialized) return
+        val gap = chatList.height - chatScroll.height - chatScroll.scrollY
+        stickBottom = gap <= dp(80)
+        scrollBtn?.visibility = if (stickBottom) View.GONE else View.VISIBLE
     }
 
     private fun updateAttachInfo() {
@@ -1505,7 +1559,16 @@ class MainActivity : AppCompatActivity(), GameUi {
     }
 
     private fun renderHistory() {
-        chatList.removeAllViews()
+        if (!::chatScroll.isInitialized) return
+        // 关键：**不要在已挂载的列表上「先清空、再逐条加」** —— 那样会空出一帧，
+        // 表现出来就是「对话莫名消失一下」。改成先在离屏的新列表里拼好，
+        // 最后一次换上去（同一帧内完成，不会闪）。
+        val old = chatList
+        val fresh = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(14), dp(12), dp(14), dp(12))
+        }
+        chatList = fresh
         for (m in history) {
             when (m.role) {
                 "user" -> addBubble(m.text ?: "（图片）", true)
@@ -1513,6 +1576,11 @@ class MainActivity : AppCompatActivity(), GameUi {
                 else -> addSystemLine(m.text ?: "")
             }
         }
+        chatScroll.removeAllViews()
+        chatScroll.addView(fresh)
+        old.removeAllViews()
+        stickBottom = true
+        scrollChatToBottom(true)
     }
 
     /** 第一条用户消息顺便当标题，省得一堆「新对话」 */
