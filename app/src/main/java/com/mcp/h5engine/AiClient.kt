@@ -313,6 +313,18 @@ class AiClient(private val cfg: ProviderConfig) {
                         (if (direct) " · 直连(已绕过系统代理)" else " · 走系统代理") + note
                     ChatReply(null, emptyList(), "HTTP ${r.code} ${text.take(600)}\n$diag")
                 } else {
+                    // 诊断：这个服务商到底给不给思考内容。
+                    // 不给的话，界面上再怎么改都不会有「思考文字」可显示 —— 该换模型，不是改 UI。
+                    runCatching {
+                        android.util.Log.i(
+                            "hexoraAi",
+                            "proto=" + cfg.provider.protocol + " model=" + cfg.model +
+                                " len=" + text.length +
+                                " reasoningLike=" + (text.contains("reasoning") ||
+                                text.contains("\"thinking\"")) +
+                                " head=" + text.take(240).replace("\n", " ")
+                        )
+                    }
                     parse(text)
                 }
             }
@@ -406,7 +418,9 @@ class AiClient(private val cfg: ProviderConfig) {
         private fun emitProgress(full: String) {
             val cb = onProgress ?: return
             if (full.isEmpty()) return
-            val think = jsonField(full, "reasoning_content") ?: jsonField(full, "reasoning")
+            val think = jsonField(full, "reasoning_content")
+                ?: jsonField(full, "reasoning")
+                ?: jsonField(full, "thinking")
             val text = jsonField(full, "content") ?: jsonField(full, "text")
             if (!think.isNullOrEmpty()) runCatching { cb("think", think) }
             if (!text.isNullOrEmpty()) runCatching { cb("text", text) }
@@ -911,6 +925,7 @@ class AiClient(private val cfg: ProviderConfig) {
         }
         val reason = msg.optString("reasoning_content", "")
             .ifBlank { msg.optString("reasoning", "") }
+            .ifBlank { msg.optString("thinking", "") }
         return ChatReply(
             textOfNode(msg.opt("content")),
             tcs,

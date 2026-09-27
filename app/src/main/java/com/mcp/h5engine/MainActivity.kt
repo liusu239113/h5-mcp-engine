@@ -50,6 +50,8 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.appcompat.view.ContextThemeWrapper
 import androidx.core.content.FileProvider
 import androidx.webkit.WebViewAssetLoader
+import androidx.webkit.WebViewCompat
+import androidx.webkit.WebViewFeature
 import org.json.JSONObject
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
@@ -157,15 +159,45 @@ private val GAME_MUTE_BOOTSTRAP = """
       try { t.pause(); } catch (e) {}
     }, true);
   } catch (e) {}
+  // 让引擎自己以为「切后台了」：Godot / Cocos / Phaser 这类引擎在 document.hidden
+  // 为 true 时会主动暂停音频 —— 比自己挨个去按 <audio> 稳得多。
+  try {
+    Object.defineProperty(document, 'hidden', {
+      configurable: true,
+      get: function(){ return !!muted; }
+    });
+    Object.defineProperty(document, 'visibilityState', {
+      configurable: true,
+      get: function(){ return muted ? 'hidden' : 'visible'; }
+    });
+  } catch (e) {}
+  window.__hexoraMuteNotify = function(){
+    try { document.dispatchEvent(new Event('visibilitychange')); } catch (e) {}
+    try { window.dispatchEvent(new Event('blur')); } catch (e) {}
+    try { window.dispatchEvent(new Event('pagehide')); } catch (e) {}
+  };
   window.__hexoraIsMuted = function(){ return muted; };
   window.__hexoraSetMuted = function(v){
     muted = !!v;
     for (var i = 0; i < gains.length; i++) { try { gains[i].gain.value = muted ? 0 : 1; } catch (e) {} }
     for (var j = 0; j < ctxs.length; j++) { try { muted ? ctxs[j].suspend() : ctxs[j].resume(); } catch (e) {} }
     if (muted) pauseMedia();
+    try { window.__hexoraMuteNotify(); } catch (e) {}
   };
 })();</script>
 """.trimIndent()
+
+/**
+ * 同一段闸门的「纯 JS」版本，给文档开始注入用。
+ *
+ * 为什么必须有这条路：页面自带的 Content-Security-Policy 会把我们插进 HTML 里的
+ * 内联 <script> 直接拒绝执行（「Refused to execute inline script」），
+ * 而 App 侧那句 window.__hexoraSetMuted && ... 又是静默失效的写法 ——
+ * 结果就是闸门压根没装上，切页 / 切后台照样响，还一个错都不报。
+ * 文档开始注入不受 CSP 限制，而且在每个 iframe 里都会执行。
+ */
+private val GAME_MUTE_BOOTSTRAP_JS: String =
+    GAME_MUTE_BOOTSTRAP.removePrefix("<script>").removeSuffix("</script>")
 
 /**
  * 把上面的静音闸门插进 HTML 响应里。
@@ -726,6 +758,15 @@ class MainActivity : AppCompatActivity(), GameUi {
                 audioPlayer?.let { mp -> if (mp.isPlaying) mp.stop(); mp.release() }
             }
             audioPlayer = null
+        }
+        // 诊断：闸门到底装上没有、页面上还有几路音频在播。
+        // logcat -s hexoraMute 就能看到，别再靠「听起来还在响」猜。
+        runCatching {
+            web.evaluateJavascript(
+                "(function(){try{var a=document.querySelectorAll('audio,video'),n=0;for(var i=0;i<a.length;i++){if(!a[i].paused)n++;}" +
+                    "return JSON.stringify({gate:!!window.__hexoraMuteInstalled,muted:(window.__hexoraIsMuted?window.__hexoraIsMuted():null)," +
+                    "media:a.length,playing:n,hidden:document.hidden,url:String(location.href).slice(0,90)});}catch(e){return 'ERR '+e;}})()"
+            ) { r -> android.util.Log.i("hexoraMute", "mute=" + mute + " " + r) }
         }
     }
 
@@ -4578,6 +4619,14 @@ makerRow1.addView(ghostBtnOf(ctx, pal, "扫码登录").apply {
             .addPathHandler("/lib/", WebViewAssetLoader.AssetsPathHandler(this))
             .build()
 
+        // 文档开始注入：CSP 拦不住、早于页面自己的脚本、每个 iframe 都会执行。
+        // 上面那条「插进 HTML」的老路继续留着（没 CSP 的页面走它更快），
+        // 两条路装的是同一段闸门，重复执行会被 __hexoraMuteInstalled 挡掉。
+        if (WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) {
+            runCatching {
+                WebViewCompat.addDocumentStartJavaScript(web, GAME_MUTE_BOOTSTRAP_JS, setOf("*"))
+            }
+        }
         web.webViewClient = object : WebViewClient() {
             override fun onPageFinished(view: WebView, url: String) {
                 super.onPageFinished(view, url)
