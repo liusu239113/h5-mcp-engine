@@ -3301,13 +3301,12 @@ makerRow1.addView(ghostBtnOf(ctx, pal, "扫码登录").apply {
                         } else {
                             makerOut.text = "✅ 授权链接（已尝试打开浏览器；也可长按复制）\n$u\n\n" +
                                 "登录后点「创建 token」，完成后这里会自动提示。"
-                            setTextIsSelectable(true)
+                            makerOut.setTextIsSelectable(true)
                             openExternal(u)
                         }
                     }
                 }.start()
             }
-        })
         }, LinearLayout.LayoutParams(-2, -2).apply { rightMargin = dp(8) })
         makerRow1.addView(ghostBtnOf(ctx, pal, "自检").apply {
             setOnClickListener { makerRun(listOf("doctor", "--json"), null, "Maker 自检") }
