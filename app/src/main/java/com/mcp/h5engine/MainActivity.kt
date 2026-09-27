@@ -1186,7 +1186,7 @@ class MainActivity : AppCompatActivity(), GameUi {
     // ==================== 拉取厂商真实模型列表 ====================
 
     /** 预设永远追不上厂商改名，这里直接问厂商「你现在有哪些模型」 */
-    private fun fetchModels(p: Provider) {
+    private fun fetchModels(p: Provider, onPicked: ((String) -> Unit)? = null) {
         val key = cfgStore.keyOf(p.id)
         if (key.isBlank() && !p.baseUrl.contains("127.0.0.1")) {
             toast("先在设置里填好 ${p.label} 的 Key")
@@ -1219,15 +1219,25 @@ class MainActivity : AppCompatActivity(), GameUi {
             }.getOrElse { emptyList() }
             main.post {
                 if (ids.isEmpty()) {
-                    toast("没拉到模型：可能是协议不支持（Anthropic / Gemini），或 Key / 地址不对")
+                    toast("没拉到（协议不支持或 Key/地址不对），先给预设清单")
+                    val presets = p.models.map { it.name }.toTypedArray()
+                    AlertDialog.Builder(themed())
+                        .setTitle("${p.label} 预设模型")
+                        .setItems(presets) { _, i ->
+                            cfgStore.setModel(p.id, presets[i])
+                            onPicked?.invoke(presets[i])
+                        }
+                        .setNegativeButton("关闭", null)
+                        .show()
                     return@post
                 }
                 AlertDialog.Builder(themed())
                     .setTitle("${p.label} 可用模型（${ids.size}）")
                     .setItems(ids.toTypedArray()) { _, i ->
                         cfgStore.setModel(p.id, ids[i])
+                        onPicked?.invoke(ids[i])
                         refreshHeader()
-                        toast("已记为 ${ids[i]}，设置页点「保存」即可生效")
+                        toast("已选 ${ids[i]}，设置页点「保存」即可生效")
                     }
                     .setNegativeButton("关闭", null)
                     .show()
@@ -1855,37 +1865,39 @@ class MainActivity : AppCompatActivity(), GameUi {
 
         // ---------- 模型 ----------
         section("模型")
-        val modelSp = android.widget.Spinner(ctx)
         val modelEt = input("模型名（可直接手填最新模型）", cfgStore.modelOf(curProvider.id))
         col.addView(modelEt, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(6) })
 
-        // 就在这里：模型配置旁边直接问厂商「你现在有哪些模型」
-        val fetchBtn = ghostBtnOf(ctx, pal, "拉取该厂商可用模型").apply {
-            setOnClickListener { fetchModels(curProvider) }
+        // 这个下拉本身就是「拉取可用模型」：点一下就去问厂商现在有哪些模型，
+        // 不再依赖写死的预设（预设永远追不上厂商改名/上新）。
+        val pickText = TextView(ctx).apply {
+            text = "从厂商拉取可用模型"
+            textSize = 13f
+            setTextColor(pal.text)
+            layoutParams = LinearLayout.LayoutParams(0, -2, 1f)
         }
-        col.addView(fetchBtn, LinearLayout.LayoutParams(-2, -2).apply { topMargin = dp(8) })
-
-        fun syncModels(p: Provider) {
-            modelSp.adapter = android.widget.ArrayAdapter(
-                ctx, android.R.layout.simple_spinner_dropdown_item,
-                p.models.map { "${it.label} · ${it.name}" }
-            )
-            // 注意：这里只能换数据源，绝不能 addView：
-            // syncModels 在“初始化”和“每次切厂商”都会被调用，
-            // 同一个 Spinner 被 addView 两次就会抛
-            // "The specified child already has a parent" 并直接闪退设置页。
+        val pickRow = LinearLayout(ctx).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(12), dp(9), dp(8), dp(9))
+            background = pressable(roundCard(ctx, pal.cardAlt, pal.border, 12), 0x14000000)
+            addView(pickText)
+            addView(TextView(ctx).apply {
+                text = "拉取"
+                textSize = 12.5f
+                setTextColor(pal.accent)
+                setPadding(dp(10), dp(2), dp(2), dp(2))
+            })
         }
-        // 视图只挂一次（用 spSpacer 包一层，风格与其它下拉一致）
-        col.addView(spSpacer(modelSp), LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(6) })
-        modelSp.onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {
-            override fun onItemSelected(
-                parent: android.widget.AdapterView<*>?, view: View?, pos: Int, id: Long
-            ) {
-                curProvider.models.getOrNull(pos)?.let { modelEt.setText(it.name) }
+        pickRow.setOnClickListener {
+            fetchModels(curProvider) { picked ->
+                modelEt.setText(picked)
+                pickText.text = "已选 · $picked"
+                pickText.setTextColor(pal.accent)
             }
-
-            override fun onNothingSelected(parent: android.widget.AdapterView<*>?) {}
         }
+        col.addView(pickRow, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(6) })
+
 
         // ---------- 视觉策略 ----------
         section("视觉能力（截图能否直接给模型看）")
@@ -1941,8 +1953,6 @@ class MainActivity : AppCompatActivity(), GameUi {
         }
         col.addView(fbCb, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(8) })
 
-        // 初始化：先同步一次模型列表
-        syncModels(curProvider)
 
         provSp.onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {
             override fun onItemSelected(
@@ -1954,7 +1964,6 @@ class MainActivity : AppCompatActivity(), GameUi {
                 keyEt.setText(cfgStore.keyOf(curProvider.id))
                 modelEt.setText(cfgStore.modelOf(curProvider.id))
                 testResult.text = ""
-                syncModels(curProvider)
             }
 
             override fun onNothingSelected(parent: android.widget.AdapterView<*>?) {}
