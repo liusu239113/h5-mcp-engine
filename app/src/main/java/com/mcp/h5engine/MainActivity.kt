@@ -240,18 +240,22 @@ class MainActivity : AppCompatActivity(), GameUi {
         mcpBusy = true
         Thread {
             fun say(s: String) = main.post { addSystemLine(s) }
-            try {
-                val hub = McpBoot.ensure(this) { s -> say(s) }
-                if (hub == null) {
-                    say("MCP：未启动（可在 设置 → MCP 服务器 里检查）")
-                } else {
-                    say("MCP 已就绪：${hub.lastInfo}，AI 可直接调用这些工具")
-                    // 常驻前台服务：防止切后台被冻结/回收时把本地 node 服务一起带走
-                    McpGuardService.start(this)
-                }
-            } finally {
-                mcpBusy = false
+            // 让独立进程里的守护负责 node 的生死（主界面被冻结也不影响它）
+            McpGuardService.start(this)
+
+            // 独立进程把 node 拉起来需要几秒，这里带重试，避免「启动瞬间没就绪」被误判失败
+            var hub: McpHub? = null
+            for (attempt in 1..6) {
+                hub = McpBoot.ensure(this) { }
+                if (hub != null && hub.size > 0) break
+                Thread.sleep(if (attempt == 1) 3000L else 5000L)
             }
+            if (hub != null && hub.size > 0) {
+                say("MCP 已就绪：${hub.lastInfo}，AI 可直接调用这些工具")
+            } else {
+                say("MCP：暂未连上，守护会在后台自动重试（也可到 设置 → MCP 服务器 点「刷新状态」）")
+            }
+            mcpBusy = false
         }.start()
     }
 
