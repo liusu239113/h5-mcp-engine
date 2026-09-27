@@ -1,0 +1,50 @@
+:root {
+  /* 星塔霓虹：星夜紫底 + 霓虹青绿 / 霓虹蓝 + 金色高光。
+     令牌来自一款真实上线的竖屏回合制 Roguelite（夜底 #06030F/#120A2E/#1B1040、
+     霓虹青绿 #66E28A/#5FE8A0、霓虹蓝 #7FD3FF、金 #FFD166、橙 #FF7043、红 #FF4757、紫 #6C5CE7）。
+     气质关键词：日系赛璐璐 + 霓虹高光 + 深色底 UI。 */
+  --hx-bg: #0a0618;
+  --hx-bg-image: linear-gradient(160deg, #120a2e 0%, #06030f 55%, #1b1040 100%);
+  --hx-panel: rgba(255, 255, 255, .05);
+  --hx-panel-2: rgba(255, 255, 255, .03);
+  --hx-border: rgba(127, 211, 255, .35);
+  --hx-border-w: 1px;
+  --hx-radius: 12px;
+  --hx-radius-sm: 8px;
+  --hx-corner: none;
+  --hx-text: #e8f0ff;
+  --hx-text-dim: #aab6cc;
+  --hx-accent: #66e28a;
+  --hx-accent-2: #7fd3ff;
+  --hx-on-accent: #06030f;
+  --hx-danger: #ff4757;
+  --hx-ok: #50c878;
+
+  --hx-gold: #ffd166;     /* 曜神 / 高稀有 / 奖励 */
+  --hx-orange: #ff7043;   /* 警告 / 火属性 */
+  --hx-violet: #6c5ce7;   /* 神秘 / 命途 */
+
+  /* 霓虹的关键：阴影带颜色，等于"发光" */
+  --hx-shadow: 0 0 18px rgba(102, 226, 138, .25);
+  --hx-shadow-btn: 0 0 12px rgba(102, 226, 138, .35);
+
+  --hx-btn-bg: rgba(102, 226, 138, .10);
+  --hx-btn-border: rgba(102, 226, 138, .45);
+  --hx-btn-text: #e8f0ff;
+  --hx-blur: blur(8px);
+  --hx-mask: rgba(6, 3, 15, .72);
+  --hx-pad: 14px;
+  --hx-gap: 12px;
+  --hx-font: "PingFang SC", "HarmonyOS Sans", "Noto Sans CJK SC", system-ui, sans-serif;
+  --hx-font-title: var(--hx-font);
+  --hx-title-w: 800;
+  --hx-title-ls: .08em;
+  --hx-btn-ls: .06em;
+  --hx-img-render: auto;
+  --hx-transition: all .16s ease-out;
+}
+
+/* 霓虹标题：字面带光晕，日系标题的常见处理 */
+.hx-root .hx-title {
+  text-shadow: 0 0 10px rgba(102, 226, 138, .45), 0 0 22px rgba(127, 211, 255, .25);
+}

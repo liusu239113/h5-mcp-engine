@@ -147,6 +147,16 @@ private val GAME_MUTE_BOOTSTRAP = """
       if (window.webkitAudioContext) window.webkitAudioContext = PatchedAC;
     } catch (e) {}
   }
+  // 兜底：有些播放是内核按 autoplay 属性自己触发的，根本不经过我们补丁过的
+  // HTMLMediaElement.prototype.play()。监听 play 事件（捕获阶段），静音期间一律按停。
+  try {
+    document.addEventListener('play', function(ev){
+      if (!muted) return;
+      var t = ev.target;
+      try { t.muted = true; } catch (e) {}
+      try { t.pause(); } catch (e) {}
+    }, true);
+  } catch (e) {}
   window.__hexoraIsMuted = function(){ return muted; };
   window.__hexoraSetMuted = function(v){
     muted = !!v;
@@ -449,6 +459,9 @@ class MainActivity : AppCompatActivity(), GameUi {
         runCatching { persistSessions() }
         // 退到后台也别继续响：预览是常驻的 WebView，游戏音效不会自己停
         applyPreviewMute(true)
+        // 后台里页面还会继续走定时器、可能起新的音频，隔一会儿再压一次；
+        // 用 hasWindowFocus() 兜住「用户已经切回前台停在预览页」的情况，别误静音。
+        main.postDelayed({ if (!hasWindowFocus()) runCatching { applyPreviewMute(true) } }, 600)
         // 窗口不可见时 WebView 会节流甚至暂停页面里的 JS 定时器，
         // 这里显式续期一次，尽量让游戏循环继续跑（配合前台服务保活）
         if (::web.isInitialized) {
@@ -666,6 +679,9 @@ class MainActivity : AppCompatActivity(), GameUi {
         // 不主动静音的话，游戏 BGM / 音效会在「对话」「发布」页一直响下去。
         // 只有停在预览页时才允许发声；切走立刻掐掉。
         applyPreviewMute(tab != 1)
+        // 补一刀：游戏可能在「切页瞬间」刚起了一段音（定时器 / 场景切换），
+        // 单次静音会漏掉这一声，350ms 后再对一次表。
+        if (tab != 1) main.postDelayed({ if (activeTab != 1) applyPreviewMute(true) }, 350)
         if (tab == 1) ensurePreviewFresh()
         if (tab == 2) refreshExportRow()
     }
@@ -681,9 +697,25 @@ class MainActivity : AppCompatActivity(), GameUi {
     private fun applyPreviewMute(mute: Boolean) {
         previewMuted = mute
         if (::web.isInitialized) {
-            runCatching {
-                web.evaluateJavascript("window.__hexoraSetMuted&&window.__hexoraSetMuted($mute);", null)
-            }
+            // 不再依赖注入的闸门（那条通道一旦没走到，`&&` 会静默失效）。
+            // 这里自己把 audio/video 揪出来按停（含 iframe 递归），并记录
+            // 「哪些 muted 是我们设的」，恢复时只还这几个，不碰游戏自己的静音。
+            val js = "(function(m){" +
+                "try{if(window.__hexoraSetMuted)window.__hexoraSetMuted(m);}catch(e){}" +
+                "function kill(d){" +
+                "try{" +
+                "var a=d.querySelectorAll('audio,video');" +
+                "for(var i=0;i<a.length;i++){var el=a[i];" +
+                "if(m){try{if(!el.muted){el.__hexMuteSet=1;}el.muted=true;el.pause();}catch(e){}}" +
+                "else{try{if(el.__hexMuteSet){el.muted=false;el.__hexMuteSet=0;}}catch(e){}}" +
+                "}" +
+                "var f=d.querySelectorAll('iframe,frame');" +
+                "for(var j=0;j<f.length;j++){try{if(f[j].contentDocument){kill(f[j].contentDocument);}}catch(e){}}" +
+                "}catch(e){}" +
+                "}" +
+                "kill(document);" +
+                "})($mute);"
+            runCatching { web.evaluateJavascript(js, null) }
         }
         // 试听用的 MediaPlayer 也一起收掉，别和预览里的声音叠在一起
         if (mute) {
@@ -4490,7 +4522,9 @@ makerRow1.addView(ghostBtnOf(ctx, pal, "扫码登录").apply {
 
         val loader = WebViewAssetLoader.Builder()
             .setDomain("appassets.androidplatform.net")
-            .addPathHandler("/assets/", WebViewAssetLoader.AssetsPathHandler(this))
+            // 同样包一层静音闸门：引擎自带页面 / 示例页也是 HTML。
+            // 漏掉这条通道的话，从 /assets/ 进来的页面切页后照样会响。
+            .addPathHandler("/assets/", GameMuteInjectHandler(WebViewAssetLoader.AssetsPathHandler(this)))
             .addPathHandler(
                 "/games/",
                 // 包一层：每个游戏 HTML 的最前面插入「静音闸门」，
@@ -4806,6 +4840,17 @@ makerRow1.addView(ghostBtnOf(ctx, pal, "扫码登录").apply {
                 assets.open("adkit/$n").use { input ->
                     File(dir, n).outputStream().use { input.copyTo(it) }
                 }
+            }
+        }
+        // 技能手册：像素美术生成器 / 游戏 UI 设计规范。
+        // AI 用 game_read 直接读（_skills/ 是用户可读可改的技能目录）。
+        // 只补不覆盖 —— 用户自己改过或删掉的，别每次启动又塞回去。
+        runCatching {
+            val sk = File(gameRoot, "_skills").apply { mkdirs() }
+            for (n in assets.list("skills")?.toList().orEmpty()) {
+                val out = File(sk, n)
+                if (out.exists()) continue
+                assets.open("skills/$n").use { input -> out.outputStream().use { input.copyTo(it) } }
             }
         }
     }

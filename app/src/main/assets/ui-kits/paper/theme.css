@@ -1,0 +1,51 @@
+:root {
+  /* 手绘童话：奶油纸黄底 + 橙棕手绘描线 + 靛蓝点缀。
+     令牌来自一款真实上线的「手绘看图猜梗」游戏源码里的 COLORS 表
+     （paper 255,247,222 / cream 252,239,199 / blue 72,142,196）。
+     气质关键词：暖、软、手绘、像一本童话书。 */
+  --hx-bg: #fff7de;
+  --hx-bg-image: linear-gradient(180deg, #fffae7 0%, #fff7de 55%, #fff2cb 100%);
+  --hx-panel: #fffdf5;
+  --hx-panel-2: #fff2cb;
+  --hx-border: rgba(173, 106, 44, .55);
+  --hx-border-w: 2px;
+  --hx-radius: 14px;
+  --hx-radius-sm: 10px;
+  --hx-corner: none;
+  --hx-text: #55422e;
+  --hx-text-dim: rgba(85, 66, 46, .62);
+  --hx-accent: #488ec4;
+  --hx-accent-2: #31699b;
+  --hx-on-accent: #ffffff;
+  --hx-danger: #c0392b;
+  --hx-ok: #4db563;
+
+  /* 本风格附加令牌 */
+  --hx-paper: #fff7de;
+  --hx-cream: #fcefc7;
+  --hx-amber: #f9c86b;   /* 暖橙：奖励 / 高光 */
+  --hx-amber-deep: #a55625;
+  --hx-ink: rgba(173, 106, 44, .55);  /* 手绘描线 */
+
+  /* 落地感而不是硬投影：像铅笔画的影子 */
+  --hx-shadow: 0 4px 0 rgba(173, 106, 44, .22);
+  --hx-shadow-btn: 0 3px 0 rgba(173, 106, 44, .28);
+
+  --hx-btn-bg: #fffdf5;
+  --hx-btn-border: rgba(173, 106, 44, .55);
+  --hx-btn-text: #55422e;
+  --hx-blur: blur(0px);
+  --hx-mask: rgba(85, 66, 46, .5);
+  --hx-pad: 14px;
+  --hx-gap: 12px;
+  --hx-font: "PingFang SC", "HarmonyOS Sans", "Noto Sans CJK SC", system-ui, sans-serif;
+  --hx-font-title: var(--hx-font);
+  --hx-title-w: 800;
+  --hx-title-ls: .03em;
+  --hx-btn-ls: .04em;
+  --hx-img-render: auto;
+  --hx-transition: all .16s ease-out;
+}
+
+/* 手绘感：按下轻轻下沉，不要弹跳过头 */
+.hx-root .hx-btn:active { transform: translateY(2px); box-shadow: 0 1px 0 rgba(173, 106, 44, .3); }

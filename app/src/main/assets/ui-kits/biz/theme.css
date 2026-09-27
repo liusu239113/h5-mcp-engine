@@ -1,0 +1,51 @@
+:root {
+  /* 经营报表：浅灰底 + 白卡片 + 深蓝主色 + Material 语义色。
+     令牌来自一款真实上线的经营模拟（绿 #4caf50、橙 #ff9800、红 #f44336、
+     金 #ffd700、深蓝 #1565c0、亮蓝 #2196f3、紫 #9c27b0、深蓝底 #1a237e）。
+     气质关键词：清楚、好读、像一份能看懂的经营报表。 */
+  --hx-bg: #f4f6f8;
+  --hx-bg-image: linear-gradient(180deg, #ffffff 0%, #f4f6f8 40%, #eef1f5 100%);
+  --hx-panel: #ffffff;
+  --hx-panel-2: #f7f9fb;
+  --hx-border: #e0e4e8;
+  --hx-border-w: 1px;
+  --hx-radius: 8px;
+  --hx-radius-sm: 6px;
+  --hx-corner: none;
+  --hx-text: #1a2330;
+  --hx-text-dim: #6b7785;
+  --hx-accent: #1565c0;
+  --hx-accent-2: #2196f3;
+  --hx-on-accent: #ffffff;
+  --hx-danger: #d32f2f;
+  --hx-ok: #2e7d32;
+
+  /* 语义色：经营类界面靠颜色区分指标好坏，必须统一 */
+  --hx-good: #4caf50;    /* 上升 / 盈利 / 达标 */
+  --hx-warn: #ff9800;    /* 注意 / 持平 */
+  --hx-bad: #f44336;     /* 下降 / 亏损 / 风险 */
+  --hx-gold: #ffd700;    /* 金钱 / 奖励 */
+  --hx-violet: #9c27b0;  /* 声望 / 特殊 */
+
+  --hx-shadow: 0 2px 8px rgba(21, 101, 192, .10);
+  --hx-shadow-btn: 0 1px 3px rgba(21, 101, 192, .16);
+
+  --hx-btn-bg: #ffffff;
+  --hx-btn-border: #e0e4e8;
+  --hx-btn-text: #1a2330;
+  --hx-blur: blur(0px);
+  --hx-mask: rgba(26, 35, 48, .45);
+  --hx-pad: 14px;
+  --hx-gap: 10px;
+  --hx-font: "PingFang SC", "HarmonyOS Sans", "Noto Sans CJK SC", system-ui, sans-serif;
+  --hx-font-title: var(--hx-font);
+  --hx-title-w: 700;
+  --hx-title-ls: .01em;
+  --hx-btn-ls: .02em;
+  --hx-img-render: auto;
+  --hx-transition: all .15s ease-out;
+}
+
+/* 数值升降：绿涨红跌，还要带箭头，别只靠颜色（色盲也要能看懂） */
+.hx-root .hx-up { color: var(--hx-good); }
+.hx-root .hx-down { color: var(--hx-bad); }

@@ -1,0 +1,46 @@
+:root {
+  /* 暗夜勇者：暗紫夜底 + 青绿描边 + 暖金奖励。
+     令牌来自一款真实上线的英雄养成 RPG（暗紫 #1b1b3a/#3a3a6a、青绿 #8fe2d8/#20b293、
+     金 #ffd93d、紫 #6c5ce7）。适合编队 / 放置 / 中世纪奇幻题材。 */
+  --hx-bg: #12102a;
+  --hx-bg-image: linear-gradient(180deg, #1b1b3a 0%, #14122e 55%, #0d0c1f 100%);
+  --hx-panel: rgba(58, 58, 106, .45);
+  --hx-panel-2: rgba(27, 27, 58, .62);
+  --hx-border: rgba(108, 92, 231, .50);
+  --hx-border-w: 1px;
+  --hx-radius: 10px;
+  --hx-radius-sm: 8px;
+  --hx-corner: none;
+  --hx-text: #eef0ff;
+  --hx-text-dim: #a0a0c0;
+  --hx-accent: #8fe2d8;
+  --hx-accent-2: #20b293;
+  --hx-on-accent: #0d0c1f;
+  --hx-danger: #ff6b6b;
+  --hx-ok: #5faf6f;
+
+  --hx-gold: #ffd93d;     /* 传说 / 升星 / 奖励 */
+  --hx-violet: #6c5ce7;   /* 魔法 / 稀有 */
+  --hx-steel: #6faacc;    /* 装备 / 信息 */
+
+  --hx-shadow: 0 6px 20px rgba(0, 0, 0, .45);
+  --hx-shadow-btn: 0 4px 12px rgba(0, 0, 0, .40);
+
+  --hx-btn-bg: rgba(108, 92, 231, .22);
+  --hx-btn-border: rgba(143, 226, 216, .45);
+  --hx-btn-text: #eef0ff;
+  --hx-blur: blur(0px);
+  --hx-mask: rgba(6, 5, 18, .68);
+  --hx-pad: 14px;
+  --hx-gap: 12px;
+  --hx-font: "PingFang SC", "HarmonyOS Sans", "Noto Sans CJK SC", system-ui, sans-serif;
+  --hx-font-title: var(--hx-font);
+  --hx-title-w: 700;
+  --hx-title-ls: .04em;
+  --hx-btn-ls: .04em;
+  --hx-img-render: auto;
+  --hx-transition: all .18s ease-out;
+}
+
+/* 稀有度/品质色带：品质色必须能在暗底上分辨 */
+.hx-root .hx-badge--gold { color: #ffd93d; border-color: rgba(255, 217, 61, .55); }

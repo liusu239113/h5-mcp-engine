@@ -1,0 +1,47 @@
+:root {
+  /* 古卷暖褐：暗褐卷底 + 暗金描线 + 玉绿 / 朱红点缀。
+     令牌来自一款真实上线的「大明人生模拟」（底色 #28231e/#322d23/#3c3228、
+     淡金 #b49650、亮金 #ffd700、玉绿 #b4dca0、朱红 #ff5050、宣纸字色 #dcc8aa）。
+     和 ink（水墨宣纸·浅底）不同，这套是**暗底古卷**，更适合"夜里看卷宗"的厚重感。 */
+  --hx-bg: #24201a;
+  --hx-bg-image: linear-gradient(180deg, #2a241c 0%, #24201a 50%, #1e1a15 100%);
+  --hx-panel: rgba(60, 50, 40, .80);
+  --hx-panel-2: #322d23;
+  --hx-border: rgba(180, 150, 80, .45);
+  --hx-border-w: 1px;
+  --hx-radius: 6px;
+  --hx-radius-sm: 4px;
+  --hx-corner: none;
+  --hx-text: #dcc8aa;
+  --hx-text-dim: rgba(220, 200, 170, .60);
+  --hx-accent: #b4a064;
+  --hx-accent-2: #ffd700;
+  --hx-on-accent: #24201a;
+  --hx-danger: #ff5050;
+  --hx-ok: #b4dca0;
+
+  --hx-jade: #b4dca0;    /* 玉绿：民生 / 正向 */
+  --hx-cinnabar: #ff5050; /* 朱红：弹劾 / 危险 */
+  --hx-gold: #ffd700;     /* 圣眷 / 功名 */
+
+  --hx-shadow: 0 2px 10px rgba(0, 0, 0, .50);
+  --hx-shadow-btn: 0 2px 6px rgba(0, 0, 0, .45);
+
+  --hx-btn-bg: rgba(60, 50, 40, .70);
+  --hx-btn-border: rgba(180, 150, 80, .50);
+  --hx-btn-text: #dcc8aa;
+  --hx-blur: blur(0px);
+  --hx-mask: rgba(20, 17, 13, .70);
+  --hx-pad: 14px;
+  --hx-gap: 10px;
+  --hx-font: "Songti SC", "Noto Serif CJK SC", "Source Han Serif SC", serif;
+  --hx-font-title: var(--hx-font);
+  --hx-title-w: 700;
+  --hx-title-ls: .08em;
+  --hx-btn-ls: .06em;
+  --hx-img-render: auto;
+  --hx-transition: all .18s ease-out;
+}
+
+/* 数字与年份用等宽感，读卷宗的"账册味" */
+.hx-root .hx-num { font-variant-numeric: tabular-nums; letter-spacing: .02em; }
