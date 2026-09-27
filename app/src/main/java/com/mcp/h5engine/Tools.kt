@@ -70,6 +70,31 @@ class EngineTools(private val ui: GameUi, private val root: File) {
         var mcpAllowed: Boolean = false
 
         /**
+         * 写 / 发布类 MCP 工具黑名单 —— 真正常驻挡住的只有这些。
+         *
+         * 为什么从「白名单放行」改成「黑名单拦住」：
+         * 以前是「默认全关 + 关键词放行」，只要用户说法和词表差一个字（比如他说「看看我的开发者应用」，
+         * 词表里只有「应用信息」），App 就当没这回事，AI 那边连工具**声明**都收不到，
+         * 只能回「未知工具 / 我没有这个能力」—— 它没撒谎，是我们没递过去，
+         * 用户看到的就是「这功能时好时坏」。
+         *
+         * 现在反过来：只读查询、引导文档、素材生成全部常驻；
+         * 剩下这些会改线上数据 / 发布上线的，才需要用户明确意图（或一句「可以」）才放行。
+         * 原因还是那条：TapTap 部分接口会**顺带把游戏发布上线**，回执不提示。
+         */
+        val MCP_WRITE_TOOLS = setOf(
+            // H5 上传 / 发布链路
+            "mcp_upload_h5_game", "mcp_update_app_info", "mcp_create_app", "mcp_create_developer",
+            "mcp_clear_auth_data", "mcp_upload_image",
+            // 排行榜写操作
+            "mcp_create_leaderboard", "mcp_publish_leaderboard",
+            // 社区写操作
+            "mcp_like_current_app_review", "mcp_reply_current_app_review",
+            // Maker 侧写操作
+            "mcp_maker_build_current_directory", "mcp_add_test_whitelist", "mcp_confirm_character_voice"
+        )
+
+        /**
          * App 上下文（MainActivity 注入）。
          * Maker 的授权与凭据检查要跑 CLI、读 pat.json，必须有 Context。
          */
@@ -182,7 +207,10 @@ class EngineTools(private val ui: GameUi, private val root: File) {
     fun specs(allow: Set<String>? = null): List<JSONObject> {
         val base = if (allow.isNullOrEmpty()) allSpecs
         else allSpecs.filter { allow.contains(it.getJSONObject("function").getString("name")) }
-        val extra = if (mcpAllowed) (mcp?.specs() ?: emptyList()) else emptyList()
+        val extra = mcp?.specs()?.filter {
+            val n = it.getJSONObject("function").getString("name")
+            mcpAllowed || !MCP_WRITE_TOOLS.contains(n)
+        } ?: emptyList()
         return if (extra.isEmpty()) base else base + extra
     }
 
@@ -191,10 +219,20 @@ class EngineTools(private val ui: GameUi, private val root: File) {
     // ==================== 执行 ====================
 
     fun call(name: String, argsJson: String): ToolResult {
-        // MCP 工具（TapTap 等）转给对应服务器；但**默认不放行** —— 模型可能凭记忆猜工具名，
-        // 猜中就等于绕过了「默认不给工具」的闸门。
-        if (mcpAllowed) {
-            mcp?.let { hub -> if (hub.handles(name)) return ToolResult(hub.call(name, argsJson)) }
+        // MCP 工具（TapTap / Maker）转给对应服务器。
+        // 只读类常驻；写 / 发布类要用户放行 —— 模型可能凭记忆猜工具名，猜中就等于绕过闸门，
+        // 所以这里也要拦，并且把「为什么不能调」直说给它，免得它转头跟用户说「我没有这个能力」。
+        mcp?.let { hub ->
+            if (hub.handles(name)) {
+                if (mcpAllowed || !MCP_WRITE_TOOLS.contains(name)) {
+                    return ToolResult(hub.call(name, argsJson))
+                }
+                return ToolResult(
+                    "「$name」属于写 / 发布类接口，本轮没有放行（TapTap 侧有些接口会顺带把游戏发布上线，回执不提示）。" +
+                        "正确做法：先用一句话告诉用户你打算做什么、会改动什么，等他明确同意" +
+                        "（他说「可以 / 好 / 确认」这类，下一轮工具就会放行给你）。"
+                )
+            }
         }
         return try {
             exec(name, runCatching { JSONObject(argsJson) }.getOrDefault(JSONObject()))

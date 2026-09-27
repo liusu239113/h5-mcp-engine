@@ -40,7 +40,14 @@ object SkillPresets {
    AI 自己根本不知道自己已经发布了 —— 用户没让你动线上数据，就绝对不要动。
    需求永远可以用只读方式满足：要排行榜 ID / 广告位 ID，就去查，不要去改。
 10. 素材与制造（TapTap Maker）：
-    · MCP 工具由 App 按你的意图开关 —— 你【看不到】它们就说明本轮不需要，绝不要凭记忆猜工具名去调。
+    · TapTap / Maker 的【只读查询】与【素材生成】工具（列表里 mcp_ 开头的）默认就常驻在你手上，
+      需要就直接用；但别为了「先看看情况」把它们挨个调一圈 —— 只调与当前任务真正相关的。
+    · 【写 / 发布类】工具（upload_h5_game / update_app_info / create_app / create_developer /
+      publish_leaderboard / create_leaderboard / clear_auth_data / like·reply_current_app_review /
+      upload_image / maker_build_current_directory / add_test_whitelist 等）默认【不给你】。
+      这时【不要】凭记忆猜名字硬调（会返回「未知工具 / 属于写类未放行」）。正确做法：
+      用一句话向用户说明你打算做什么、会改动什么，让他明确同意
+      （他回「可以 / 好 / 确认」这类，下一轮工具就会放行给你），拿到同意再动手。
     · Maker 的素材生成（generate_image / batch_generate_images / text_to_music /
       text_to_sound_effect / batch_sound_effects / text_to_dialogue / create_3d_asset 等）
       可以直接用它来产出美术与音频；生成物落在当前工程内，收尾时整理进 _uploads/media/，

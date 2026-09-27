@@ -559,6 +559,19 @@ class MainActivity : AppCompatActivity(), GameUi {
 
     // ==================== 对话页 ====================
 
+    /**
+     * 短肯定句 = 用户同意（用来放行 MCP 写 / 发布类工具）。
+     *
+     * 「可以」「好」「确认」这种回复本身不含任何领域关键词，
+     * 光靠关键词表永远放行不了写接口 —— 用户明明答应了，AI 还是动不了，又是一轮来回。
+     */
+    private fun shortOK(text: String): Boolean {
+        val t = text.trim().lowercase()
+        if (t.isEmpty() || t.length > 12) return false
+        return listOf("可以", "好的", "好吧", "行", "确认", "同意", "没问题", "ok", "yes", "嗯")
+            .any { t.contains(it) }
+    }
+
     private fun buildChatPage(): LinearLayout {
         val page = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -1283,13 +1296,16 @@ class MainActivity : AppCompatActivity(), GameUi {
             Regex(
                 "(生成|画|做|出|来|弄|搞)[^。！？.!?\\n]{0,8}" +
                     "(图|立绘|插画|图标|贴图|背景|美术|音乐|配乐|音效|配音|语音|视频|3d|三维|素材)"
-            ).containsMatchIn(text.lowercase())
+            ).containsMatchIn(text.lowercase()) ||
+            // AI 问你「要不要我现在上传 / 发布？」你回一句「可以」——这也得算同意。
+            // 这种回复本身不含任何领域关键词，光靠词表永远放行不了写接口，又是一轮来回。
+            shortOK(text)
         EngineTools.mcpAllowed = mcpWanted
         if (mcpWanted) {
-            addSystemLine("本轮已放行 TapTap / Maker 工具：只读查询与素材生成可直接做；构建、上传、发布这类写操作它会先问你")
+            addSystemLine("本轮已放行 TapTap / Maker 的写 / 发布类接口（上传、发布、改信息等）；它动手前仍会先跟你确认")
         } else if (EngineTools.mcp != null) {
-            // 不打扰：只在确实连着服务时提一句，让你知道它不是坏了，而是被纪律锁着
-            android.util.Log.i("Hexora", "本轮未放行 MCP 工具（无相关意图）")
+            // 只读查询与素材生成是常驻的，不需要放行；这里只是日志：写类本轮还锁着
+            android.util.Log.i("Hexora", "本轮未放行 MCP 写 / 发布类工具（无明确同意）")
         }
 
         val skill =
