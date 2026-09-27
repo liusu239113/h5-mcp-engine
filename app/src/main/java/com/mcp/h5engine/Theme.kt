@@ -14,9 +14,13 @@ import android.widget.TextView
 
 enum class ThemeMode { LIGHT, DARK, AUTO }
 
+/** 中等字重：标题用它，比 DEFAULT_BOLD 少三分火气 */
+val MEDIUM: Typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+
 /**
- * 手绘简洁风配色：米白纸感底 + 圆角卡片 + 薄荷绿点缀。
- * 浅色是默认，深色是可选，不再是「黑黢黢」。
+ * 配色口径：中性纸感底 + 纯白卡面 + 一道发丝级描边 + 唯一强调色（深松石绿）。
+ * 不用渐变、不用高饱和色块、不用表情符号：
+ * 质感靠字距、留白、细描边和克制的对比度来做。
  */
 data class Palette(
     val dark: Boolean,
@@ -45,52 +49,52 @@ data class Palette(
     companion object {
         val LIGHT = Palette(
             dark = false,
-            bg = 0xFFFAF7F2.toInt(),
+            bg = 0xFFF5F5F3.toInt(),
             card = 0xFFFFFFFF.toInt(),
-            cardAlt = 0xFFF4F0E9.toInt(),
-            border = 0xFFE7E0D4.toInt(),
-            text = 0xFF2A2925.toInt(),
-            sub = 0xFF7A7469.toInt(),
-            faint = 0xFFA9A296.toInt(),
-            accent = 0xFF12BFA3.toInt(),
-            accentSoft = 0xFFE3F6F2.toInt(),
+            cardAlt = 0xFFF0F0EE.toInt(),
+            border = 0xFFE3E3E0.toInt(),
+            text = 0xFF1A1A1A.toInt(),
+            sub = 0xFF6B6B68.toInt(),
+            faint = 0xFF9C9C98.toInt(),
+            accent = 0xFF12695C.toInt(),
+            accentSoft = 0xFFE7F0EE.toInt(),
             onAccent = 0xFFFFFFFF.toInt(),
-            userBubble = 0xFFDAF1EC.toInt(),
-            userText = 0xFF17332E.toInt(),
+            userBubble = 0xFFE7F0EE.toInt(),
+            userText = 0xFF12302B.toInt(),
             aiBubble = 0xFFFFFFFF.toInt(),
-            aiText = 0xFF33322D.toInt(),
-            errBg = 0xFFFDECEA.toInt(),
-            errText = 0xFFB3352A.toInt(),
-            codeBg = 0xFFF4F0E9.toInt(),
-            codeText = 0xFF6A6355.toInt(),
+            aiText = 0xFF232323.toInt(),
+            errBg = 0xFFFBEDEB.toInt(),
+            errText = 0xFF9A2F22.toInt(),
+            codeBg = 0xFFF0F0EE.toInt(),
+            codeText = 0xFF5A5A57.toInt(),
             navBg = 0xFFFFFFFF.toInt(),
-            navActive = 0xFF12BFA3.toInt(),
-            navIdle = 0xFF9A948A.toInt()
+            navActive = 0xFF12695C.toInt(),
+            navIdle = 0xFF8E8E8A.toInt()
         )
 
         val DARK = Palette(
             dark = true,
-            bg = 0xFF16181C.toInt(),
-            card = 0xFF1E2126.toInt(),
-            cardAlt = 0xFF262A30.toInt(),
-            border = 0xFF333941.toInt(),
-            text = 0xFFECEDEF.toInt(),
-            sub = 0xFF9BA1AA.toInt(),
-            faint = 0xFF6E747D.toInt(),
-            accent = 0xFF3BD6BC.toInt(),
-            accentSoft = 0xFF1D3A36.toInt(),
+            bg = 0xFF0F1011.toInt(),
+            card = 0xFF171819.toInt(),
+            cardAlt = 0xFF1E1F21.toInt(),
+            border = 0xFF2A2C2E.toInt(),
+            text = 0xFFEDEDED.toInt(),
+            sub = 0xFF9A9A9A.toInt(),
+            faint = 0xFF6C6C6C.toInt(),
+            accent = 0xFF4FCFB4.toInt(),
+            accentSoft = 0xFF14302C.toInt(),
             onAccent = 0xFF06231E.toInt(),
-            userBubble = 0xFF24463F.toInt(),
-            userText = 0xFFD7F2EC.toInt(),
-            aiBubble = 0xFF22262C.toInt(),
-            aiText = 0xFFECEDEF.toInt(),
-            errBg = 0xFF3A2326.toInt(),
-            errText = 0xFFFF9A93.toInt(),
-            codeBg = 0xFF262A30.toInt(),
-            codeText = 0xFFB9C0C8.toInt(),
-            navBg = 0xFF1B1E22.toInt(),
-            navActive = 0xFF3BD6BC.toInt(),
-            navIdle = 0xFF828892.toInt()
+            userBubble = 0xFF1B3733.toInt(),
+            userText = 0xFFD3EFE9.toInt(),
+            aiBubble = 0xFF1B1C1E.toInt(),
+            aiText = 0xFFE9E9E9.toInt(),
+            errBg = 0xFF2E1D1B.toInt(),
+            errText = 0xFFE79A92.toInt(),
+            codeBg = 0xFF1E1F21.toInt(),
+            codeText = 0xFFAEB0B2.toInt(),
+            navBg = 0xFF141516.toInt(),
+            navActive = 0xFF4FCFB4.toInt(),
+            navIdle = 0xFF85858A.toInt()
         )
     }
 }
@@ -115,8 +119,8 @@ fun themeModeOf(id: String): ThemeMode = when (id) {
 
 fun Context.dp(v: Int): Int = (v * resources.displayMetrics.density).toInt()
 
-/** 圆角描边卡片背景 */
-fun roundCard(ctx: Context, fill: Int, border: Int, radiusDp: Int = 14, borderDp: Int = 1): GradientDrawable {
+/** 小圆角描边卡面：半径收敛到 10~12dp，比大圆角更「工具感」 */
+fun roundCard(ctx: Context, fill: Int, border: Int, radiusDp: Int = 12, borderDp: Int = 1): GradientDrawable {
     val g = GradientDrawable()
     g.cornerRadius = ctx.dp(radiusDp).toFloat()
     g.setColor(fill)
@@ -128,10 +132,10 @@ fun roundCard(ctx: Context, fill: Int, border: Int, radiusDp: Int = 14, borderDp
 fun pressable(fill: Drawable, rippleColor: Int): Drawable =
     RippleDrawable(ColorStateList.valueOf(rippleColor), fill, null)
 
-fun Context.cardBg(p: Palette, radiusDp: Int = 14, fill: Int? = null, border: Int? = null): Drawable =
+fun Context.cardBg(p: Palette, radiusDp: Int = 12, fill: Int? = null, border: Int? = null): Drawable =
     pressable(
         roundCard(this, fill ?: p.card, border ?: p.border, radiusDp),
-        0x3312BFA3
+        0x14000000
     )
 
 // ==================== 常用控件 ====================
@@ -141,20 +145,21 @@ fun labelOf(ctx: Context, p: Palette, t: String, size: Float = 12f, color: Int? 
         text = t
         textSize = size
         setTextColor(color ?: p.sub)
-        if (bold) typeface = Typeface.DEFAULT_BOLD
+        if (bold) typeface = MEDIUM
     }
 
-/** 胶囊标签：可点，带按下反馈 */
+/** 胶囊标签：可点，带按下反馈。字距 +0.04 让中文标签不那么「挤」 */
 fun chipOf(ctx: Context, p: Palette, t: String, active: Boolean): TextView =
     TextView(ctx).apply {
         text = t
-        textSize = 12f
+        textSize = 12.5f
+        letterSpacing = 0.04f
         gravity = Gravity.CENTER
-        setPadding(ctx.dp(12), ctx.dp(7), ctx.dp(12), ctx.dp(7))
+        setPadding(ctx.dp(14), ctx.dp(8), ctx.dp(14), ctx.dp(8))
         setTextColor(if (active) p.onAccent else p.text)
         background = pressable(
-            roundCard(ctx, if (active) p.accent else p.cardAlt, if (active) p.accent else p.border, 20),
-            0x55FFFFFF
+            roundCard(ctx, if (active) p.accent else p.cardAlt, if (active) p.accent else p.border, 10),
+            0x14000000
         )
     }
 
@@ -163,11 +168,12 @@ fun primaryBtnOf(ctx: Context, p: Palette, t: String): TextView =
     TextView(ctx).apply {
         text = t
         textSize = 14f
+        letterSpacing = 0.1f
         gravity = Gravity.CENTER
-        setPadding(ctx.dp(18), ctx.dp(11), ctx.dp(18), ctx.dp(11))
+        setPadding(ctx.dp(20), ctx.dp(12), ctx.dp(20), ctx.dp(12))
         setTextColor(p.onAccent)
-        typeface = Typeface.DEFAULT_BOLD
-        background = pressable(roundCard(ctx, p.accent, p.accent, 22, 0), 0x66FFFFFF)
+        typeface = MEDIUM
+        background = pressable(roundCard(ctx, p.accent, p.accent, 12, 0), 0x2AFFFFFF)
     }
 
 /** 次要按钮（描边） */
@@ -175,10 +181,11 @@ fun ghostBtnOf(ctx: Context, p: Palette, t: String): TextView =
     TextView(ctx).apply {
         text = t
         textSize = 13f
+        letterSpacing = 0.06f
         gravity = Gravity.CENTER
-        setPadding(ctx.dp(14), ctx.dp(10), ctx.dp(14), ctx.dp(10))
+        setPadding(ctx.dp(16), ctx.dp(11), ctx.dp(16), ctx.dp(11))
         setTextColor(p.text)
-        background = pressable(roundCard(ctx, p.card, p.border, 22), 0x3312BFA3)
+        background = pressable(roundCard(ctx, p.card, p.border, 12), 0x14000000)
     }
 
 /** 一行列表项：标题 + 说明 + 右侧箭头，整行可点且有反馈 */
@@ -186,7 +193,7 @@ fun listRowOf(ctx: Context, p: Palette, title: String, sub: String, arrow: Strin
     val row = LinearLayout(ctx).apply {
         orientation = LinearLayout.HORIZONTAL
         gravity = Gravity.CENTER_VERTICAL
-        setPadding(ctx.dp(14), ctx.dp(13), ctx.dp(12), ctx.dp(13))
+        setPadding(ctx.dp(16), ctx.dp(14), ctx.dp(14), ctx.dp(14))
         background = ctx.cardBg(p)
     }
     val col = LinearLayout(ctx).apply { orientation = LinearLayout.VERTICAL }
@@ -196,7 +203,7 @@ fun listRowOf(ctx: Context, p: Palette, title: String, sub: String, arrow: Strin
             text = sub
             textSize = 11.5f
             setTextColor(p.sub)
-            setPadding(0, ctx.dp(3), 0, 0)
+            setPadding(0, ctx.dp(4), 0, 0)
         })
     }
     row.addView(col, LinearLayout.LayoutParams(0, -2, 1f))

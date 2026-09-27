@@ -148,9 +148,9 @@ class AiClient(private val cfg: ProviderConfig) {
         val ms = System.currentTimeMillis() - started
         return if (r.error == null) {
             val echo = (r.text ?: "").trim().take(30).replace("\n", " ")
-            "✅ 连通正常 · ${ms}ms" + if (echo.isNotEmpty()) " · 回：$echo" else ""
+            "连通正常 · ${ms}ms" + if (echo.isNotEmpty()) " · 回：$echo" else ""
         } else {
-            "❌ " + friendly(r.error!!) + " · ${ms}ms"
+            "连接失败 · " + friendly(r.error!!) + " · ${ms}ms"
         }
     }
 

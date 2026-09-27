@@ -159,7 +159,7 @@ class MainActivity : AppCompatActivity(), GameUi {
         refreshHeader()
         openGame(currentGame)
         addSystemLine("引擎已就绪 · 当前游戏：$currentGame")
-        addSystemLine("直接说「做个贪吃蛇」，或点 🖼 把画面发给 AI 让它改。")
+        addSystemLine("直接说「做个贪吃蛇」，或点底部「当前画面」把画面发给 AI 让它改。")
     }
 
     private var topHolder: LinearLayout? = null
@@ -182,16 +182,18 @@ class MainActivity : AppCompatActivity(), GameUi {
         titleTv = TextView(this).apply {
             text = "Hexora"
             setTextColor(pal.text)
-            textSize = 17f
-            typeface = Typeface.DEFAULT_BOLD
+            textSize = 17.5f
+            letterSpacing = 0.06f
+            typeface = MEDIUM
         }
 
         val settings = TextView(this).apply {
-            text = "⚙ 设置"
+            text = "设置"
             textSize = 12.5f
+            letterSpacing = 0.06f
             setTextColor(pal.sub)
-            setPadding(dp(12), dp(7), dp(12), dp(7))
-            background = pressable(roundCard(this@MainActivity, pal.cardAlt, pal.border, 20), 0x3312BFA3)
+            setPadding(dp(14), dp(7), dp(14), dp(7))
+            background = pressable(roundCard(this@MainActivity, pal.cardAlt, pal.border, 10), 0x14000000)
             setOnClickListener { showSettings() }
         }
 
@@ -204,6 +206,9 @@ class MainActivity : AppCompatActivity(), GameUi {
             textSize = 11.5f
         }
         top.addView(subTv, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(3) })
+        // 发丝分隔线：顶栏与内容之间一道 1dp 线，比投影更安静
+        top.addView(View(this).apply { setBackgroundColor(pal.border) },
+            LinearLayout.LayoutParams(-1, dp(1)).apply { topMargin = dp(12) })
 
         topHolder = top
     }
@@ -228,25 +233,27 @@ class MainActivity : AppCompatActivity(), GameUi {
 
     // ==================== 底栏 ====================
 
-    private fun navItemView(icon: String, label: String): LinearLayout {
+    private fun navItemView(label: String): LinearLayout {
         val box = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER
-            setPadding(0, dp(9), 0, dp(9))
-            background = pressable(roundCard(this@MainActivity, pal.navBg, pal.navBg, 0, 0), 0x2212BFA3)
+            setPadding(0, dp(12), 0, dp(8))
+            background = pressable(roundCard(this@MainActivity, pal.navBg, pal.navBg, 0, 0), 0x14000000)
         }
         box.addView(TextView(this).apply {
-            text = icon
-            textSize = 17f
+            text = label
+            textSize = 12.5f
+            letterSpacing = 0.12f
             gravity = Gravity.CENTER
             setTextColor(pal.navIdle)
         })
-        box.addView(TextView(this).apply {
-            text = label
-            textSize = 11.5f
-            gravity = Gravity.CENTER
-            setTextColor(pal.navIdle)
-            setPadding(0, dp(2), 0, 0)
+        // 2dp 细下划线做选中指示，比「加粗变色」更克制
+        box.addView(View(this).apply {
+            visibility = View.INVISIBLE
+            setBackgroundColor(pal.navActive)
+        }, LinearLayout.LayoutParams(dp(20), dp(2)).apply {
+            topMargin = dp(8)
+            gravity = Gravity.CENTER_HORIZONTAL
         })
         return box
     }
@@ -256,9 +263,9 @@ class MainActivity : AppCompatActivity(), GameUi {
             orientation = LinearLayout.HORIZONTAL
             setBackgroundColor(pal.navBg)
         }
-        navChat = navItemView("💬", "对话")
-        navPreview = navItemView("🖥", "预览")
-        navPub = navItemView("🚀", "发布")
+        navChat = navItemView("对话")
+        navPreview = navItemView("预览")
+        navPub = navItemView("发布")
         val lp = LinearLayout.LayoutParams(0, -2, 1f)
         holder.addView(navChat, lp)
         holder.addView(navPreview, LinearLayout.LayoutParams(0, -2, 1f))
@@ -277,7 +284,9 @@ class MainActivity : AppCompatActivity(), GameUi {
             val c = box.getChildAt(i)
             if (c is TextView) {
                 c.setTextColor(color)
-                c.typeface = if (active) Typeface.DEFAULT_BOLD else Typeface.DEFAULT
+                c.typeface = if (active) MEDIUM else Typeface.DEFAULT
+            } else {
+                c.visibility = if (active) View.VISIBLE else View.INVISIBLE
             }
         }
     }
@@ -365,7 +374,7 @@ class MainActivity : AppCompatActivity(), GameUi {
         val attachBtn = chipOf(this, pal, "＋ 图片", false).apply {
             setOnClickListener { pickImage.launch("image/*") }
         }
-        val shotBtn = chipOf(this, pal, "🖼 当前画面", false).apply {
+        val shotBtn = chipOf(this, pal, "当前画面", false).apply {
             setOnClickListener { attachScreenshot() }
         }
         modelBtn = TextView(this).apply {
@@ -544,7 +553,7 @@ class MainActivity : AppCompatActivity(), GameUi {
         main.post {
             when {
                 ev.startsWith("AI: ") -> addBubble(ev.removePrefix("AI: "), false)
-                ev.startsWith("✗") -> addErrorCard(ev.removePrefix("✗ 请求失败：").trim())
+                ev.startsWith("[失败]") -> addErrorCard(ev.removePrefix("[失败] 请求失败：").trim())
                 else -> addSystemLine(ev)
             }
         }
@@ -602,13 +611,13 @@ class MainActivity : AppCompatActivity(), GameUi {
             setTextColor(pal.text)
             typeface = Typeface.DEFAULT_BOLD
         }
-        val reload = chipOf(this, pal, "⟳ 重载", false).apply {
+        val reload = chipOf(this, pal, "重载", false).apply {
             setOnClickListener {
                 reloadGame()
                 toast("已重载画面")
             }
         }
-        val shot = chipOf(this, pal, "🖼 发给 AI", false).apply {
+        val shot = chipOf(this, pal, "发给 AI", false).apply {
             setOnClickListener { attachScreenshot() }
         }
         val switch = chipOf(this, pal, "切换", false).apply {
@@ -657,12 +666,12 @@ class MainActivity : AppCompatActivity(), GameUi {
         pubScroll.addView(lastExportTv, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(12) })
 
         val rows = listOf(
-            Triple("📦 导出工程包", "打包成 zip，并自动另存到「下载/H5Games」", { exportZip() }),
-            Triple("📄 查看当前游戏文件", "列出文件与体积", { showTree() }),
-            Triple("🧾 查看 console 输出", "游戏里的 log / warn / error", { showConsole() }),
-            Triple("🎮 切换当前游戏", "切到别的游戏继续改", { pickGame() }),
-            Triple("📋 复制工程路径", gameRoot.absolutePath, { copyToClipboard(gameRoot.absolutePath) }),
-            Triple("🧹 清空对话历史", "AI 会忘掉之前的上下文", { clearHistory() })
+            Triple("导出工程包", "打包成 zip，并自动另存到「下载/H5Games」", { exportZip() }),
+            Triple("查看当前游戏文件", "列出文件与体积", { showTree() }),
+            Triple("查看 console 输出", "游戏里的 log / warn / error", { showConsole() }),
+            Triple("切换当前游戏", "切到别的游戏继续改", { pickGame() }),
+            Triple("复制工程路径", gameRoot.absolutePath, { copyToClipboard(gameRoot.absolutePath) }),
+            Triple("清空对话历史", "AI 会忘掉之前的上下文", { clearHistory() })
         )
 
         for ((title, sub, action) in rows) {
@@ -678,7 +687,7 @@ class MainActivity : AppCompatActivity(), GameUi {
     private fun refreshExportRow() {
         val f = lastExport
         lastExportTv.text = if (f != null && f.exists()) {
-            "✅ 最近导出：${f.name}\n${f.parentFile?.absolutePath}\n（点这里可以分享或复制路径）"
+            "最近导出：${f.name}\n${f.parentFile?.absolutePath}\n（点这里可以分享或复制路径）"
         } else {
             "还没有导出过。点下面的「导出工程包」，导出后会告诉你文件在哪。"
         }
@@ -815,9 +824,11 @@ class MainActivity : AppCompatActivity(), GameUi {
 
         fun section(t: String) = col.addView(TextView(ctx).apply {
             text = t
-            textSize = 12f
+            textSize = 11f
+            letterSpacing = 0.1f
+            typeface = MEDIUM
             setTextColor(pal.faint)
-            setPadding(dp(2), dp(14), 0, dp(6))
+            setPadding(dp(2), dp(20), 0, dp(8))
         })
 
         fun input(hint: String, value: String, numeric: Boolean = false): EditText =
@@ -842,7 +853,7 @@ class MainActivity : AppCompatActivity(), GameUi {
 
         // ---------- 外观 ----------
         section("外观")
-        val themeChips = listOf("☀ 浅色", "🌙 深色", "⚙ 跟随系统")
+        val themeChips = listOf("浅色", "深色", "跟随系统")
         val themeIds = listOf("light", "dark", "auto")
         var themeSel = themeIds.indexOf(cfgStore.themeMode).coerceAtLeast(0)
         val themeRow = LinearLayout(ctx).apply { orientation = LinearLayout.HORIZONTAL }
@@ -878,7 +889,7 @@ class MainActivity : AppCompatActivity(), GameUi {
         col.addView(urlEt, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(6) })
         col.addView(keyEt, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(6) })
 
-        val testBtn = ghostBtnOf(ctx, pal, "🔌 测试连通")
+        val testBtn = ghostBtnOf(ctx, pal, "测试连通")
         col.addView(testBtn, LinearLayout.LayoutParams(-2, -2).apply { topMargin = dp(8) })
 
         val testResult = TextView(ctx).apply {
@@ -899,8 +910,13 @@ class MainActivity : AppCompatActivity(), GameUi {
                 ctx, android.R.layout.simple_spinner_dropdown_item,
                 p.models.map { "${it.label} · ${it.name}" }
             )
-            col.addView(modelSp, LinearLayout.LayoutParams(-1, -2))
+            // 注意：这里只能换数据源，绝不能 addView：
+            // syncModels 在“初始化”和“每次切厂商”都会被调用，
+            // 同一个 Spinner 被 addView 两次就会抛
+            // "The specified child already has a parent" 并直接闪退设置页。
         }
+        // 视图只挂一次（用 spSpacer 包一层，风格与其它下拉一致）
+        col.addView(spSpacer(modelSp), LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(6) })
         modelSp.onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {
             override fun onItemSelected(
                 parent: android.widget.AdapterView<*>?, view: View?, pos: Int, id: Long
@@ -1065,10 +1081,10 @@ class MainActivity : AppCompatActivity(), GameUi {
         subTv.text = buildString {
             append("当前游戏 $currentGame")
             append("  ·  ${cfg.provider.label} / ${cfg.modelLabel}")
-            append(if (cfg.vision) "  ·  👁 视觉开" else "  ·  视觉关")
+            append(if (cfg.vision) "  ·  视觉开" else "  ·  视觉关")
             append("  ·  ${skill.label}")
         }
-        modelBtn.text = "✦ ${cfg.provider.label} / ${cfg.model} ▾"
+        modelBtn.text = "${cfg.provider.label} / ${cfg.model} ▾"
         previewLabel.text = "当前游戏：$currentGame"
     }
 

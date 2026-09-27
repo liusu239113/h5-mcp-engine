@@ -71,7 +71,7 @@ class AgentRunner(
             val reply = client.chat(history, spec)
             if (cancelled) return
             if (reply.error != null) {
-                onEvent("✗ 请求失败：\n" + AiClient.friendly(reply.error))
+                onEvent("[失败] 请求失败：\n" + AiClient.friendly(reply.error))
                 return
             }
 
@@ -79,7 +79,7 @@ class AgentRunner(
             if (!reply.text.isNullOrBlank()) onEvent("AI: ${reply.text}")
 
             if (reply.toolCalls.isEmpty()) {
-                onEvent("✓ 结束（共 $step 轮）")
+                onEvent("结束 · 共 $step 轮")
                 return
             }
 
@@ -104,7 +104,7 @@ class AgentRunner(
         if (cancelled) {
             onEvent("■ 已停止")
         } else {
-            onEvent("⚠ 到步数上限（$limit），先停下。可以再发一条消息让它继续，或在设置里调大上限。")
+            onEvent("已到步数上限（$limit），先停下。可以再发一条消息让它继续，或在设置里调大上限。")
         }
     }
 
