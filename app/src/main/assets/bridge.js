@@ -389,6 +389,82 @@ function scheduleRestart() {
   }, delay);
 }
 
+// ==================== 子进程「node 包装」（v3） ====================
+// 为什么还要这一层：
+//   Maker 的生图/音乐/音效不是它自己直接干的 —— 它会再 spawn 一个「远端代理」子进程
+//   （`__maker-proxy`，连 https://maker.taptap.cn/mcp/v1）。它启动子进程用的是：
+//       return { command: process.execPath, args: [maker.js, "__maker-proxy"] }
+//   而在安卓沙箱里，我们是用 libmuslrt.so 加载器把这颗 musl node 跑起来的，
+//   于是 process.execPath 指向的是**加载器本身**（不是 node）。
+//   → 系统拿加载器去加载一个 .js 文件 → 秒挂 → 上层只看到 "MCP error -32000: Connection closed"。
+//   （症状：绑定已经成功、工具也挂上了，但一调 generate_image 就报 remote proxy 失败。）
+//
+// 解法两条（都对用户透明）：
+//   1) 造一个 maker-node 包装脚本，把「加载器 + node + CA/DNS 参数」封成可执行文件；
+//   2) 把 maker.js 里所有 process.execPath 改成 MAKER_NODE_BIN || process.execPath，
+//      于是它 spawn 出来的每个子孙进程都会自动走这个包装（共 12 处启动点，一网打尽）。
+function setupNodeShim() {
+  if (!prefix.length) return; // 桌面/正常环境：prefix 为空，直接走原生 node
+  const ld = prefix[0];
+  let libPath = '';
+  let node = '';
+  const li = prefix.indexOf('--library-path');
+  if (li >= 0 && prefix[li + 1]) {
+    libPath = prefix[li + 1];
+    node = prefix[li + 2] || '';
+  }
+  if (!node) node = prefix[prefix.length - 1];
+  let dnsfix = '';
+  const ri = childExtra.indexOf('-r');
+  if (ri >= 0 && childExtra[ri + 1]) dnsfix = childExtra[ri + 1];
+  if (!ld || !node) return;
+  const sh = fs.existsSync('/system/bin/sh') ? '/system/bin/sh' : '/bin/sh';
+  const rt = libPath || path.dirname(node);
+  const shimPath = path.join(rt, 'maker-node');
+  const line =
+    'exec "' + ld + '"' +
+    (libPath ? ' --library-path "' + libPath + '"' : '') +
+    ' "' + node + '"' +
+    (childExtra.length ? ' ' + childExtra.join(' ') : '') +
+    ' "$@"\n';
+  const body = '#' + '!' + sh + '\n# Hexora 生成：让子进程也能跑起 musl node（勿手改）\n' + line;
+  try {
+    fs.writeFileSync(shimPath, body, 'utf8');
+    fs.chmodSync(shimPath, 0o755);
+    process.env.MAKER_NODE_BIN = shimPath;
+    console.log('[bridge] node 包装就绪: ' + shimPath);
+  } catch (e) {
+    console.error('[bridge] node 包装写入失败: ' + (e && e.message));
+  }
+}
+
+/**
+ * 给 maker.js 打补丁：把 process.execPath 换成 MAKER_NODE_BIN（未设置时行为不变）。
+ * 幂等：打过就直接返回；原文件留一份 .hexbak 备份便于排查。
+ */
+function patchMakerScript(script) {
+  try {
+    if (!script || !fs.existsSync(script)) return 'no script';
+    const src = fs.readFileSync(script, 'utf8');
+    if (src.indexOf('MAKER_NODE_BIN') >= 0) return 'already';
+    const hits = src.match(/process\.execPath/g);
+    if (!hits || !hits.length) return 'no match';
+    const bak = script + '.hexbak';
+    if (!fs.existsSync(bak)) fs.writeFileSync(bak, src, 'utf8');
+    const out = src.split('process.execPath').join('(process.env.MAKER_NODE_BIN||process.execPath)');
+    fs.writeFileSync(script, out, 'utf8');
+    console.log('[bridge] maker.js 已打补丁：process.execPath ×' + hits.length);
+    return 'patched ' + hits.length;
+  } catch (e) {
+    console.error('[bridge] maker.js 打补丁失败: ' + (e && e.message));
+    return 'error: ' + (e && e.message);
+  }
+}
+
+// 补丁必须在 spawn 子进程之前生效（子进程启动时才读这个文件）
+setupNodeShim();
+patchMakerScript(target);
+
 startChild();
 
 // 启动即尝试绑定一次（App 一开就能生图，不必等第一次工具调用）。
