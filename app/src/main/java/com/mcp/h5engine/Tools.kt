@@ -304,8 +304,15 @@ class EngineTools(private val ui: GameUi, private val root: File) {
             r == "_shared" -> File(root, "_shared")
             r.startsWith("_shared/") -> safe(File(root, "_shared"), r.removePrefix("_shared/"))
             r == "adkit.js" || r == "AD_KIT.md" -> safe(File(root, "_shared"), r)
-            r == "_uploads" -> File(root, "_uploads")
-            r.startsWith("_uploads/") -> safe(File(root, "_uploads"), r.removePrefix("_uploads/"))
+            r == "_uploads" || r.startsWith("_uploads/") -> {
+                // 工作区是「每个项目独立」的：素材/文档放在当前项目目录下，
+                // 这样游戏代码用相对路径（_uploads/media/x.png）就引用得到。
+                // 旧版本把它们放在工程根（所有项目混在一起），这里按
+                // 「项目内优先 → 工程根兜底」兼容，老工程不会突然读不到自己的素材。
+                val tail = if (r == "_uploads") "" else r.removePrefix("_uploads/")
+                val inGame = safe(File(gameDir(game), "_uploads"), tail)
+                if (inGame.exists()) inGame else safe(File(root, "_uploads"), tail)
+            }
             r == "_skills" -> File(root, "_skills")
             r.startsWith("_skills/") -> safe(File(root, "_skills"), r.removePrefix("_skills/"))
             else -> {
@@ -325,8 +332,9 @@ class EngineTools(private val ui: GameUi, private val root: File) {
         val base = name.trim().trimStart('/').substringAfterLast('/').lowercase()
         if (base.isEmpty() || base.contains("..")) return null
         val dirs = listOf(
+            File(gameDir(null), "_uploads"),   // 当前项目的工作区：素材/文档优先命中
             File(root, "_skills"),
-            File(root, "_uploads"),
+            File(root, "_uploads"),            // 旧版本遗留在工程根的素材
             File(root, "_shared")
         )
         for (d in dirs) {

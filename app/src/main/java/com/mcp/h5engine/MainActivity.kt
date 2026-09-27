@@ -471,6 +471,8 @@ class MainActivity : AppCompatActivity(), GameUi {
             seedSharedRuntime()
             runCatching { bridge.setSandbox(File(gameRoot, currentGame)) }
             lastLoadedGame = ""
+            // 项目根换过之后，把老版本遗留在工程根的工作区素材并入当前项目
+            migrateLegacyWorkspace()
             refreshHeader()
             addSystemLine("项目根目录已切到 ${gameRoot.absolutePath}")
             toast("项目目录已切换")
@@ -1136,10 +1138,15 @@ class MainActivity : AppCompatActivity(), GameUi {
 
     // ==================== 素材卡（Maker 生成物直接出现在对话里） ====================
 
-    /** 对话里的素材卡：图片给缩略图、音频给播放条；点一下预览 / 试听 */
+    /** 对话里的素材卡：图片给缩略图、音频给播放条；点一下预览 / 试听，长按存到本地 */
     private fun addAssetCard(path: String) {
-        val f = File(path)
-        if (!f.isFile) return
+        val src = File(path)
+        if (!src.isFile) return
+        // 并入工作区：Maker 把生成物 materialize 在「<项目>/assets/…」下，
+        // 而工作区（素材）读的是「<项目>/_uploads/media」—— 用户要的是"生成完就在工作区里"。
+        // 这里复制一份进去（同名同大小就跳过），卡片指向工作区那份，
+        // 于是：工作区看得到、游戏代码能用 _uploads/media/x.png 相对路径引用、导出打包也带上。
+        val f = runCatching { ensureInWorkspace(src) }.getOrDefault(src)
         val ext = f.extension.lowercase()
         val isImg = ext in setOf("png", "jpg", "jpeg", "webp", "gif", "bmp")
         val card = LinearLayout(this).apply {
@@ -1167,12 +1174,14 @@ class MainActivity : AppCompatActivity(), GameUi {
             setPadding(0, dp(6), 0, 0)
         })
         card.addView(TextView(this).apply {
-            text = if (isImg) "点一下看大图" else "点一下试听"
+            text = if (isImg) "点一下看大图 · 长按保存到本地" else "点一下试听 · 长按保存到本地"
             textSize = 11f
             setTextColor(pal.faint)
             setPadding(0, dp(2), 0, 0)
         })
         card.setOnClickListener { if (isImg) showImageFull(f) else playAudio(f) }
+        // 长按 = 存到本地相册 / 音乐 / 影视（生成的素材直接可以带走）
+        card.setOnLongClickListener { saveToLocal(f); true }
         chatList.addView(card, LinearLayout.LayoutParams(-2, -2).apply {
             gravity = Gravity.START
             topMargin = dp(6)
@@ -1180,6 +1189,27 @@ class MainActivity : AppCompatActivity(), GameUi {
             rightMargin = dp(30)
         })
         scrollChatToBottom()
+    }
+
+    /**
+     * 把生成物并进当前项目的工作区（<项目>/_uploads/media）。
+     *
+     * Maker 把产物 materialize 在「<项目>/assets/…」，而工作区素材读的是
+     * 「<项目>/_uploads/media」—— 用户要的是「生成完就在工作区里」，
+     * 所以这里复制一份进去（同名同大小视为同一份，不重复复制），
+     * 卡片也指向工作区那份，于是：工作区看得到、能长按存本地、
+     * 游戏代码用 `_uploads/media/x.png` 相对路径同样引用得到、导出打包也带上。
+     */
+    private fun ensureInWorkspace(src: File): File {
+        val proj = projDir()
+        // 已经在工作区里：不用动
+        if (src.absolutePath.startsWith(File(proj, "_uploads").absolutePath)) return src
+        val ws = File(proj, "_uploads/media")
+        if (!ws.exists() && !ws.mkdirs()) return src
+        val dst = File(ws, src.name)
+        if (dst.isFile && dst.length() == src.length()) return dst
+        src.copyTo(dst, overwrite = true)
+        return dst
     }
 
     /** 缩略图：按目标边长采样，别把几十 MB 的原图整张读进内存 */
@@ -1852,9 +1882,12 @@ class MainActivity : AppCompatActivity(), GameUi {
             else -> "image"
         }
         val dir = when (kind) {
-            "doc" -> File(gameRoot, "_uploads/doc")
+            // 素材 / 文档进「当前项目」的工作区：工作区是项目独立的，互不干扰；
+            // 而且放在项目里，游戏代码用相对路径 _uploads/media/x.png 才引用得到。
+            // 技能是全局的（跨项目复用），仍然放在工程根。
+            "doc" -> File(projDir(), "_uploads/doc")
             "skill" -> File(gameRoot, "_skills")
-            else -> File(gameRoot, "_uploads/media")
+            else -> File(projDir(), "_uploads/media")
         }.apply { mkdirs() }
         val dst = File(dir, name)
         dst.writeBytes(bytes)
@@ -2672,7 +2705,7 @@ class MainActivity : AppCompatActivity(), GameUi {
 
         val files = listMedia(wsKind)
         if (files.isEmpty()) {
-            body.addView(emptyHint("还没有素材。点「上传」加图片 / 音频 / 视频（落在 _uploads/media/，重启后还在）"))
+            body.addView(emptyHint("还没有素材。点「上传」加图片 / 音频 / 视频；AI 生成的素材也会自动进这里（工作区按项目独立，互不干扰）"))
             return
         }
         if (wsGrid) {
@@ -2730,6 +2763,8 @@ class MainActivity : AppCompatActivity(), GameUi {
             background = pressable(roundCard(this@MainActivity, pal.card, pal.border, 12), 0x14000000)
             isClickable = true
             setOnClickListener { previewFile(f, kind) }
+            // 长按直接存到本地（相册 / 音乐 / 影视），不用翻⋯菜单
+            setOnLongClickListener { saveToLocal(f); true }
         }
         row.addView(selBox(f.relativeTo(gameRoot).path))
         row.addView(
@@ -2806,7 +2841,7 @@ class MainActivity : AppCompatActivity(), GameUi {
             val rel = f.relativeTo(gameRoot).path
             AlertDialog.Builder(themed())
                 .setTitle(f.name)
-                .setItems(arrayOf("预览 / 播放", "加入对话", "复制路径", "删除")) { _, i ->
+                .setItems(arrayOf("预览 / 播放", "加入对话", "保存到本地", "复制路径", "删除")) { _, i ->
                     when (i) {
                         0 -> previewFile(f, kind)
                         1 -> {
@@ -2814,12 +2849,82 @@ class MainActivity : AppCompatActivity(), GameUi {
                             toast("已加入待发送区：${f.name}")
                             updateAttachInfo()
                         }
-                        2 -> copyToClipboard(rel)
+                        2 -> saveToLocal(f)
+                        3 -> copyToClipboard(rel)
                         else -> confirmDelete(f)
                     }
                 }
                 .show()
         }
+    }
+
+    /**
+     * 保存到本地（相册 / 音乐 / 影视 / 下载）。
+     *
+     * 走 MediaStore 而不是自己拼 /sdcard 路径：Android 10+ 上一条权限都不用申请，
+     * 而且文件会立刻出现在系统相册 / 文件管理器里 —— 用户说的"保存到本地"就是这个。
+     */
+    private fun saveToLocal(f: File) {
+        if (!f.isFile) {
+            toast("文件已经不在了")
+            return
+        }
+        Thread {
+            val res = runCatching { saveViaMediaStore(f) }
+            val where = res.getOrNull()
+            main.post {
+                if (where != null) {
+                    toast("已保存到本地：$where")
+                    return@post
+                }
+                // 兜底：MediaStore 写不进去（老系统 / 存储异常）就丢进 App 自己的外部目录，
+                // 至少文件不会丢，并把路径告诉用户（可长按复制）。
+                val dst = runCatching {
+                    File(getExternalFilesDir(null), "saved").apply { mkdirs() }
+                }.getOrNull()
+                val copy = dst?.let { runCatching { File(it, f.name).also { o -> f.copyTo(o, true) } }.getOrNull() }
+                if (copy != null) {
+                    toast("系统媒体库写入失败，已存到：${copy.absolutePath}")
+                    copyToClipboard(copy.absolutePath)
+                } else {
+                    toast("保存失败：${res.exceptionOrNull()?.message ?: "未知原因"}")
+                }
+            }
+        }.start()
+    }
+
+    /** 按扩展名挑 MediaStore 集合与目录，返回保存后的相对路径；失败返回 null */
+    private fun saveViaMediaStore(f: File): String? {
+        val ext = f.extension.lowercase()
+        val images = setOf("png", "jpg", "jpeg", "webp", "gif", "bmp")
+        val audios = setOf("mp3", "wav", "ogg", "m4a", "aac", "flac")
+        val videos = setOf("mp4", "mov", "webm", "mkv")
+        val bucket: Pair<android.net.Uri, String> = when {
+            ext in images ->
+                MediaStore.Images.Media.EXTERNAL_CONTENT_URI to (Environment.DIRECTORY_PICTURES + "/Hexora")
+            ext in audios ->
+                MediaStore.Audio.Media.EXTERNAL_CONTENT_URI to (Environment.DIRECTORY_MUSIC + "/Hexora")
+            ext in videos ->
+                MediaStore.Video.Media.EXTERNAL_CONTENT_URI to (Environment.DIRECTORY_MOVIES + "/Hexora")
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q ->
+                MediaStore.Downloads.EXTERNAL_CONTENT_URI to (Environment.DIRECTORY_DOWNLOADS + "/Hexora")
+            else -> return null
+        }
+        val mime = runCatching {
+            android.webkit.MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext)
+        }.getOrNull() ?: "application/octet-stream"
+        val values = ContentValues().apply {
+            put(MediaStore.MediaColumns.DISPLAY_NAME, f.name)
+            put(MediaStore.MediaColumns.MIME_TYPE, mime)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                put(MediaStore.MediaColumns.RELATIVE_PATH, bucket.second)
+            }
+        }
+        val uri = contentResolver.insert(bucket.first, values) ?: return null
+        contentResolver.openOutputStream(uri)?.use { out ->
+            f.inputStream().use { it.copyTo(out) }
+        } ?: return null
+        return bucket.second + "/" + f.name
     }
 
     private fun thumbView(f: File, sizeDp: Int): ImageView {
@@ -3079,9 +3184,13 @@ class MainActivity : AppCompatActivity(), GameUi {
             val out = mutableListOf<Attach>()
             for (rel in rels) {
                 val kind = when {
-                    rel.startsWith("_skills") -> "skill"
-                    rel.startsWith("_uploads/doc") -> "doc"
-                    rel.startsWith("_uploads/media") -> kindOfFile(rel)
+                    // rel 是相对工程根的路径（工作区现在在项目里，所以是 <项目>/_uploads/…）
+                    rel.contains("_skills") -> "skill"
+                    rel.contains("_uploads/doc") -> "doc"
+                    rel.contains("_uploads/media") -> kindOfFile(rel)
+                    // 生成物（<项目>/assets/…）也按扩展名归类，否则会被当成"代码"，
+                    // 图片就进不了多模态、音频也点不出试听。
+                    rel.contains("/assets/") -> kindOfFile(rel)
                     else -> "code"
                 }
                 val a = attachFromFile(File(gameRoot, rel), rel, kind) ?: continue
@@ -3111,15 +3220,62 @@ class MainActivity : AppCompatActivity(), GameUi {
 
     // ---------- 工具 ----------
 
+    /** 工作区素材 / 文档的落点：**当前项目**里（工作区是项目独立的） */
     private fun kindDir(kind: String): File = when (kind) {
-        "doc" -> File(gameRoot, "_uploads/doc")
+        "doc" -> File(projDir(), "_uploads/doc")
         "skill" -> File(gameRoot, "_skills")
-        else -> File(gameRoot, "_uploads/media")
+        else -> File(projDir(), "_uploads/media")
+    }
+
+    /** 当前项目目录（工程根/<项目名>）：游戏文件和工作区都在它下面 */
+    private fun projDir(): File = File(gameRoot, currentGame).apply { mkdirs() }
+
+    /**
+     * 老版本把工作区素材放在「工程根/_uploads」（所有项目混在一起）。
+     * 工作区改成项目独立后，把这些遗留文件也复制一份进当前项目，
+     * 免得用户升级后觉得「我的素材不见了」。
+     * 只复制不删除：老工程里可能还有代码按工程根那条路径引用它们。
+     */
+    private fun migrateLegacyWorkspace() {
+        val legacyRoot = File(gameRoot, "_uploads")
+        if (!legacyRoot.isDirectory) return
+        Thread {
+            var copied = 0
+            for (sub in listOf("media", "doc")) {
+                val from = File(legacyRoot, sub)
+                if (!from.isDirectory) continue
+                val to = File(projDir(), "_uploads/$sub").apply { mkdirs() }
+                from.listFiles()?.filter { it.isFile }?.forEach { f ->
+                    val dst = File(to, f.name)
+                    if (dst.isFile && dst.length() == f.length()) return@forEach
+                    runCatching { f.copyTo(dst, true) }.onSuccess { copied++ }
+                }
+            }
+            if (copied > 0) {
+                main.post { addSystemLine("已把工程根里的 ${copied} 个旧素材并入当前项目工作区（原文件保留）") }
+            }
+        }.start()
     }
 
     private fun listMedia(kind: String): List<File> {
-        val all = kindDir("media").listFiles()?.filter { it.isFile } ?: emptyList()
+        val media = kindDir("media").listFiles()?.filter { it.isFile } ?: emptyList()
+        // 同一份素材如果已经并进工作区，就不重复列一次
+        //（生成物本来落在 assets/ 下，工作区里会有它的副本）
+        val inWs = media.map { it.name + "|" + it.length() }.toSet()
+        val all = mutableListOf<File>()
+        all += media
+        for (d in generatedAssetDirs()) {
+            all += (d.listFiles()?.filter { it.isFile } ?: emptyList())
+                .filter { (it.name + "|" + it.length()) !in inWs }
+        }
         return sortFiles(all.filter { kindOfFile(it.name) == kind })
+    }
+
+    /** 生成物目录：当前游戏下 Maker 的 materialize 落点 */
+    private fun generatedAssetDirs(): List<File> {
+        val base = File(gameRoot, currentGame)
+        return listOf("assets/image", "assets/sprites", "assets/audio", "assets/video", "assets/model")
+            .map { File(base, it) }
     }
 
     private fun sortFiles(l: List<File>): List<File> = when (wsSort) {
@@ -3152,6 +3308,8 @@ class MainActivity : AppCompatActivity(), GameUi {
                 addView(iv, FrameLayout.LayoutParams(-1, -1))
                 setOnClickListener { d.dismiss() }
             }
+            // 长按图片 = 保存到本地相册（用户明确要的：预览里长按就能存）
+            iv.setOnLongClickListener { saveToLocal(f); true }
             d.setContentView(wrap)
             d.show()
             d.window?.setLayout(-1, -1)
@@ -4052,6 +4210,8 @@ makerRow1.addView(ghostBtnOf(ctx, pal, "扫码登录").apply {
         Thread { runCatching { McpBoot.ensure(this@MainActivity) { } } }.start()
         lastLoadedGame = id
         lastLoadedStamp = dirStamp(dir)
+        // 切项目：老版本放在工程根的工作区素材并入这个项目（只复制，不动原文件）
+        migrateLegacyWorkspace()
         val url = "https://appassets.androidplatform.net/games/$id/index.html"
         main.post {
             logs.add("[system] 打开项目 $id")

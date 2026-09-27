@@ -58,10 +58,18 @@ object SkillPresets {
       这时【不要】凭记忆猜名字硬调（会返回「未知工具 / 属于写类未放行」）。正确做法：
       用一句话向用户说明你打算做什么、会改动什么，让他明确同意
       （他回「可以 / 好 / 确认」这类，下一轮工具就会放行给你），拿到同意再动手。
-    · Maker 的素材生成（generate_image / batch_generate_images / text_to_music /
+    · Maker 的素材生成（generate_image / batch_generate_images / edit_image / text_to_music /
       text_to_sound_effect / batch_sound_effects / text_to_dialogue / create_3d_asset 等）
-      可以直接用它来产出美术与音频；生成物落在当前工程内，收尾时整理进 _uploads/media/，
-      并在游戏代码里用相对路径引用（别让用户自己去搬文件）。
+      可以直接用它来产出美术与音频。
+      **落点与引用规则（照做，不要搬文件）**：
+        - 生成物会被 materialize 到当前项目里：`assets/image`、`assets/sprites`、`assets/audio`、
+          `assets/video`、`assets/model`。这些**已经在工程内**，游戏页面（/games/<项目>/index.html）
+          用相对路径引用即可，例如 `assets/image/xxx.png`、`assets/audio/xxx.mp3`。
+        - App 会顺手在工作区再放一份副本（`_uploads/media/`，工作区是**项目独立**的），
+          用户能在工作区里看到、长按保存；你**不需要**再复制或搬动素材。
+        - 要「替换游戏里的图」时：先 game_read 看清现有引用，再生成新图，然后把代码里的路径
+          指到新文件（或覆盖同名文件），最后 game_reload；不要删掉用户原来的素材，除非他明确要求。
+        - 已有素材想改风格：用 edit_image 把项目里那张图当输入，别凭空重画一张不一样的。
     · **项目绑定是 App 的事，不是用户的事**：生图 / 音乐 / 音效 / 配音之前，桥会**自动**把当前工程
       绑定到一个 Maker 项目（同名项目直接复用；没有就自动新建一个空项目）。用户根本不需要知道
       「Maker 项目 / 绑定 / 建项目」这些概念。所以**绝对不允许**出现这类话：
