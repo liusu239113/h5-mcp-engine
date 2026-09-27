@@ -337,11 +337,7 @@ class MainActivity : AppCompatActivity(), GameUi {
         }
         tools.addView(sessionBtn, LinearLayout.LayoutParams(0, -2, 1f))
         val newBtn = chipOf(this, pal, "＋新对话", false).apply { setOnClickListener { newChat() } }
-        val treeBtn = chipOf(this, pal, "目录", false).apply { setOnClickListener { showTree() } }
-        val codeBtn = chipOf(this, pal, "代码", false).apply { setOnClickListener { showCode() } }
         tools.addView(newBtn, LinearLayout.LayoutParams(-2, -2).apply { leftMargin = dp(6) })
-        tools.addView(treeBtn, LinearLayout.LayoutParams(-2, -2).apply { leftMargin = dp(6) })
-        tools.addView(codeBtn, LinearLayout.LayoutParams(-2, -2).apply { leftMargin = dp(6) })
         top.addView(tools)
         updateSessionBtn()
         // 发丝分隔线：顶栏与内容之间一道 1dp 线，比投影更安静
@@ -478,6 +474,18 @@ class MainActivity : AppCompatActivity(), GameUi {
             isFillViewport = true
             addView(chatList)
         }
+
+        // 标题下这排手绘线性图标：文件 / 图层 / 代码（对齐 TapTap Maker 的位置）
+        val toolRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(14), 0, dp(14), dp(6))
+        }
+        toolRow.addView(iconButton(this, pal, "folder") { showCode() })
+        toolRow.addView(iconButton(this, pal, "layers", marginStartDp = 6) { showTree() })
+        toolRow.addView(iconButton(this, pal, "code", marginStartDp = 6) { editMainCode() })
+        page.addView(toolRow)
+
         page.addView(chatScroll, LinearLayout.LayoutParams(-1, 0, 1f))
 
         page.addView(View(this).apply { setBackgroundColor(pal.border) },
@@ -1113,7 +1121,20 @@ class MainActivity : AppCompatActivity(), GameUi {
         }
     }
 
-    // ==================== 看 / 改代码（顶部「代码」） ====================
+    // ==================== 看 / 改代码（对话页那排图标） ====================
+
+    /** 代码图标：直接开 index.html（没有就 game.js，再没有就第一个文件） */
+    private fun editMainCode() {
+        val dir = File(gameRoot, currentGame)
+        val f = listOf("index.html", "game.js").map { File(dir, it) }
+            .firstOrNull { it.exists() }
+            ?: dir.walkTopDown().firstOrNull { it.isFile }
+        if (f == null) {
+            toast("这个项目还没有文件")
+            return
+        }
+        openFileEditor(f, dir)
+    }
 
     private fun showCode() {
         Thread {
@@ -1603,9 +1624,6 @@ class MainActivity : AppCompatActivity(), GameUi {
             Triple("查看 console 输出", "游戏里的 log / warn / error", { showConsole() }),
             Triple("切换 / 新建项目", "一个项目一个目录，互不干扰", { showProjects() }),
             Triple("后台保活设置", "切后台 / 锁屏 AI 继续跑（需要关掉电池优化）", { askKeepAlive() }),
-            Triple("看 / 改代码", "列出工程文件，直接看和改，改完自动热重载", { showCode() }),
-            Triple("拉取最新模型列表", "问厂商要当前可用模型，预设过期就靠它",
-                { fetchModels(AiProviders.byId(cfgStore.providerId)) }),
             Triple("复制工程路径", gameRoot.absolutePath, { copyToClipboard(gameRoot.absolutePath) }),
             Triple("清空对话历史", "AI 会忘掉之前的上下文", { clearHistory() })
         )
@@ -1840,6 +1858,12 @@ class MainActivity : AppCompatActivity(), GameUi {
         val modelSp = android.widget.Spinner(ctx)
         val modelEt = input("模型名（可直接手填最新模型）", cfgStore.modelOf(curProvider.id))
         col.addView(modelEt, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(6) })
+
+        // 就在这里：模型配置旁边直接问厂商「你现在有哪些模型」
+        val fetchBtn = ghostBtnOf(ctx, pal, "拉取该厂商可用模型").apply {
+            setOnClickListener { fetchModels(curProvider) }
+        }
+        col.addView(fetchBtn, LinearLayout.LayoutParams(-2, -2).apply { topMargin = dp(8) })
 
         fun syncModels(p: Provider) {
             modelSp.adapter = android.widget.ArrayAdapter(
