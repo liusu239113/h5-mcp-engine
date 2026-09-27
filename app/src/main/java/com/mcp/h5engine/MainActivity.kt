@@ -4249,6 +4249,76 @@ makerRow1.addView(ghostBtnOf(ctx, pal, "扫码登录").apply {
         })
         col.addView(mcpRow, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(6) })
 
+        // ---------- 图片工具（抠图 / 去背景） ----------
+        // 素材里「去掉背景」是刚需（角色立绘、道具、图标）。以前只能让 AI 手写 canvas 色键，
+        // 效果惨。现在接了抠抠图的公开同步接口（1 积分 / 张），Key 就存这一个文件里，
+        // 桥每次调用现读 —— 存完立刻能用，不用重启任何东西。
+        section("图片工具（抠图 / 去背景）")
+        val kouStatus = TextView(ctx).apply {
+            textSize = 12.5f
+            setTextColor(pal.sub)
+            setPadding(dp(2), 0, dp(2), dp(6))
+        }
+        col.addView(kouStatus)
+
+        fun kouRender() {
+            val k = McpRt.koukoutuKey(ctx)
+            kouStatus.text = if (k.isBlank()) {
+                "未配置 API Key —— AI 现在用不了「去背景」。\n" +
+                    "去 https://www.koukoutu.com/user/dev 注册后在开发者页拿 Key，粘到下面即可。"
+            } else {
+                "已配置（${k.take(6)}…${k.takeLast(4)}）· 抠图 1 积分 / 张 · 输出 png 再 +1\n" +
+                    "存于 ${McpRt.kouKeyFile(ctx).absolutePath}（AI 一调用就现读，无需重启）"
+            }
+        }
+
+        fun kouEdit() {
+            val box = LinearLayout(ctx).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(dp(18), dp(6), dp(18), dp(6))
+            }
+            val kouEt = input("抠图 API Key（形如 kk-xxxx…）", McpRt.koukoutuKey(ctx))
+            kouEt.inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD
+            box.addView(kouEt, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(6) })
+            box.addView(TextView(ctx).apply {
+                text = "申请地址：https://www.koukoutu.com/user/dev\n" +
+                    "（免费额度用完可在同一页充值；同步接口 1 积分 / 张，并发上限 5）"
+                textSize = 11.5f
+                setTextColor(pal.faint)
+                setPadding(dp(2), dp(10), dp(2), 0)
+            })
+            AlertDialog.Builder(themed())
+                .setTitle("抠图 API Key")
+                .setView(box)
+                .setPositiveButton("保存") { _, _ ->
+                    val ok = McpRt.saveKoukoutuKey(ctx, kouEt.text.toString())
+                    kouRender()
+                    toast(if (ok) "已保存 —— AI 现在就能抠图了（无需重启）" else "保存失败（运行时目录不可写？）")
+                }
+                .setNeutralButton("去申请") { _, _ ->
+                    runCatching {
+                        startActivity(
+                            Intent(Intent.ACTION_VIEW, Uri.parse("https://www.koukoutu.com/user/dev"))
+                        )
+                    }.onFailure { toast("打不开浏览器：${it.message}") }
+                }
+                .setNegativeButton("取消", null)
+                .show()
+        }
+
+        val kouRow = LinearLayout(ctx).apply { orientation = LinearLayout.HORIZONTAL }
+        kouRow.addView(ghostBtnOf(ctx, pal, "填入 / 更换 Key").apply { setOnClickListener { kouEdit() } })
+        kouRow.addView(ghostBtnOf(ctx, pal, "清空").apply {
+            setOnClickListener {
+                McpRt.saveKoukoutuKey(ctx, "")
+                kouRender()
+                toast("已清空抠图 Key")
+            }
+        })
+        col.addView(kouRow, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(6) })
+        kouRender()
+
+
         val dlg = AlertDialog.Builder(themed())
             .setTitle("设置")
             .setView(ScrollView(ctx).apply { addView(col) })

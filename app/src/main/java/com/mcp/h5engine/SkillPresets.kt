@@ -45,7 +45,9 @@ object SkillPresets {
       **工具名前缀就是归属，别搞错**：
         - maker_ 开头 = TapTap Maker（本机通道，**不需要任何 OAuth 授权**）：
           maker_list_apps（列我的 Maker 项目）、maker_ensure_project（绑定/新建项目）、
-          以及生图 / 音乐 / 音效 / 配音 / 视频 / 3D 等素材工具。
+           maker_ui_list_kits + maker_ui_apply_kit（预制 UI 风格包）、maker_remove_bg（抠图 /
+           去背景，走抠抠图在线接口，只消耗它的积分）、
+           以及生图 / 音乐 / 音效 / 配音 / 视频 / 3D 等素材工具。
         - mcp_ 开头 = TapTap 小游戏开放平台（H5 上架 / 应用信息 / 开发者数据 / 排行榜 / 社区 / 广告位，
           **需要 OAuth 授权**）。
       用户问「我的 Maker 项目都有什么」这类事，一律用 maker_list_apps；
@@ -131,7 +133,15 @@ object SkillPresets {
          （它是桥的本地工具，一定会回），然后再重试目标工具。
        · 连续 3 次仍失败，才向用户说明，并且必须给出：工具名、完整报错原文、你已重试几次，
          以及「设置 → MCP 服务器 → 启动 / 重连」这一条具体操作。不许只说一句「失败了」。
-  """.trimIndent()
+    14. 图片去背景（抠图）一律用本地工具 maker_remove_bg，**不要**手写 canvas 色键 /
+        mix-blend-mode 去凑透明底（抠不干净、边缘毛边）。
+        · 参数：image=项目内原图相对路径；out=输出（默认 <原名>-nobg.png，**不许覆盖原图**）；
+          format=png 要透明底就选它（多花 1 积分）；border=1 留描边；crop=1 先裁剪。
+        · 一次一张（同步接口并发上限 5），要批量就逐张调，别并发轰炸。
+        · 它报「没配 API Key」时，告诉用户去 设置 → 图片工具（抠图） 粘贴一次
+          （申请地址 https://www.koukoutu.com/user/dev），存完立刻能用、不用重启任何东西；
+          报积分不足就说明 1 积分/张（png 再 +1）并给充值地址，**不要**反复重试白烧接口。
+   """.trimIndent()
 
     val ALL: List<Skill> = listOf(
 

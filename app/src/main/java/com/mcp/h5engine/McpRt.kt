@@ -58,6 +58,31 @@ object McpRt {
 
     fun rtDir(ctx: Context): File = File(ctx.filesDir, "hexrt")
 
+    // ==================== 图片工具（抠图 / 去背景）的 Key ====================
+    /**
+     * 抠图 Key 存哪：**桥进程的 HOME** 下的 koukoutu.json —— 也就是 `<rt>/home/koukoutu.json`。
+     * 桥每次调用 `maker_remove_bg` 都现读这个文件，所以设置页存完**立刻生效，不用重启桥**。
+     * （环境变量 HEXORA_KOUKOUTU_KEY 只是启动时按同一份文件注入的兜底值。）
+     */
+    fun kouKeyFile(ctx: Context): File = File(File(rtDir(ctx), "home"), "koukoutu.json")
+
+    /** 读当前抠图 Key（没有就是空串） */
+    fun koukoutuKey(ctx: Context): String = runCatching {
+        val f = kouKeyFile(ctx)
+        if (!f.isFile) return@runCatching ""
+        val j = org.json.JSONObject(f.readText())
+        val k = j.optString("key").ifBlank { j.optString("apiKey") }
+        k.trim()
+    }.getOrDefault("")
+
+    /** 存抠图 Key（空串 = 清空）。返回是否写成功 */
+    fun saveKoukoutuKey(ctx: Context, key: String): Boolean = runCatching {
+        val f = kouKeyFile(ctx)
+        f.parentFile?.mkdirs()
+        f.writeText(org.json.JSONObject().put("key", key.trim()).toString())
+        true
+    }.getOrDefault(false)
+
     private fun stampFile(ctx: Context) = File(rtDir(ctx), ".stamp")
 
     private fun loader(ctx: Context) = File(ctx.applicationInfo.nativeLibraryDir, "libmuslrt.so")
@@ -288,6 +313,10 @@ object McpRt {
             // UI 风格包（预制主题）：每次启动从 assets 同步一份到 rt 目录 —— 主题改了，
             // 已装设备不用重新解包 65MB 运行时就能生效。桥按这个路径列主题 / 落地主题。
             env["HEXORA_UI_KITS"] = syncUiKits(ctx, dir).absolutePath
+            // 抠图（去背景）的 API Key 兜底值：设置页把它写在 <rt>/home/koukoutu.json，
+            // 桥每次调用现读那份文件（所以换 Key 不用重启桥）；这里注入一份防文件被误删。
+            runCatching { koukoutuKey(ctx) }.getOrNull()?.takeIf { it.isNotBlank() }
+                ?.let { env["HEXORA_KOUKOUTU_KEY"] = it }
             // 关键：Maker 本体是桥 spawn 出来的**另一个** node 进程，它不继承我们给桥的启动参数。
             // 不给它带上 CA / DNS 修正，它自己发起的网络请求（生图、音乐、配音都要联网）
             // 会因为 musl 读不到 Android DNS、找不到 CA 而全部失败。

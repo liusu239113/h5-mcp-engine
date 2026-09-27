@@ -189,7 +189,10 @@ class McpHub {
      * 「Maker 已就绪」的证据 —— 否则「子进程活着但生成类工具还没注册」会被误判成正常。
      */
     private val BRIDGE_LOCAL_TOOLS = setOf(
-        "maker_ensure_project", "maker_list_apps", "maker_ui_list_kits", "maker_ui_apply_kit"
+        "maker_ensure_project", "maker_list_apps", "maker_ui_list_kits", "maker_ui_apply_kit",
+        // 抠图（去背景）：只走 HTTPS 直连抠抠图接口，子进程死了也能用 —— 所以它**同样不算**
+        // 「Maker 生成类工具已就绪」的证据。桥的 LOCAL_TOOLS 加一个，这里就必须跟一个。
+        "maker_remove_bg"
     )
 
     /** Maker 通道连上没（没连上是另一码事，用不着重抓清单） */

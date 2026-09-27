@@ -21,7 +21,7 @@
  *      dnsfix.js 起的，但 spawn 出来的子进程裸跑，它自己发起的网络请求会因为
  *      musl 读不到 Android DNS、找不到 CA 而失败。现在通过 MAKER_CHILD_ARGS 透传。
  */
-const { spawn } = require('child_process');
+const { spawn, spawnSync } = require('child_process');
 const http = require('http');
 const https = require('https');
 const fs = require('fs');
@@ -141,8 +141,56 @@ const UI_APPLY_TOOL = {
   },
 };
 
+/**
+ * 本地工具 5：抠图 / 去背景（走抠抠图在线 API）。
+ *
+ * 为什么要它：游戏素材里「去掉背景」是高频需求（角色立绘、道具、图标）。
+ * 以前 AI 只能手写 canvas 色键抠图 —— 对真实照片/复杂背景完全无效，出来是脏边，
+ * 用户看到的就「这 AI 不会抠图」。现在直接把项目里的图片丢给在线抠图，拿回透明 PNG。
+ *
+ * 为什么走 API 而不是让 AI 去点那个网页：网页要上传文件、等结果、再下载，
+ * 靠 UI 自动化做既慢又脆（对方一改版就废）。它自己有公开接口，直接调就完了。
+ *
+ * 密钥：设置 → 图片工具（抠图）里粘贴一次，或直接改 <运行时>/home/koukoutu.json。
+ * 计费：抠图 1 积分 / 张；output_format=png 额外 +1。
+ */
+const BG_TOOL = {
+  name: 'maker_remove_bg',
+  description:
+    '把项目里的一张图片抠成透明背景（AI 去背景，支持发丝/复杂背景），结果存成 PNG 回项目。' +
+    '素材要「去掉背景」时必须用它，不要自己写 canvas 色键抠图（那对真实照片无效，只会出脏边）。' +
+    '需要先在 设置 → 图片工具（抠图） 里粘一次 API Key（申请地址 https://www.koukoutu.com/user/dev ）。' +
+    '每次调用计费 1 积分（输出 png 再 +1），一次一张图；要批量就多调几次。',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      image: {
+        type: 'string',
+        description: '要抠的图片：项目内相对路径（如 assets/image/hero.png）或绝对路径',
+      },
+      out: {
+        type: 'string',
+        description: '结果保存路径，默认与源图同目录、同名的 -nobg.png',
+      },
+      format: {
+        type: 'string',
+        description: 'png（默认，透明边缘最稳，+1 积分）或 webp（省积分）',
+      },
+      border: {
+        type: 'integer',
+        description: '边缘增强：0 不增强 / 1 标准（默认） / 2 高度增强 —— 发丝、毛发建议 2',
+      },
+      crop: {
+        type: 'integer',
+        description: '是否裁切到主体边缘：0 保留原画布（默认）/ 1 裁切',
+      },
+    },
+    required: ['image'],
+  },
+};
+
 /** 桥自带的本地工具全集（tools/list 时追加给 AI） */
-const LOCAL_TOOLS = [LOCAL_TOOL, LOCAL_LIST_TOOL, UI_LIST_TOOL, UI_APPLY_TOOL];
+const LOCAL_TOOLS = [LOCAL_TOOL, LOCAL_LIST_TOOL, UI_LIST_TOOL, UI_APPLY_TOOL, BG_TOOL];
 
 function localTool(name) {
   return LOCAL_TOOLS.find((t) => t.name === name) || null;
@@ -297,6 +345,11 @@ function handleLocalTool(res, msg, tname, tdir) {
     }
     return;
   }
+  if (tname === BG_TOOL.name) {
+    // 抠图只走 HTTPS 接口，不经过 Maker 子进程 —— 子进程死了也能用
+    removeBg(args.dir || tdir, args).then((r) => reply(res, msg.id, r)).catch(fail);
+    return;
+  }
   ensureBinding(args.dir || tdir, { forceNew: !!args.create }).then((r) => reply(res, msg.id, r)).catch(fail);
 }
 
@@ -398,6 +451,160 @@ function httpsJson(method, url, token, body) {
     if (payload) req.write(payload);
     req.end();
   });
+}
+
+// ==================== 抠图（抠抠图在线 API） ====================
+// 文档：https://doc.koukoutu.com    申请 Key：https://www.koukoutu.com/user/dev
+// 同步接口 1 积分/张（output_format=png 再 +1），并发上限 5。
+const KOU_BASE = process.env.HEXORA_KOUKOUTU_BASE || 'https://sync.koukoutu.com';
+const KOU_APPLY_URL = 'https://www.koukoutu.com/user/dev';
+
+/**
+ * 抠图 API Key 的读取顺序（顺序有讲究）：
+ *   1) <HOME>/koukoutu.json 里的 key 字段 —— 设置页「图片工具（抠图）」保存时写这里，
+ *      每次调用现读，所以**换 Key 不用重启桥**；
+ *   2) 环境变量 HEXORA_KOUKOUTU_KEY —— App 启动桥时按同一份文件注入的兜底值。
+ * 都没有就返回空串，由调用方给用户一条「去哪拿 Key」的明确指引。
+ */
+function kouKey() {
+  try {
+    const home = process.env.HOME || os.homedir();
+    if (home) {
+      const f = path.join(home, 'koukoutu.json');
+      if (fs.existsSync(f)) {
+        const j = JSON.parse(fs.readFileSync(f, 'utf8'));
+        const k = (j && (j.key || j.apiKey || j.api_key)) || '';
+        if (String(k).trim()) return String(k).trim();
+      }
+    }
+  } catch (e) {
+    // 文件坏了/没权限就退回环境变量，不让抠图整个哑掉
+  }
+  if (process.env.HEXORA_KOUKOUTU_KEY) return String(process.env.HEXORA_KOUKOUTU_KEY).trim();
+  return '';
+}
+
+/** 把接口的报错翻译成「用户能照做」的话，别丢一串 HTTP 码给模型 */
+function kouErrHint(code, body) {
+  const b = String(body || '').slice(0, 240);
+  if (code === 401 || code === 403) {
+    return '抠图 API Key 无效或没配置。到 设置 → 图片工具（抠图） 粘贴一次；申请地址：'
+      + KOU_APPLY_URL + '（原文：' + b + '）';
+  }
+  if (code === 402) {
+    return '积分不足（抠图 1 积分/张，输出 png 再 +1）。到 ' + KOU_APPLY_URL + ' 充值后再试。（原文：' + b + '）';
+  }
+  if (code === 413) return '图片超过接口上限（40MB / 10000x10000），先压小再抠。（原文：' + b + '）';
+  if (code === 429) return '并发超限（同步接口最多 5 个任务），等几秒重试。（原文：' + b + '）';
+  return 'HTTP ' + code + ' ' + b;
+}
+
+/**
+ * multipart/form-data 直传，收二进制。
+ * 用 response=bytes：结果直接是图片字节，不用先拿 URL 再下载（少一次请求，也少一个会过期的链接）。
+ */
+function httpsMultipartBinary(url, params, fileField, filePath, apiKey) {
+  return new Promise((resolve, reject) => {
+    const body0 = fs.readFileSync(filePath);
+    const u = new URL(url);
+    u.search = new URLSearchParams(params).toString();
+    const boundary = '----hexora' + Date.now().toString(16) + Math.random().toString(16).slice(2);
+    const head = Buffer.from(
+      '--' + boundary + '\r\n'
+      + 'Content-Disposition: form-data; name="' + fileField + '"; filename="' + path.basename(filePath) + '"\r\n'
+      + 'Content-Type: application/octet-stream\r\n\r\n',
+      'utf8'
+    );
+    const tail = Buffer.from('\r\n--' + boundary + '--\r\n', 'utf8');
+    const body = Buffer.concat([head, body0, tail]);
+
+    const req = https.request({
+      method: 'POST',
+      hostname: u.hostname,
+      port: u.port || 443,
+      path: u.pathname + u.search,
+      headers: {
+        'X-API-Key': apiKey,
+        'Content-Type': 'multipart/form-data; boundary=' + boundary,
+        'Content-Length': body.length,
+        Accept: '*/*',
+      },
+      timeout: 180000,
+    }, (res) => {
+      const chunks = [];
+      res.on('data', (c) => chunks.push(c));
+      res.on('end', () => {
+        const buf = Buffer.concat(chunks);
+        if (res.statusCode >= 200 && res.statusCode < 300 && buf.length > 64) {
+          resolve({ buf: buf, type: String(res.headers['content-type'] || '') });
+        } else {
+          reject(new Error(kouErrHint(res.statusCode, buf.slice(0, 240).toString('utf8'))));
+        }
+      });
+    });
+    req.on('timeout', () => req.destroy(new Error('抠图接口超时（图太大或网络慢），稍后重试')));
+    req.on('error', reject);
+    req.write(body);
+    req.end();
+  });
+}
+
+/** 相对路径按「当前工程」解析；绝对路径原样用 */
+function resolveInProject(tdir, p) {
+  const s = String(p == null ? '' : p).trim();
+  if (!s) return '';
+  if (path.isAbsolute(s)) return s;
+  return path.join(tdir || cwd, s);
+}
+
+/** 真正干活：读图 → 传接口 → 写回项目 */
+async function removeBg(tdir, args) {
+  const key = kouKey();
+  if (!key) {
+    return {
+      ok: false,
+      reason: '还没有配置抠图 API Key。到 设置 → 图片工具（抠图） 粘贴一次即可（申请地址：'
+        + KOU_APPLY_URL + '）。配好后重新调用本工具。',
+    };
+  }
+  const src = resolveInProject(tdir, args.image);
+  if (!src || !fs.existsSync(src) || !fs.statSync(src).isFile()) {
+    return { ok: false, reason: '找不到要抠的图片：' + String(args.image || '(空)') + '（工程目录：' + (tdir || cwd) + '）' };
+  }
+  const size = fs.statSync(src).size;
+  if (size > 40 * 1024 * 1024) {
+    return { ok: false, reason: '图片 ' + Math.round(size / 1048576) + 'MB，超过接口 40MB 上限，先压小或裁小再抠。' };
+  }
+  const fmt = String(args.format || '').toLowerCase() === 'webp' ? 'webp' : 'png';
+  const border = [0, 1, 2].indexOf(Number(args.border)) >= 0 ? Number(args.border) : 1;
+  const crop = Number(args.crop) === 1 ? 1 : 0;
+  const params = {
+    model_key: 'background-removal',
+    output_format: fmt,
+    crop: String(crop),
+    border: String(border),
+    response: 'bytes',
+  };
+  const got = await httpsMultipartBinary(KOU_BASE + '/v1/create', params, 'image_file', src, key);
+  const out = args.out
+    ? resolveInProject(tdir, args.out)
+    : path.join(path.dirname(src), path.basename(src).replace(/\.[^.]+$/, '') + '-nobg.' + fmt);
+  fs.mkdirSync(path.dirname(out), { recursive: true });
+  fs.writeFileSync(out, got.buf);
+
+  const rel = (p) => path.relative(tdir || cwd, p).split(path.sep).join('/');
+  return {
+    ok: true,
+    src: rel(src),
+    out: rel(out),
+    abs: out,
+    kb: Math.round(got.buf.length / 1024),
+    format: fmt,
+    credits: fmt === 'png' ? 2 : 1,
+    note: '已抠成透明背景：' + rel(out) + '（原图没动）。'
+      + '开始写代码时直接引用 ' + rel(out) + '；'
+      + '还有别的图要抠，用同样的方式继续调本工具（一次一张，接口并发上限 5）。',
+  };
 }
 
 function pickExisting(projects, root) {
@@ -547,6 +754,35 @@ function waitChild(ms) {
     };
     tick();
   });
+}
+
+/**
+ * 沙箱里有没有可用的 git（只探测，不安装）。
+ *
+ * 为什么要探测：以前「绑定工程」走官方 init，而 init 第一行就是 ensureGitAvailable() ——
+ * 安卓沙箱里没有 git，于是永远绑不上，症状看起来像「生图坏了」。
+ * 现在绑定由桥直接写 .maker-mcp/config.json 完成，git 只有 `git clone` 那一步才需要。
+ * 这里把事实和结论一起返回，免得以后又有人把 "git not found" 当成生图故障。
+ */
+let gitCache = null;
+function gitProbe() {
+  if (gitCache) return gitCache;
+  const out = { available: false, path: '', version: '' };
+  try {
+    const r = spawnSync('git', ['--version'], { encoding: 'utf8', timeout: 3000 });
+    if (r && r.status === 0 && r.stdout) {
+      out.available = true;
+      out.path = 'git';
+      out.version = String(r.stdout).trim();
+    }
+  } catch (e) {
+    /* 没有就没有，不是错误 */
+  }
+  out.note = out.available
+    ? 'git 可用（只有 clone 才用到它；绑定工程与素材生成都不需要）'
+    : '沙箱里没有 git —— 这不影响绑定工程与素材生成（桥直接写 .maker-mcp/config.json），只有官方 init 的 git clone 用到它。';
+  gitCache = out;
+  return out;
 }
 
 function startChild() {
@@ -773,6 +1009,13 @@ const server = http.createServer((req, res) => {
       bound: !!readBinding(projectDir || cwd),
       binding: binding,
       bindingError: bindingErr,
+      // 沙箱里有没有可用的 git。
+      // 说明：绑定工程这条路**不需要 git**（桥直接写 .maker-mcp/config.json），
+      // 只有官方 `init` 里那步 git clone 才需要。这里只上报事实，
+      // 免得下次看到 "git not found" 又以为是「生图坏了」。
+      git: gitProbe(),
+      // 图片工具（在线抠图）的配置状态：没配 Key 时 AI 会被明确告知去哪申请
+      imageApi: { koukoutu: !!kouKey() },
     });
     return;
   }

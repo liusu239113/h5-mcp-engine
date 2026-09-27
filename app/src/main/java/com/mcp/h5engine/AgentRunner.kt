@@ -114,6 +114,23 @@ class AgentRunner(
 - 生图 / 生音乐拿不到时，先调 maker_list_apps（本地工具，一定会回）探一下通道，再重试目标工具。
 - 连续 3 次仍失败才如实汇报，并写明：工具名、报错原文、已重试次数，以及「设置 → MCP 服务器 → 启动/重连」。""".trimIndent()
             )
+
+            // ===== 图片素材：抠图 / 去背景 =====
+            // 用户给的抠抠图站点自带公开同步接口，已在桥里包成本地工具 maker_remove_bg。
+            // 模型以前爱手写 canvas 色键去凑透明底（抠不干净），这里明确改成走工具。
+            append(
+                """
+
+【要去背景（抠图）就用 maker_remove_bg，别自己抠】
+- 需要透明底立绘 / 图标 / 道具图时，调 maker_remove_bg：
+  image=项目内原图相对路径；out=输出相对路径（默认 <原名>-nobg.png，**不要覆盖原图**）；
+  format=png（要透明底选它，多花 1 积分）；border=1 留一圈描边；crop=1 先裁剪。
+- 拿到结果把 <img> 指向输出文件即可。**不要**用 canvas 色键 / mix-blend-mode 硬凑背景。
+- 它返回「需要先在 设置 → 图片工具（抠图） 里粘一次 API Key」：如实告诉用户去哪配
+  （https://www.koukoutu.com/user/dev），并说明配完立刻可用、不用重启。
+- 返回积分不足：说明 1 积分/张（png 再 +1）与充值地址，**别反复重试**白烧额度。
+- 一次一张（同步接口并发上限 5）；要批量就逐张调。""".trimIndent()
+            )
         }
 
         if (history.isNotEmpty() && history[0].role == "system") {
