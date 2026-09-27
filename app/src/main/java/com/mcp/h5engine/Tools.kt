@@ -251,7 +251,7 @@ class EngineTools(private val ui: GameUi, private val root: File) {
 
             fn("game_shot", "**离屏抓一张「游戏画面」**（不切页、不动用户屏幕、不点击）。" +
                 "这是你自己的调试眼：确认游戏画面有没有白屏/错位/被遮挡、素材有没有渲染出来。" +
-                "拿不到图会说明原因，**不要**据此断言「游戏坏了」。" +
+                "拿不到图会说明原因，**不要**据此断言「游戏坏了」",
                 "{\"maxWidth\":{\"type\":\"integer\",\"description\":\"图片最长边，默认 720\"}}",
                 emptyList()),
             fn("screenshot", "截取**整屏**画面（跟手机自带截图一样，含 App 顶栏/底栏/游戏画面，返回图片）。" +
