@@ -107,6 +107,12 @@ class MainActivity : AppCompatActivity(), GameUi {
 
     // ---------- 运行状态可视化：折叠思考面板 + 计时 ----------
     private var runHead: TextView? = null
+
+    /** 底部常驻状态行：输入框上方，切后台回来也能看到跑了多久 */
+    private var runBar: TextView? = null
+    private var guardOn = false
+    private var lastNotiSec = -1L
+    private var wakeLock: android.os.PowerManager.WakeLock? = null
     private var runBody: TextView? = null
     private var runTicker: Runnable? = null
     private var runStartAt = 0L
@@ -229,8 +235,22 @@ class MainActivity : AppCompatActivity(), GameUi {
         }
     }
 
+    override fun onPause() {
+        super.onPause()
+        // 窗口不可见时 WebView 会节流甚至暂停页面里的 JS 定时器，
+        // 这里显式续期一次，尽量让游戏循环继续跑（配合前台服务保活）
+        if (::web.isInitialized) {
+            runCatching { web.onResume() }
+            runCatching { web.resumeTimers() }
+        }
+    }
+
     override fun onResume() {
         super.onResume()
+        if (::web.isInitialized) {
+            runCatching { web.onResume() }
+            runCatching { web.resumeTimers() }
+        }
         // 授权「所有文件访问」返回后，把项目根目录切到 /sdcard/Hexora
         if (rootInited && Environment.isExternalStorageManager() && !gameRoot.absolutePath.contains("Hexora")) {
             gameRoot = pickProjectRoot().apply { mkdirs() }
@@ -432,6 +452,14 @@ class MainActivity : AppCompatActivity(), GameUi {
             setPadding(dp(12), dp(10), dp(12), dp(10))
             setBackgroundColor(pal.navBg)
         }
+
+        runBar = TextView(this).apply {
+            textSize = 11.5f
+            setTextColor(pal.sub)
+            visibility = View.GONE
+            setPadding(dp(4), 0, dp(4), dp(6))
+        }
+        box.addView(runBar)
 
         attachInfo = TextView(this).apply {
             setTextColor(pal.accent)
@@ -721,7 +749,7 @@ class MainActivity : AppCompatActivity(), GameUi {
             textSize = 11.5f
             setTextColor(pal.sub)
             setPadding(dp(12), 0, dp(12), dp(10))
-            visibility = View.GONE
+            visibility = View.VISIBLE
             setTextIsSelectable(true)
         }
         val card = LinearLayout(this).apply {
@@ -737,11 +765,15 @@ class MainActivity : AppCompatActivity(), GameUi {
 
         runHead = stat
         runBody = body
-        bodyExpanded = false
+        bodyExpanded = true
         latestActivity = ""
         runStartAt = SystemClock.elapsedRealtime()
         stat.text = "启动中…"
-        toggle.text = "展开"
+        toggle.text = "收起"
+        runBar?.visibleIf(true)
+        runBar?.text = "启动中…"
+        askNotiPermission()
+        startGuard()
         toggle.setOnClickListener {
             bodyExpanded = !bodyExpanded
             body.visibleIf(bodyExpanded)
@@ -758,8 +790,15 @@ class MainActivity : AppCompatActivity(), GameUi {
             override fun run() {
                 if (!running) return
                 val ms = SystemClock.elapsedRealtime() - runStartAt
-                runHead?.text = "${fmtDur(ms)} · 第 ${runSteps.coerceAtLeast(1)} 轮 · " +
+                val line = "${fmtDur(ms)} · 第 ${runSteps.coerceAtLeast(1)} 轮 · " +
                     latestActivity.ifEmpty { "思考中" }
+                runHead?.text = line
+                runBar?.text = "运行中 · $line"
+                val sec = ms / 1000
+                if (sec != lastNotiSec) {
+                    lastNotiSec = sec
+                    updateGuard("正在运行 · $line")
+                }
                 main.postDelayed(this, 500)
             }
         }
@@ -782,8 +821,74 @@ class MainActivity : AppCompatActivity(), GameUi {
         stopBtn.visibleIf(false)
         val ms = SystemClock.elapsedRealtime() - runStartAt
         runHead?.text = "共用时 ${fmtDur(ms)} · ${runSteps} 轮 · 已结束"
+        runBar?.text = "上次运行 · 共用时 ${fmtDur(ms)} · ${runSteps} 轮 · 已结束"
         latestActivity = ""
+        lastNotiSec = -1L
+        stopGuard()
         if (runWrote) ensurePreviewFresh()
+    }
+
+    // ==================== 后台保活 ====================
+
+    /**
+     * 任务一启动就挂前台服务 + WakeLock。
+     * 不这么做的话，切后台几秒钟系统就把进程冻结，AI 直接「不动了」。
+     */
+    private fun startGuard() {
+        if (guardOn) return
+        guardOn = true
+        RunGuardService.start(this, "启动中…")
+        runCatching {
+            val pm = getSystemService(android.content.Context.POWER_SERVICE)
+                as android.os.PowerManager
+            wakeLock = pm.newWakeLock(
+                android.os.PowerManager.PARTIAL_WAKE_LOCK, "hexora:run"
+            ).apply {
+                setReferenceCounted(false)
+                acquire(6 * 60 * 60 * 1000L)
+            }
+        }
+    }
+
+    private fun updateGuard(text: String) {
+        if (!guardOn) return
+        RunGuardService.update(this, text)
+    }
+
+    private fun stopGuard() {
+        runCatching { wakeLock?.takeIf { it.isHeld }?.release() }
+        wakeLock = null
+        if (!guardOn) return
+        guardOn = false
+        RunGuardService.stop(this)
+    }
+
+    /** 国产 ROM 只靠前台服务还不够，得把电池优化关掉 */
+    private fun askKeepAlive() {
+        val pm = getSystemService(android.content.Context.POWER_SERVICE)
+            as android.os.PowerManager
+        if (pm.isIgnoringBatteryOptimizations(packageName)) {
+            toast("已在保活白名单里，切后台不会被冻结")
+            return
+        }
+        runCatching {
+            startActivity(
+                Intent(android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS)
+                    .setData(Uri.parse("package:$packageName"))
+            )
+        }.onFailure {
+            toast("这台机器不允许直接申请，请到系统设置 → 应用 → Hexora → 省电策略里选「无限制」")
+        }
+    }
+
+    /** Android 13+ 通知权限：不给也能跑，只是通知栏看不到进度 */
+    private fun askNotiPermission() {
+        if (android.os.Build.VERSION.SDK_INT < 33) return
+        val ok = checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) ==
+            android.content.pm.PackageManager.PERMISSION_GRANTED
+        if (!ok) runCatching {
+            requestPermissions(arrayOf(android.Manifest.permission.POST_NOTIFICATIONS), 71)
+        }
     }
 
     private fun appendThinking(line: String) {
@@ -1111,6 +1216,7 @@ class MainActivity : AppCompatActivity(), GameUi {
             Triple("查看当前游戏文件", "列出文件与体积", { showTree() }),
             Triple("查看 console 输出", "游戏里的 log / warn / error", { showConsole() }),
             Triple("切换 / 新建项目", "一个项目一个目录，互不干扰", { showProjects() }),
+            Triple("后台保活设置", "切后台 / 锁屏 AI 继续跑（需要关掉电池优化）", { askKeepAlive() }),
             Triple("复制工程路径", gameRoot.absolutePath, { copyToClipboard(gameRoot.absolutePath) }),
             Triple("清空对话历史", "AI 会忘掉之前的上下文", { clearHistory() })
         )
@@ -1460,20 +1566,19 @@ class MainActivity : AppCompatActivity(), GameUi {
                 if (m.isNotEmpty()) cfgStore.setModel(curProvider.id, m)
                 cfgStore.skillId = SkillPresets.ALL[skillSp.selectedItemPosition].id
                 cfgStore.temperature = tempEt.text.toString().toDoubleOrNull() ?: 0.4
-                cfgStore.maxSteps = stepsEt.text.toString().toIntOrNull() ?: 40
+                cfgStore.maxSteps = stepsEt.text.toString().toIntOrNull() ?: 400
                 cfgStore.visionFallback = fbCb.isChecked
                 cfgStore.visionMode = visIds[visSel]
                 val oldTheme = cfgStore.themeMode
                 cfgStore.themeMode = themeIds[themeSel]
-                history.clear()
-                chatList.removeAllViews()
+                // 保存设置绝对不能顺手清空对话——用户只是来调个参数
                 dlg.dismiss()
                 if (oldTheme != themeIds[themeSel]) {
                     toast("主题已切换，正在刷新界面…")
                     recreate()
                 } else {
                     refreshHeader()
-                    addSystemLine("设置已保存：${curProvider.label} / ${cfgStore.modelOf(curProvider.id)}（历史已清空）")
+                    addSystemLine("设置已保存：${curProvider.label} / ${cfgStore.modelOf(curProvider.id)}（对话已保留）")
                 }
             }
 

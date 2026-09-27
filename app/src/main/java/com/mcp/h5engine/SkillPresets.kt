@@ -33,14 +33,14 @@ object SkillPresets {
 
     val ALL: List<Skill> = listOf(
 
-        Skill("general", "通用游戏开发", false, 40, null, COMMON + """
+        Skill("general", "通用游戏开发", false, 400, null, COMMON + """
 
 【当前技能：通用开发】
 按用户描述实现或迭代功能。先给一个能跑的最小版本，再逐步加玩法。
 把数值和关卡参数集中放在 JS 顶部的 CONFIG 对象里，方便后面调。
 完成后用一段话汇报：做了什么、还差什么。"""),
 
-        Skill("visual", "视觉自检（多模态）", true, 50, null, COMMON + """
+        Skill("visual", "视觉自检（多模态）", true, 500, null, COMMON + """
 
 【当前技能：视觉自检】你的模型能看图，严格执行"写 → 看 → 改"闭环：
 1. game_write 写完 → game_reload
@@ -52,7 +52,7 @@ object SkillPresets {
 
 严禁：不看截图就宣布完成。"""),
 
-        Skill("prototype", "玩法原型（快速试错）", false, 25,
+        Skill("prototype", "玩法原型（快速试错）", false, 400,
             setOf("game_create", "game_write", "game_launch", "game_reload", "js_eval", "console_logs"),
             COMMON + """
 
@@ -60,7 +60,7 @@ object SkillPresets {
 核心循环写在一个 game.js 里；所有参数可调，用 js_eval 现场改数值做平衡测试。
 不要引入任何素材文件，用 canvas 画几何图形占位。"""),
 
-        Skill("debug", "调试修 Bug", true, 45, null, COMMON + """
+        Skill("debug", "调试修 Bug", true, 400, null, COMMON + """
 
 【当前技能：调试】目标是把用户说的 bug 定位并修掉：
 1. console_logs 看报错
@@ -69,21 +69,21 @@ object SkillPresets {
 4. game_reload → screenshot 确认画面正常 → console_logs 确认无报错
 5. 汇报时要讲"根因是什么"，不要只说"改好了"。"""),
 
-        Skill("perf", "性能与适配", true, 40, null, COMMON + """
+        Skill("perf", "性能与适配", true, 400, null, COMMON + """
 
 【当前技能：性能适配】目标是稳住帧率并适配各种屏幕。
 关注：requestAnimationFrame 里不要做 DOM 读写；静态层用离屏 canvas 缓存；
 DPR 上限 2；避免每帧 new 对象；大量粒子用 typed array。
 用 js_eval 实测：statistics 3 秒内的帧数与平均耗时，把数据报出来再优化，不要凭感觉。"""),
 
-        Skill("art", "美术与动效打磨", true, 35, null, COMMON + """
+        Skill("art", "美术与动效打磨", true, 400, null, COMMON + """
 
 【当前技能：美术动效】在不上素材的前提下把画面做像样：
 渐变与阴影、粒子、缓动函数（easeOutBack 等）、拖尾、屏幕震动、统一调色板。
 每加一层效果就 screenshot 对比一次，确保没有变糊、没有性能崩。
 配色建议给一套主色 + 一个高亮点缀色，别超过 5 个颜色。"""),
 
-        Skill("from_scratch", "从 0 做一款完整游戏", true, 80, null, COMMON + """
+        Skill("from_scratch", "从 0 做一款完整游戏", true, 800, null, COMMON + """
 
 【当前技能：从零做完整游戏】按下面流程做，每步都要有可见产出：
 1. 先和用户确认核心玩法一句话（如果用户已说清就直接做）
@@ -96,7 +96,7 @@ DPR 上限 2；避免每帧 new 对象；大量粒子用 typed array。
 
 不要一口气写 2000 行再跑，宁可分 5 轮。"""),
 
-        Skill("ads", "广告接入（TapTap 激励视频）", false, 45, null, COMMON + """
+        Skill("ads", "广告接入（TapTap 激励视频）", false, 400, null, COMMON + """
 
 【当前技能：广告接入（激励视频变现）】
 目标：给当前游戏接上激励视频广告。接口契约**严格对齐 TapTap 小游戏官方文档**，不许凭印象改。

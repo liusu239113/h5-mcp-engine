@@ -39,9 +39,11 @@ class AiConfigStore(ctx: Context) {
 
     /** 一次任务里最多让 AI 调多少次工具（防止跑飞） */
     var maxSteps: Int
-        get() = sp.getInt("steps", 40)
+        // 400 起步：做一款完整游戏、反复截图自检时，40 轮根本不够
+        // （早期版本默认 40，这里把老装机里已经存下的 40 顺势迁移到 400）
+        get() = sp.getInt("steps", 400).let { if (it == 40) 400 else it }
         set(v) {
-            sp.edit().putInt("steps", v.coerceIn(1, 200)).apply()
+            sp.edit().putInt("steps", v.coerceIn(1, 2000)).apply()
         }
 
     /** 模型不支持视觉时：截图存盘并把路径告诉它，而不是硬塞图片 */
