@@ -21,7 +21,7 @@ import java.util.concurrent.atomic.AtomicBoolean
  * 以 Streamable HTTP 模式在 127.0.0.1:3000 起服务，App 再用 MCP 客户端去连。
  */
 object McpRt {
-    private const val STAMP = "1"
+    private const val STAMP = "2"
     const val PORT = 3000
     const val URL_BASE = "http://127.0.0.1:3000/"
 
@@ -92,9 +92,15 @@ object McpRt {
             if (!node.isFile || !server.isFile) return "运行时未解包"
             stop()
             val home = File(dir, "home").apply { mkdirs() }
+            writeDnsMap(ctx)
             val pb = ProcessBuilder(
                 ld.absolutePath, "--library-path", dir.absolutePath,
-                node.absolutePath, server.absolutePath
+                node.absolutePath,
+                // Android 沙箱里没有 /etc/ssl/certs，用 node 内置的 Mozilla CA
+                "--use-bundled-ca",
+                // musl 只读 /etc/resolv.conf（Android 沙箱里没有），改用 node 自己的 UDP 查询
+                "-r", File(dir, "dnsfix.js").absolutePath,
+                server.absolutePath
             )
             pb.directory(File(dir, "package"))
             pb.redirectErrorStream(true)
@@ -130,6 +136,22 @@ object McpRt {
         } finally {
             busy.set(false)
         }
+    }
+
+    /**
+     * 用 Android 自己的解析器（走 netd，沙箱里一定可用）预先解析关键域名，
+     * 写成 dns.map 给 dnsfix.js 兜底：万一 UDP DNS 被墙/被劫持，还有这条路。
+     */
+    private fun writeDnsMap(ctx: Context) {
+        val hosts = listOf(
+            "agent.tapapis.cn", "accounts.tapapis.cn", "www.taptap.cn",
+            "api.taptap.cn", "openapi.taptap.cn", "developer.taptap.cn"
+        )
+        val obj = org.json.JSONObject()
+        for (h in hosts) {
+            runCatching { obj.put(h, java.net.InetAddress.getByName(h).hostAddress) }
+        }
+        runCatching { File(rtDir(ctx), "dns.map").writeText(obj.toString()) }
     }
 
     fun stop() {
