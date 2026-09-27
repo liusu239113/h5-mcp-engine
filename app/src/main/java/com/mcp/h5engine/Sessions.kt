@@ -37,9 +37,16 @@ data class Attach(
  * 会话落盘：app 私有目录 sessions.json。
  * 只存文字（图片不落盘，否则文件会迅速膨胀到几百 MB）。
  */
-class SessionStore(ctx: Context) {
+class SessionStore(private val ctx: Context, val proj: String = "") {
 
-    private val f = File(ctx.filesDir, "sessions.json")
+    /** 一个项目一份会话库 —— 新开项目就是全新上下文，绝不和历史串味 */
+    private val f = File(ctx.filesDir, "sessions_" + proj.ifBlank { "default" } + ".json")
+
+    /** 旧版只有全局 sessions.json：首次按项目读取时接管过来，老历史不丢 */
+    fun migrateLegacy() {
+        val old = File(ctx.filesDir, "sessions.json")
+        if (!f.exists() && old.exists()) runCatching { old.renameTo(f) }
+    }
 
     fun load(): MutableList<ChatSession> {
         if (!f.exists()) return mutableListOf()
