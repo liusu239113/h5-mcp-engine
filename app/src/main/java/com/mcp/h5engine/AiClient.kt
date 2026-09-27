@@ -785,15 +785,14 @@ class AiClient(private val cfg: ProviderConfig) {
     private fun bodyOpenAi(history: List<ChatMsg>, tools: List<JSONObject>): JSONObject {
         val msgs = JSONArray()
         for (m in history) {
-            // 严格服务商（DeepSeek / 火山 / 智谱等）会校验：
-            // assistant 消息必须带 content 或 tool_calls，否则整轮 400
-            // 「Invalid assistant message: content or tool_calls must be set」。
-            // 这种空壳多来自「tool_calls 被拆掉后剩下的空 assistant」，
-            // 或「上游失败轮把空回复写进历史」—— 后者会让「再试一次」永远复现同一个 400。
-            // 直接跳过不发给服务商，比让整轮请求失败划算。
-            if (m.role == "assistant" && m.text.isNullOrBlank() &&
-                m.toolCalls.isEmpty() && m.images.isNullOrEmpty()
-            ) continue
+            // 严格服务商（DeepSeek / 火山 / 智谱等）会校验：assistant 消息必须带 content 或 tool_calls。
+            // **关键**：历史里躺着旧版本 optString 的锅 —— 字面量 "null"。
+            // 它既不是 null 也不是空白，只判 isNullOrBlank 会漏过去，照样 400。
+            // 所以先抹掉 "null" 再判断，空壳一律不发。
+            val t = (m.text ?: "").replace("null", "").trim()
+            val hasTools = m.toolCalls.isNotEmpty()
+            val hasImg = !m.images.isNullOrEmpty()
+            if (m.role == "assistant" && t.isEmpty() && !hasTools && !hasImg) continue
             val o = JSONObject().put("role", m.role)
             if (m.role == "tool") {
                 o.put("tool_call_id", m.toolCallId ?: "")
@@ -801,7 +800,7 @@ class AiClient(private val cfg: ProviderConfig) {
                 // 这里统一抹掉，免得模型读到一坨 null 之后自己也糊了。
                 o.put("content", contentOrParts(m.text?.replace("null", ""), m.images))
             } else if (m.toolCalls.isNotEmpty()) {
-                o.put("content", m.text ?: JSONObject.NULL)
+                o.put("content", if (t.isEmpty()) JSONObject.NULL else t)
                 val tcs = JSONArray()
                 for (t in m.toolCalls) {
                     tcs.put(
