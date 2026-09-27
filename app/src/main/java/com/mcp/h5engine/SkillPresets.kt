@@ -39,7 +39,6 @@ object SkillPresets {
    原因：TapTap 侧有些接口会在后台【顺带把游戏发布 / 更新上线】，回执不会告诉你这件事，
    AI 自己根本不知道自己已经发布了 —— 用户没让你动线上数据，就绝对不要动。
    需求永远可以用只读方式满足：要排行榜 ID / 广告位 ID，就去查，不要去改。
-"""
 """.trimIndent()
 
     val ALL: List<Skill> = listOf(
