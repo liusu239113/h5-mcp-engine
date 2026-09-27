@@ -23,6 +23,26 @@ class AiConfigStore(ctx: Context) {
             sp.edit().putString("theme", v).apply()
         }
 
+    // ==================== 项目状态（跨重启 / 跨覆盖安装保留） ====================
+
+    /**
+     * 上次打开的项目 id。
+     * 必须落盘：APK 覆盖安装会强杀进程，冷启动若不恢复就会退回硬编码的 "demo"，
+     * 用户看到的现象是「更新一次，我的项目就变回 demo 了」。
+     */
+    var lastGame: String
+        get() = sp.getString("last_game", "demo") ?: "demo"
+        set(v) {
+            sp.edit().putString("last_game", v).apply()
+        }
+
+    /** 上次的项目根目录绝对路径，用于权限判定抖动时沿用原目录，避免项目「凭空消失」 */
+    var lastRoot: String
+        get() = sp.getString("last_root", "") ?: ""
+        set(v) {
+            sp.edit().putString("last_root", v).apply()
+        }
+
     // ==================== 模型 ====================
 
     var providerId: String

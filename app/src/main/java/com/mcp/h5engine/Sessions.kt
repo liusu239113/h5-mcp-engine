@@ -21,6 +21,19 @@ data class DocAttach(
 )
 
 /**
+ * 通用附件：素材 / 文档 / 技能 / 代码，四类共用一套模型。
+ * kind ∈ image / audio / video / doc / skill / code
+ * rel = 落在工程根下的相对路径（_uploads/media/… 、_uploads/doc/… 、_skills/… ）
+ * text = 能提出来的正文（纯文本/文档才有，二进制为空）
+ */
+data class Attach(
+    val name: String,
+    val rel: String,
+    val kind: String,
+    val text: String = ""
+)
+
+/**
  * 会话落盘：app 私有目录 sessions.json。
  * 只存文字（图片不落盘，否则文件会迅速膨胀到几百 MB）。
  */

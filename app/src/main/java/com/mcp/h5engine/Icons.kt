@@ -7,9 +7,11 @@ import android.graphics.Paint
 import android.graphics.Path
 import android.graphics.PixelFormat
 import android.graphics.drawable.Drawable
+import android.view.Gravity
 import android.view.View
 import android.widget.ImageView
 import android.widget.LinearLayout
+import android.widget.TextView
 
 /**
  * 手绘风线性图标：用 Path 直接描线，不用 emoji、不用字体图标。
@@ -102,6 +104,82 @@ class LineIcon(
                 path.lineTo(19.5f, 10f)
                 path.lineTo(14f, 10f)
             }
+            // 素材：方框 + 小圆（太阳）+ 山形折线
+            "image" -> {
+                path.moveTo(3.5f, 5.5f)
+                path.lineTo(20.5f, 5.5f)
+                path.lineTo(20.5f, 18.5f)
+                path.lineTo(3.5f, 18.5f)
+                path.close()
+                path.addCircle(8.6f, 10.2f, 1.6f, Path.Direction.CW)
+                path.moveTo(5.6f, 16.6f)
+                path.lineTo(10.4f, 12.3f)
+                path.lineTo(13.6f, 15.1f)
+                path.lineTo(16.2f, 13.1f)
+                path.lineTo(19.4f, 16.6f)
+            }
+            // 视频：方框 + 播放三角
+            "video" -> {
+                path.moveTo(3.5f, 5.5f)
+                path.lineTo(20.5f, 5.5f)
+                path.lineTo(20.5f, 18.5f)
+                path.lineTo(3.5f, 18.5f)
+                path.close()
+                path.moveTo(10.4f, 9.6f)
+                path.lineTo(15.6f, 12f)
+                path.lineTo(10.4f, 14.4f)
+                path.close()
+            }
+            // 音频：三根竖条（声波）
+            "audio" -> {
+                path.moveTo(6.5f, 10f)
+                path.lineTo(6.5f, 14f)
+                path.moveTo(12f, 6.6f)
+                path.lineTo(12f, 17.4f)
+                path.moveTo(17.5f, 9f)
+                path.lineTo(17.5f, 15f)
+            }
+            // 文档：折角纸页 + 两条横线
+            "doc" -> {
+                path.moveTo(6f, 4f)
+                path.lineTo(14f, 4f)
+                path.lineTo(18.5f, 8.5f)
+                path.lineTo(18.5f, 20f)
+                path.lineTo(6f, 20f)
+                path.close()
+                path.moveTo(14f, 4f)
+                path.lineTo(14f, 8.5f)
+                path.lineTo(18.5f, 8.5f)
+                path.moveTo(8.6f, 13f)
+                path.lineTo(15.9f, 13f)
+                path.moveTo(8.6f, 16.4f)
+                path.lineTo(13.4f, 16.4f)
+            }
+            // 技能：闪电
+            "skill" -> {
+                path.moveTo(13.4f, 3.5f)
+                path.lineTo(7.2f, 13.2f)
+                path.lineTo(11.6f, 13.2f)
+                path.lineTo(10.4f, 20.5f)
+                path.lineTo(16.8f, 10.6f)
+                path.lineTo(12.2f, 10.6f)
+                path.close()
+            }
+            // 全屏：四角括号
+            "fullscreen" -> {
+                path.moveTo(4.5f, 9.5f)
+                path.lineTo(4.5f, 4.5f)
+                path.lineTo(9.5f, 4.5f)
+                path.moveTo(14.5f, 4.5f)
+                path.lineTo(19.5f, 4.5f)
+                path.lineTo(19.5f, 9.5f)
+                path.moveTo(19.5f, 14.5f)
+                path.lineTo(19.5f, 19.5f)
+                path.lineTo(14.5f, 19.5f)
+                path.moveTo(9.5f, 19.5f)
+                path.lineTo(4.5f, 19.5f)
+                path.lineTo(4.5f, 14.5f)
+            }
         }
         canvas.drawPath(path, p)
         canvas.restore()
@@ -135,4 +213,85 @@ fun iconButton(
         leftMargin = ctx.dp(marginStartDp)
     }
     setOnClickListener { onClick() }
+}
+
+/**
+ * 工作区入口卡：24dp 手绘图标 + 下方 11.5sp 文字。
+ * 这是 Maker 那种「完整操作区」，不是三个小方按钮 —— 上一版就是栽在这里。
+ */
+fun entryTile(
+    ctx: Context,
+    p: Palette,
+    kind: String,
+    label: String,
+    onLongClick: (() -> Unit)? = null,
+    onClick: () -> Unit
+): LinearLayout {
+    val col = LinearLayout(ctx).apply {
+        orientation = LinearLayout.VERTICAL
+        gravity = Gravity.CENTER
+        setPadding(ctx.dp(2), ctx.dp(8), ctx.dp(2), ctx.dp(7))
+        background = pressable(roundCard(ctx, p.cardAlt, p.border, 12), 0x14000000)
+        isClickable = true
+    }
+    val icon = ImageView(ctx).apply {
+        // 42dp 容器 - 9dp*2 内边距 = 24dp 图标本体
+        setImageDrawable(LineIcon(kind, p.sub, ctx.dp(2).toFloat()))
+        setPadding(ctx.dp(9), ctx.dp(9), ctx.dp(9), ctx.dp(9))
+    }
+    col.addView(icon, LinearLayout.LayoutParams(ctx.dp(42), ctx.dp(42)))
+    col.addView(TextView(ctx).apply {
+        text = label
+        textSize = 11.5f
+        letterSpacing = 0.04f
+        gravity = Gravity.CENTER
+        setTextColor(p.sub)
+        setPadding(0, ctx.dp(5), 0, 0)
+    })
+    col.setOnClickListener { onClick() }
+    if (onLongClick != null) col.setOnLongClickListener { onLongClick(); true }
+    return col
+}
+
+/** 待发送区 / 文件列表的一行：小图标 + 名字 + 可选尾部「＋」 */
+fun attachRowOf(
+    ctx: Context,
+    p: Palette,
+    kind: String,
+    name: String,
+    tail: String?,
+    onTail: (() -> Unit)? = null
+): LinearLayout {
+    val row = LinearLayout(ctx).apply {
+        orientation = LinearLayout.HORIZONTAL
+        gravity = Gravity.CENTER_VERTICAL
+        setPadding(ctx.dp(9), ctx.dp(6), ctx.dp(9), ctx.dp(6))
+        background = pressable(roundCard(ctx, p.cardAlt, p.border, 9), 0x14000000)
+        isClickable = true
+    }
+    val iv = ImageView(ctx).apply {
+        setImageDrawable(LineIcon(kind, p.sub, ctx.dp(2).toFloat()))
+        setPadding(ctx.dp(6), ctx.dp(6), ctx.dp(6), ctx.dp(6))
+    }
+    row.addView(iv, LinearLayout.LayoutParams(ctx.dp(26), ctx.dp(26)))
+    row.addView(TextView(ctx).apply {
+        text = name
+        textSize = 11.5f
+        maxLines = 1
+        ellipsize = android.text.TextUtils.TruncateAt.MIDDLE
+        setTextColor(p.text)
+        setPadding(ctx.dp(5), 0, ctx.dp(5), 0)
+    }, LinearLayout.LayoutParams(0, -2, 1f))
+    if (tail != null) {
+        row.addView(TextView(ctx).apply {
+            text = tail
+            textSize = 12.5f
+            setTextColor(p.faint)
+            gravity = Gravity.CENTER
+            setPadding(ctx.dp(7), ctx.dp(2), ctx.dp(3), ctx.dp(2))
+        }.apply {
+            if (onTail != null) setOnClickListener { onTail() }
+        })
+    }
+    return row
 }

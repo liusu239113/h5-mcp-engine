@@ -207,8 +207,37 @@ class EngineTools(private val ui: GameUi, private val root: File) {
             r == "adkit.js" || r == "AD_KIT.md" -> safe(File(root, "_shared"), r)
             r == "_uploads" -> File(root, "_uploads")
             r.startsWith("_uploads/") -> safe(File(root, "_uploads"), r.removePrefix("_uploads/"))
-            else -> safe(gameDir(game), r)
+            r == "_skills" -> File(root, "_skills")
+            r.startsWith("_skills/") -> safe(File(root, "_skills"), r.removePrefix("_skills/"))
+            else -> {
+                val f = safe(gameDir(game), r)
+                // 用户只报文件名也要能读到：素材/文档/技能散在 _uploads、_skills 里
+                if (f.exists()) f else (fuzzyFind(r) ?: f)
+            }
         }
+    }
+
+    /**
+     * 只报文件名也能读：在 _skills/ → _uploads/ → _shared/ 里按 basename 忽略大小写找。
+     * 顺序有讲究：用户刚传的东西优先级最高，其次是共享资产。
+     * 重名时取第一个（不会瞎猜路径，找不到就返回 null 交给上层报「文件不存在」）。
+     */
+    private fun fuzzyFind(name: String): File? {
+        val base = name.trim().trimStart('/').substringAfterLast('/').lowercase()
+        if (base.isEmpty() || base.contains("..")) return null
+        val dirs = listOf(
+            File(root, "_skills"),
+            File(root, "_uploads"),
+            File(root, "_shared")
+        )
+        for (d in dirs) {
+            if (!d.isDirectory) continue
+            val hit = d.walkTopDown()
+                .filter { it.isFile && it.name.lowercase() == base }
+                .take(1).firstOrNull()
+            if (hit != null) return hit
+        }
+        return null
     }
 
     private fun tree(dir: File, base: File = dir): String {
@@ -283,15 +312,31 @@ class EngineTools(private val ui: GameUi, private val root: File) {
                 else ""
                 val up = File(root, "_uploads")
                 val ups = if (up.isDirectory && up.listFiles()?.isNotEmpty() == true)
-                    "\n\n_uploads/ 用户上传的文档（用 game_read path=_uploads/xxx 读）：\n" + tree(up)
+                    "\n\n_uploads/ 用户上传的素材与文档（用 game_read path=_uploads/xxx 读）：\n" + tree(up)
                 else ""
-                ToolResult(head + shared + ups)
+                val sk = File(root, "_skills")
+                val sks = if (sk.isDirectory && sk.listFiles()?.isNotEmpty() == true)
+                    "\n\n_skills/ 用户上传的技能（用 game_read path=_skills/xxx 读，也可以只报文件名）：\n" + tree(sk)
+                else ""
+                ToolResult(head + shared + ups + sks)
             } else {
                 val f = resolve(g, p)
                 ToolResult(
-                    if (!f.exists())
-                        "文件不存在: $p（共享资产要带 _shared/ 前缀，例如 _shared/adkit.js）"
-                    else "```\n${f.readText().take(60000)}\n```"
+                    if (!f.exists()) {
+                        // 还是没找到：把名字相近的候选列出来，让模型换一个名字再读
+                        val want = p.substringAfterLast('/').lowercase()
+                        val cand = listOf(
+                            File(root, "_skills"), File(root, "_uploads"), File(root, "_shared")
+                        ).filter { it.isDirectory }.joinToString("") { d ->
+                            val ns = d.walkTopDown().filter { it.isFile }.take(60)
+                                .map { it.name }
+                                .filter { it.lowercase().contains(want) }
+                                .take(8).toList()
+                            if (ns.isEmpty()) "" else "\n  ${d.name}/ 里有相近的：${ns.joinToString("、")}"
+                        }
+                        "文件不存在: $p（共享资产要带 _shared/ 前缀，例如 _shared/adkit.js；" +
+                            "用户上传的文档/技能也可以只报文件名）" + cand
+                    } else "```\n${f.readText().take(60000)}\n```"
                 )
             }
         }

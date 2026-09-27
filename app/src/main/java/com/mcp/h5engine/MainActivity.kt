@@ -5,7 +5,9 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.ContentValues
+import android.app.Dialog
 import android.content.Intent
+import android.content.pm.ActivityInfo
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Canvas
@@ -93,7 +95,14 @@ class MainActivity : AppCompatActivity(), GameUi {
     private var history: MutableList<ChatMsg> = mutableListOf()
     private val sessions = mutableListOf<ChatSession>()
     private var activeSession = 0
-    private val attachedDocs = mutableListOf<DocAttach>()
+    private val attached = java.util.ArrayList<Attach>()      // 待发送区（选了但还没加入对话）
+    private val queued = java.util.ArrayList<Attach>()        // 已加入本轮对话的附件
+    private val shotBytes = HashMap<String, ByteArray>()      // 图片 rel → 压缩后的 JPEG（多模态用）
+    private var pickMode = "media"                            // media / doc / skill
+    private lateinit var pendingBox: LinearLayout             // 待发送区容器
+    private var fullDlg: Dialog? = null                       // 全屏预览 Dialog
+    private lateinit var previewWrapHolder: FrameLayout       // 预览 WebView 的容器（全屏时搬家）
+    private lateinit var previewSlot: LinearLayout            // 预览容器原位（退出全屏搬回来）
     private val sessStore by lazy { SessionStore(this) }
     private lateinit var sessionBtn: TextView
     private val pendingShots = mutableListOf<ByteArray>()
@@ -175,6 +184,15 @@ class MainActivity : AppCompatActivity(), GameUi {
         seedBundledGames()
         seedSharedRuntime()
 
+        // 恢复上次打开的项目：覆盖安装会强杀进程，冷启动不恢复就永远回到 demo
+        val savedGame = cfgStore.lastGame
+        if (savedGame.isNotBlank() && savedGame != currentGame &&
+            File(gameRoot, savedGame).isDirectory
+        ) {
+            currentGame = savedGame
+        }
+        cfgStore.lastRoot = gameRoot.absolutePath
+
         pal = paletteOf(this, themeModeOf(cfgStore.themeMode))
 
         rootView = LinearLayout(this).apply {
@@ -210,12 +228,23 @@ class MainActivity : AppCompatActivity(), GameUi {
 
     /** 拿到「所有文件访问」后，项目就落在 /sdcard/Hexora —— 路径在文件管理器里看得见 */
     private fun pickProjectRoot(): File {
-        val ext = runCatching {
+        // 1) 有「所有文件访问」权限：项目落在 /sdcard/Hexora，文件管理器里看得见
+        runCatching {
             if (Environment.isExternalStorageManager()) {
-                File(Environment.getExternalStorageDirectory(), "Hexora")
-            } else null
-        }.getOrNull()
-        return ext ?: File(filesDir, "games")
+                return File(Environment.getExternalStorageDirectory(), "Hexora")
+            }
+        }
+        // 2) 权限判定抖动（覆盖安装后首次启动偶尔是 false）：只要上次的根目录还在就沿用，
+        //    否则会静默切到私有目录，用户看到的是「项目全没了，只剩 demo」
+        runCatching {
+            val last = cfgStore.lastRoot
+            if (last.isNotBlank()) {
+                val f = File(last)
+                if (f.isDirectory && f.canWrite() && f.listFiles()?.isNotEmpty() == true) return f
+            }
+        }
+        // 3) 兜底：没有权限时唯一可写的位置
+        return File(filesDir, "games")
     }
 
     /** 从旧的内部目录一次性迁移项目（只补不覆盖） */
@@ -425,10 +454,11 @@ class MainActivity : AppCompatActivity(), GameUi {
         }
     }
 
-    /** 选文档：txt / md / json / zip / docx… 都能选 */
-    private val pickFile =
-        registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
-            onDocPicked(uri)
+    /** 多选：素材（图/音/视频）、文档、技能共用一套选择器，按 pickMode 决定 mime 白名单 */
+    private val pickMany =
+        registerForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
+            if (uris.isNullOrEmpty()) return@registerForActivityResult
+            onPickedMany(uris.toList())
         }
 
     private fun showTab(tab: Int) {
@@ -475,16 +505,37 @@ class MainActivity : AppCompatActivity(), GameUi {
             addView(chatList)
         }
 
-        // 标题下这排手绘线性图标：文件 / 图层 / 代码（对齐 TapTap Maker 的位置）
+        // 工作区入口：素材 / 文档 / 技能 / 代码（Maker 那种完整操作区，不是三个小方按钮）
+        // 代码卡：单击 = 文件列表，长按 = 直接开 index.html（原来 folder 图标的快捷没丢）
         val toolRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(14), dp(2), dp(14), dp(8))
+        }
+        toolRow.addView(
+            entryTile(this, pal, "image", "素材") { pickMedia("media") },
+            LinearLayout.LayoutParams(0, -2, 1f).apply { rightMargin = dp(6) }
+        )
+        toolRow.addView(
+            entryTile(this, pal, "doc", "文档") { pickMedia("doc") },
+            LinearLayout.LayoutParams(0, -2, 1f).apply { rightMargin = dp(6) }
+        )
+        toolRow.addView(
+            entryTile(this, pal, "skill", "技能") { pickMedia("skill") },
+            LinearLayout.LayoutParams(0, -2, 1f).apply { rightMargin = dp(6) }
+        )
+        toolRow.addView(
+            entryTile(this, pal, "code", "代码", onLongClick = { editMainCode() }) { showCode() },
+            LinearLayout.LayoutParams(0, -2, 1f)
+        )
+        page.addView(toolRow)
+
+        // 待发送区：一行一个附件（小图标 + 文件名 + ×）；点条目 = 加入对话
+        pendingBox = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
             setPadding(dp(14), 0, dp(14), dp(6))
         }
-        toolRow.addView(iconButton(this, pal, "folder") { showCode() })
-        toolRow.addView(iconButton(this, pal, "layers", marginStartDp = 6) { showTree() })
-        toolRow.addView(iconButton(this, pal, "code", marginStartDp = 6) { editMainCode() })
-        page.addView(toolRow)
+        page.addView(pendingBox)
 
         page.addView(chatScroll, LinearLayout.LayoutParams(-1, 0, 1f))
 
@@ -537,11 +588,11 @@ class MainActivity : AppCompatActivity(), GameUi {
                 AlertDialog.Builder(themed())
                     .setTitle("添加附件")
                     .setItems(
-                        arrayOf("从相册选图片", "选文档（txt / md / json / zip / docx…）", "当前游戏画面")
+                        arrayOf("素材（图 / 音频 / 视频，可多选）", "文档（txt / md / json / zip / docx…）", "当前游戏画面")
                     ) { _, i ->
                         when (i) {
-                            0 -> pickImage.launch("image/*")
-                            1 -> pickDoc()
+                            0 -> pickMedia("media")
+                            1 -> pickMedia("doc")
                             else -> attachScreenshot()
                         }
                     }
@@ -658,22 +709,40 @@ class MainActivity : AppCompatActivity(), GameUi {
     }
 
     private fun updateAttachInfo() {
-        if (pendingShots.isEmpty() && attachedDocs.isEmpty()) {
+        // 待发送区：一行一个附件（小图标 + 文件名 + ×）。点条目 = 加入对话，× = 移除
+        if (::pendingBox.isInitialized) {
+            pendingBox.removeAllViews()
+            for (a in attached) {
+                val row = attachRowOf(this, pal, a.kind, a.name, tail = "×", onTail = {
+                    attached.remove(a)
+                    shotBytes.remove(a.rel)
+                    updateAttachInfo()
+                })
+                row.setOnClickListener { queueAttach(a) }
+                pendingBox.addView(row, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(6) })
+            }
+        }
+        if (attached.isEmpty() && queued.isEmpty() && pendingShots.isEmpty()) {
             attachInfo.visibility = View.GONE
             return
         }
         attachInfo.visibility = View.VISIBLE
         attachInfo.text = buildString {
-            if (pendingShots.isNotEmpty()) append("已附 ${pendingShots.size} 张图")
-            if (attachedDocs.isNotEmpty()) {
+            if (attached.isNotEmpty()) append("待发送 ${attached.size} 项：点条目加入对话，× 移除")
+            if (queued.isNotEmpty()) {
                 if (isNotEmpty()) append(" · ")
-                append("文档 " + attachedDocs.joinToString("、") { it.name }.take(42))
+                append("已加入对话 ${queued.size} 项")
             }
-            append(" · 点这里清除")
+            if (pendingShots.isNotEmpty()) {
+                if (isNotEmpty()) append(" · ")
+                append("图片 ${pendingShots.size} 张")
+            }
         }
         attachInfo.setOnClickListener {
+            attached.clear()
+            queued.clear()
+            shotBytes.clear()
             pendingShots.clear()
-            attachedDocs.clear()
             updateAttachInfo()
         }
     }
@@ -690,7 +759,7 @@ class MainActivity : AppCompatActivity(), GameUi {
             toast("已中断上一轮，接着发新的")
         }
         val text = inputEt.text.toString().trim().ifEmpty { lastUserText }
-        if (text.isEmpty() && pendingShots.isEmpty() && attachedDocs.isEmpty()) return
+        if (text.isEmpty() && pendingShots.isEmpty() && queued.isEmpty() && attached.isEmpty()) return
 
         val cfg = cfgStore.active()
         val local = cfg.baseUrl.contains("127.0.0.1") || cfg.baseUrl.contains("localhost")
@@ -701,18 +770,31 @@ class MainActivity : AppCompatActivity(), GameUi {
         }
 
         val images = pendingShots.toList()
-        val docs = attachedDocs.toList()
+        val docs = queued.toList()
         pendingShots.clear()
-        attachedDocs.clear()
+        queued.clear()
         updateAttachInfo()
         inputEt.setText("")
         lastUserText = text
 
+        // 待发送区里没点「加入对话」的条目：不偷偷发出去，只提醒一句，留给下一轮
+        if (attached.isNotEmpty()) {
+            addSystemLine("还有 ${attached.size} 项在待发送区没加入对话（点一下条目就能带上）")
+        }
+
+        // 附件块：图片走多模态（上面的 images），其余把「路径 + 文件名 + 正文」一起给模型，
+        // 这样既能 game_read 读原文件，也能只报文件名命中（Tools.fuzzyFind）
         val docBlock = docs.joinToString("") { d ->
-            "\n\n【用户上传的文档：${d.name}】" +
-                (if (d.rel.isNotEmpty()) "（已保存到 ${d.rel}，可用 game_read path=${d.rel} 读原文件）" else "") +
-                if (d.text.isNotEmpty()) "\n```\n${d.text}\n```"
-                else "\n（二进制内容，App 解析不出正文，若需要请让用户转成 txt/md）"
+            val body = when {
+                d.text.isEmpty() ->
+                    "\n（二进制内容，App 解析不出正文；可用 game_read path=${d.rel} 读原文件）"
+                d.text.length <= 8000 -> "\n```\n${d.text}\n```"
+                else ->
+                    "\n（正文共 ${d.text.length} 字，太长不整段附上；用 game_read path=${d.rel} 读，" +
+                        "或者只报文件名 ${d.name} 也能读到）"
+            }
+            "\n\n【已上传 ${d.kind}：${d.name}，路径 ${d.rel}】" +
+                "\n（可直接 game_read(path=\"${d.rel}\")；只报文件名也能读到）" + body
         }
 
         addBubble(
@@ -1035,41 +1117,86 @@ class MainActivity : AppCompatActivity(), GameUi {
             .show()
     }
 
-    // ==================== 上传文档 ====================
+    // ==================== 工作区：素材 / 文档 / 技能 ====================
 
-    private fun pickDoc() {
-        runCatching { pickFile.launch(arrayOf("*/*")) }
+    /** 入口卡 → 选择器：素材 = 图/音/视频，文档 = 文本类，技能 = 用户自传的 skill */
+    private fun pickMedia(mode: String) {
+        pickMode = mode
+        val mimes = when (mode) {
+            "doc" -> arrayOf(
+                "text/*", "application/json", "application/pdf",
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                "application/zip", "application/octet-stream"
+            )
+            "skill" -> arrayOf("text/*", "application/json", "application/javascript")
+            else -> arrayOf("image/*", "audio/*", "video/*")
+        }
+        runCatching { pickMany.launch(mimes) }
             .onFailure { toast("这台机器没有可用的文件选择器") }
     }
 
-    private fun onDocPicked(uri: Uri?) {
-        if (uri == null) return
+    private fun onPickedMany(uris: List<Uri>) {
+        val mode = pickMode
         Thread {
-            val info = runCatching { readDoc(uri) }.getOrNull()
+            val ok = mutableListOf<Attach>()
+            var bad = 0
+            for (u in uris) {
+                val a = runCatching { readAttach(u, mode) }.getOrNull()
+                if (a == null) bad++ else ok += a
+            }
             main.post {
-                if (info == null) {
-                    toast("读取失败，换个文件试试")
-                    return@post
+                if (ok.isNotEmpty()) {
+                    attached.addAll(ok)
+                    toast("已加入待发送区 ${ok.size} 个文件")
                 }
-                attachedDocs += info
+                if (bad > 0) toast("有 $bad 个文件读不了（可能没给读取权限）")
                 updateAttachInfo()
-                toast("已附上 ${info.name}")
             }
         }.start()
     }
 
     /**
-     * 选中的文档复制进项目里的 _uploads/，能提文本的把正文提出来。
-     * 这样 AI 不用猜：内容直接进消息，原文件也能用 game_read path=_uploads/xxx 读。
+     * 把选中的文件落进工程，并尽量提出正文：
+     *   素材 → 工程根/_uploads/media/
+     *   文档 → 工程根/_uploads/doc/
+     *   技能 → 工程根/_skills/
+     * 图片额外压一份小图存进 shotBytes，走多模态当图片发给模型。
      */
-    private fun readDoc(uri: Uri): DocAttach {
-        val name = queryName(uri) ?: "doc_${System.currentTimeMillis()}.txt"
+    private fun readAttach(uri: Uri, mode: String): Attach {
+        val name = (queryName(uri) ?: "file_${System.currentTimeMillis()}").replace("/", "_")
         val bytes = contentResolver.openInputStream(uri)?.use { it.readBytes() } ?: ByteArray(0)
-        val dir = File(gameRoot, "_uploads").apply { mkdirs() }
-        val dst = File(dir, name.replace("/", "_"))
-        runCatching { dst.writeBytes(bytes) }
-        val text = extractText(name, bytes).take(60000)
-        return DocAttach(name, "_uploads/${dst.name}", text)
+        if (bytes.isEmpty()) throw IllegalStateException("空文件")
+        val mime = runCatching { contentResolver.getType(uri) }.getOrNull().orEmpty()
+        val kind = when {
+            mode == "doc" -> "doc"
+            mode == "skill" -> "skill"
+            mime.startsWith("audio") -> "audio"
+            mime.startsWith("video") -> "video"
+            else -> "image"
+        }
+        val dir = when (kind) {
+            "doc" -> File(gameRoot, "_uploads/doc")
+            "skill" -> File(gameRoot, "_skills")
+            else -> File(gameRoot, "_uploads/media")
+        }.apply { mkdirs() }
+        val dst = File(dir, name)
+        dst.writeBytes(bytes)
+        val rel = dst.relativeTo(gameRoot).path
+        val text = if (kind == "image" || kind == "audio" || kind == "video") ""
+        else extractText(name, bytes).take(60000)
+        if (kind == "image") {
+            runCatching { shrinkToJpeg(bytes, 1024, 80) }.getOrNull()?.let { shotBytes[rel] = it }
+        }
+        return Attach(name, rel, kind, text)
+    }
+
+    /** 点待发送区条目 = 加入对话：图片并入多模态，其余在本轮消息里带上路径 + 正文 */
+    private fun queueAttach(a: Attach) {
+        if (!attached.remove(a)) return
+        if (a.kind == "image") shotBytes[a.rel]?.let { pendingShots += it }
+        queued += a
+        addSystemLine("已加入对话：${a.kind}「${a.name}」")
+        updateAttachInfo()
     }
 
     private fun queryName(uri: Uri): String? = runCatching {
@@ -1147,15 +1274,59 @@ class MainActivity : AppCompatActivity(), GameUi {
                     toast("这个项目还没有文件")
                     return@post
                 }
-                val labels = files.map { it.relativeTo(dir).path + "  (${it.length()}B)" }
-                    .toTypedArray()
+                // 与素材列表同一套行样式：图标 + 文件名 + ＋（添加到对话），点行 = 打开编辑
+                val col = LinearLayout(this).apply {
+                    orientation = LinearLayout.VERTICAL
+                    setPadding(dp(14), dp(6), dp(14), dp(6))
+                }
+                for (f in files) {
+                    val rel = f.relativeTo(dir).path
+                    val row = fileRow(
+                        name = rel,
+                        kind = kindOfFile(rel),
+                        onOpen = { openFileEditor(f, dir) },
+                        onAdd = {
+                            attached += Attach(rel, rel, "code")
+                            toast("已加入待发送区：$rel")
+                            updateAttachInfo()
+                        }
+                    )
+                    col.addView(row, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(6) })
+                }
                 AlertDialog.Builder(themed())
-                    .setTitle("$currentGame · 选文件看代码")
-                    .setItems(labels) { _, i -> openFileEditor(files[i], dir) }
+                    .setTitle("$currentGame · 文件（${files.size}）")
+                    .setView(ScrollView(this).apply { addView(col) })
                     .setNegativeButton("关闭", null)
                     .show()
             }
         }.start()
+    }
+
+    /** 文件行：小图标 + 文件名 + 可选「＋」。素材列表和代码列表共用同一套样式 */
+    private fun fileRow(
+        name: String,
+        kind: String,
+        onOpen: () -> Unit,
+        onAdd: (() -> Unit)? = null
+    ): LinearLayout {
+        val row = attachRowOf(this, pal, kind, name, tail = if (onAdd != null) "＋" else null, onTail = onAdd)
+        row.setOnClickListener { onOpen() }
+        return row
+    }
+
+    /** 按后缀猜图标：代码页和素材列表都靠它选图标 */
+    private fun kindOfFile(name: String): String = when {
+        name.endsWith(".png", true) || name.endsWith(".jpg", true) ||
+            name.endsWith(".jpeg", true) || name.endsWith(".gif", true) ||
+            name.endsWith(".webp", true) || name.endsWith(".bmp", true) -> "image"
+        name.endsWith(".mp3", true) || name.endsWith(".wav", true) ||
+            name.endsWith(".ogg", true) || name.endsWith(".m4a", true) -> "audio"
+        name.endsWith(".mp4", true) || name.endsWith(".webm", true) ||
+            name.endsWith(".mov", true) -> "video"
+        name.endsWith(".json", true) || name.endsWith(".js", true) ||
+            name.endsWith(".ts", true) || name.endsWith(".html", true) ||
+            name.endsWith(".css", true) || name.endsWith(".kt", true) -> "code"
+        else -> "doc"
     }
 
     private fun openFileEditor(f: File, base: File) {
@@ -1591,6 +1762,8 @@ class MainActivity : AppCompatActivity(), GameUi {
         bar.addView(reload)
         bar.addView(shot, LinearLayout.LayoutParams(-2, -2).apply { leftMargin = dp(6) })
         bar.addView(switch, LinearLayout.LayoutParams(-2, -2).apply { leftMargin = dp(6) })
+        // 手绘全屏图标：把预览容器整个搬进全屏 Dialog（同一个 WebView 实例，游戏状态不丢）
+        bar.addView(iconButton(this, pal, "fullscreen", sizeDp = 34, marginStartDp = 6) { showFullPreview() })
 
         @SuppressLint("SetJavaScriptEnabled")
         val w = WebView(this).apply { setBackgroundColor(pal.bg) }
@@ -1601,7 +1774,66 @@ class MainActivity : AppCompatActivity(), GameUi {
         page.addView(View(this).apply { setBackgroundColor(pal.border) },
             LinearLayout.LayoutParams(-1, dp(1)))
         page.addView(wrap, LinearLayout.LayoutParams(-1, 0, 1f))
+        previewWrapHolder = wrap
+        previewSlot = page
         return page
+    }
+
+    /**
+     * 全屏看预览。
+     * 关键：WebView 只能有一个父容器，所以这里是「同一个实例搬家」，
+     * 而不是新建第二个 WebView —— 后者既丢游戏运行状态，又因为没有 asset 拦截而白屏。
+     * manifest 已声明 configChanges=orientation|screenSize，横屏不会重建 Activity。
+     */
+    private fun showFullPreview() {
+        if (fullDlg != null) return
+        if (!::previewWrapHolder.isInitialized) return
+        val host = previewWrapHolder.parent as? ViewGroup ?: return
+        host.removeView(previewWrapHolder)
+
+        val box = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(pal.bg)
+        }
+        val fullBar = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(14), dp(8), dp(12), dp(8))
+            setBackgroundColor(pal.navBg)
+        }
+        fullBar.addView(TextView(this).apply {
+            text = "全屏预览 · $currentGame"
+            textSize = 13f
+            setTextColor(pal.text)
+            typeface = MEDIUM
+        }, LinearLayout.LayoutParams(0, -2, 1f))
+        fullBar.addView(chipOf(this, pal, "退出全屏", false).apply {
+            setOnClickListener { fullDlg?.dismiss() }
+        })
+        box.addView(fullBar, LinearLayout.LayoutParams(-1, -2))
+        box.addView(previewWrapHolder, LinearLayout.LayoutParams(-1, 0, 1f))
+
+        val dlg = Dialog(this, android.R.style.Theme_Material_NoActionBar_Fullscreen)
+        dlg.setContentView(box)
+        dlg.setOnDismissListener { restorePreview() }
+        fullDlg = dlg
+        dlg.show()
+        dlg.window?.setLayout(-1, -1)
+        // 全屏看游戏横过来更合理
+        requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
+    }
+
+    /** 退出全屏：把预览容器搬回预览页原位，恢复竖屏 */
+    private fun restorePreview() {
+        fullDlg = null
+        requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+        if (!::previewWrapHolder.isInitialized) return
+        (previewWrapHolder.parent as? ViewGroup)?.removeView(previewWrapHolder)
+        if (::previewSlot.isInitialized &&
+            previewSlot.indexOfChild(previewWrapHolder) < 0
+        ) {
+            previewSlot.addView(previewWrapHolder, LinearLayout.LayoutParams(-1, 0, 1f))
+        }
     }
 
     // ==================== 发布页 ====================
@@ -2169,6 +2401,7 @@ class MainActivity : AppCompatActivity(), GameUi {
 
     override fun openGame(id: String) {
         currentGame = id
+        cfgStore.lastGame = id   // 落盘：供下次冷启动 / 覆盖安装后恢复
         val dir = File(gameRoot, id).apply { mkdirs() }
         bridge.setSandbox(dir)
         lastLoadedGame = id
