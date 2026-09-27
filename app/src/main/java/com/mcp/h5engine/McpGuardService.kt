@@ -47,8 +47,12 @@ class McpGuardService : Service() {
                     Thread.sleep(12_000)
                     if (!alive) break
                     // 两条服务都活着才算健康（Maker 挂了同样要拉起来 —— 它管素材生成）
-                    if (McpRt.health() && McpRt.makerHealth()) continue
-                    // 掉了：ensure 是幂等的，会把服务拉起来并重新挂工具
+                    // 注意「活着」≠「工具齐」：子进程活着、但生成类工具还没注册上来时，
+                    // 工具清单会被永久缓存成「只有本地工具」，照样得重抓一遍（见 McpHub.makerStarved）。
+                    val healthy = McpRt.health() && McpRt.makerHealth()
+                    val starved = EngineTools.mcp?.makerStarved == true
+                    if (healthy && !starved) continue
+                    // 掉了 / 工具没齐：ensure 是幂等的，会把服务拉起来并重新挂工具
                     McpBoot.ensure(this) { }
                     runCatching { startForeground(NOTI_ID, build()) }
                 } catch (t: Throwable) {

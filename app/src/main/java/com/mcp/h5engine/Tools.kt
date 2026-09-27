@@ -246,6 +246,13 @@ class EngineTools(private val ui: GameUi, private val root: File) {
                         "（他说「可以 / 好 / 确认」这类，下一轮工具就会放行给你）。"
                 )
             }
+            // 名字明显是 MCP 工具（maker_xxx / mcp_xxx）却没挂在清单里 —— 十有八九不是「没有这个工具」，
+            // 而是「服务刚起、工具还没注册完」。交给 McpHub：它会先自动重抓一次清单（抓到就直接执行），
+            // 实在还没有才回一段带「必须重试」指引的话。
+            // 以前这里直接掉到 exec，回「未知工具: xxx」，模型就乖乖放弃了。
+            if (name.startsWith("maker_") || name.startsWith("mcp_")) {
+                return ToolResult(hub.call(name, argsJson))
+            }
         }
         return try {
             exec(name, runCatching { JSONObject(argsJson) }.getOrDefault(JSONObject()))

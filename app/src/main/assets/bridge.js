@@ -503,6 +503,10 @@ const childLead = prefix.length ? prefix.slice(1) : [];
 // ---------------- 子进程（stdio MCP server） ----------------
 let child = null;
 let childAlive = false;
+// 子进程自己注册了多少个工具（不含桥的本地工具）。
+// -1 = 还没抓过。App 侧靠它区分「桥连上了但工具没注册」和「工具真的就这些」——
+// 这正是「授权过了却永远没有 generate_image」的分水岭。
+let childTools = -1;
 let restarts = 0;
 let lastExit = '';
 let buf = '';
@@ -526,6 +530,25 @@ function failPending(msg) {
   pending.clear();
 }
 
+/**
+ * 等子进程回来（最多 ms 毫秒），回来返回 true。
+ *
+ * 为什么必须有：tools/list 是「一次性把工具清单抓走」，而 App 只在启动时抓一次。
+ * 子进程刚好在重启的那一两秒被抓，就会抓到空清单 —— 然后「授权好的生图工具」永远不出现。
+ * 给它一个短窗口等一等，比事后让用户重启 App 划算得多。
+ */
+function waitChild(ms) {
+  return new Promise((resolve) => {
+    const t0 = Date.now();
+    const tick = () => {
+      if (childAlive) return resolve(true);
+      if (Date.now() - t0 > ms) return resolve(false);
+      setTimeout(tick, 300);
+    };
+    tick();
+  });
+}
+
 function startChild() {
   try {
     child = spawn(childExe, [...childLead, ...childExtra, target], {
@@ -541,6 +564,7 @@ function startChild() {
   }
 
   childAlive = true;
+  childTools = 0; // 刚起来：工具还没注册，等它回一次 tools/list 才算就绪
   buf = '';
   console.log('[bridge] child 已启动 pid=' + child.pid + ' restarts=' + restarts);
 
@@ -736,6 +760,8 @@ const server = http.createServer((req, res) => {
     // ok 严格表示「子进程可用」：App 侧要按它决定是否重启桥
     send(res, 200, {
       ok: childAlive,
+      // 子进程注册的工具数：App 用它判断「连上了但工具还没注册」并自动重抓
+      childTools: childTools,
       pid: process.pid,
       child: child && child.pid,
       restarts: restarts,
@@ -771,7 +797,7 @@ const server = http.createServer((req, res) => {
 
   let body = '';
   req.on('data', (c) => (body += c));
-  req.on('end', () => {
+  req.on('end', async () => {
     let msg;
     try {
       msg = JSON.parse(body);
@@ -864,13 +890,20 @@ function reply(res, id, obj) {
  * 转发给 Maker 子进程。tools/list 时顺手把自己实现的本地工具（maker_ensure_project）
  * 追加进去，这样 AI 也能主动触发绑定/新建项目。
  */
-function forward(msg, res) {
+async function forward(msg, res) {
   if (!childAlive) {
-    send(res, 503, {
-      jsonrpc: '2.0',
-      error: { code: -32000, message: 'Maker 子进程未运行（bridge 正在自动重启，请稍后重试）' },
-    });
-    return;
+    // tools/list 是「一次性把工具清单抓走」的请求：App 只在启动 / 掉线重连时抓一次，
+    // 抓到空清单就再也不重试 —— 表现出来就是「授权好了，生图工具却总是不在」。
+    // 这里给刚在重启的子进程一个等待窗口，比让用户重启 App 划算得多。
+    const needList = !!(msg && msg.method === 'tools/list');
+    const ok = await waitChild(needList ? 15000 : 5000);
+    if (!ok) {
+      send(res, 503, {
+        jsonrpc: '2.0',
+        error: { code: -32000, message: 'Maker 子进程未运行（bridge 正在自动重启，请稍后重试）' },
+      });
+      return;
+    }
   }
 
   const isNotify = msg.id === undefined || msg.id === null;
@@ -891,6 +924,9 @@ function forward(msg, res) {
   pending.set(msg.id, (reply) => {
     clearTimeout(timer);
       if (method === 'tools/list' && reply && reply.result && Array.isArray(reply.result.tools)) {
+        // 先记下子进程自己的工具数（排除桥的本地工具），再追加本地工具 ——
+        // 顺序不能反，否则会把本地工具也数进去，App 就没法判断「生成类工具在不在」。
+        childTools = reply.result.tools.filter((t) => t && t.name && !localTool(t.name)).length;
         // 桥自带的本地工具（maker_ensure_project / maker_list_apps）追加给 AI。
         // 注意名字必须以 maker_ 开头：App 侧按前缀判归属，mcp_ 开头会被当成开放平台那套。
         for (const lt of LOCAL_TOOLS) {

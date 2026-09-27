@@ -54,11 +54,45 @@ object McpBoot {
                 // 工具调用撞上「服务已死」时，会回调这里把它拉起来并重试
                 hub.onEnsure = { ensure(ctx) != null }
                 EngineTools.mcp = hub
+                // 连上了、但只回了桥的本地工具（生成类工具还没注册上来）：过几秒自己重抓
+                retryWhenStarved(ctx, hub, log)
                 hub
             }
         }
     } catch (t: Throwable) {
         log("MCP：初始化异常 ${t.javaClass.simpleName}: ${t.message}")
         null
+    }
+
+    /** 同一时间只跑一条「工具没注册齐 → 自动重抓」的后台线程，避免 ensure 递归把自己点着 */
+    private val starvedRetry = java.util.concurrent.atomic.AtomicBoolean(false)
+
+    /**
+     * Maker 通道「连上了、但只有桥的本地工具」时，隔几秒自己重抓一遍清单。
+     *
+     * 这是用户报「生图工具一会儿能用一会儿不能用」的第二道保险：
+     * 工具清单只在 App 启动 / 掉线时才抓一次，那一次要是正好撞上子进程重启，
+     * 抓到的清单里就没有 generate_image 这类工具，然后被永久缓存住。
+     * 桥侧已经会在 tools/list 时给子进程一个等待窗口（waitChild），这里再兜一层。
+     */
+    private fun retryWhenStarved(ctx: Context, hub: McpHub, log: (String) -> Unit) {
+        if (!hub.makerStarved) return
+        if (!starvedRetry.compareAndSet(false, true)) return
+        Thread {
+            try {
+                // 逐步拉长间隔：子进程重启通常几秒内就好，别一上来就疯狂重试
+                for (d in longArrayOf(3_000, 6_000, 10_000, 15_000, 20_000)) {
+                    Thread.sleep(d)
+                    val cur = EngineTools.mcp
+                    if (cur == null || !cur.makerStarved) return@Thread
+                    log("MCP：Maker 只回了本地工具，正在自动重抓工具清单…")
+                    ensure(ctx, log)
+                }
+            } catch (t: Throwable) {
+                // 重抓失败不重要：下一轮守护巡检、或用户下一次调用还会再来
+            } finally {
+                starvedRetry.set(false)
+            }
+        }.apply { isDaemon = true; name = "mcp-starved-retry" }.start()
     }
 }

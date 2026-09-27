@@ -177,11 +177,37 @@ class McpHub {
     @Volatile
     var lastError: String? = null
         private set
-
     @Volatile
     var lastInfo: String = "未连接"
         private set
     val size: Int get() = index.size
+
+    /**
+     * 桥自己塞进来的本地工具。
+     *
+     * 它们永远会回（只走 Maker HTTP API，子进程死着也能答），所以**不能**拿它们当
+     * 「Maker 已就绪」的证据 —— 否则「子进程活着但生成类工具还没注册」会被误判成正常。
+     */
+    private val BRIDGE_LOCAL_TOOLS = setOf(
+        "maker_ensure_project", "maker_list_apps", "maker_ui_list_kits", "maker_ui_apply_kit"
+    )
+
+    /** Maker 通道连上没（没连上是另一码事，用不着重抓清单） */
+    @Volatile
+    var makerConnected: Boolean = false
+        private set
+
+    /**
+     * Maker 通道「连上了，但生成类工具还没注册上来」。
+     *
+     * 用户报的「生图工具一会儿能用一会儿不能用」就是这个：工具清单只在启动 / 掉线时抓一次，
+     * 抓到的那一次正好撞上子进程重启，清单里就只剩桥的本地工具，
+     * 然后被永久缓存 —— 授权明明是好的，`maker_generate_image` 却永远不出现。
+     */
+    @Volatile
+    var makerStarved: Boolean = false
+        private set
+
 
     /**
      * 两台服务器的工具名不能长得一样。
@@ -213,6 +239,8 @@ class McpHub {
     fun refresh(servers: List<McpServer>, log: (String) -> Unit) {
         index.clear()
         clients.clear()
+        makerConnected = false
+        makerStarved = false
         val errs = mutableListOf<String>()
         var okServers = 0
         for (s in servers) {
@@ -224,7 +252,16 @@ class McpHub {
                 for (t in list) index[expose(s, t.name)] = Entry(s, t)
                 clients[s.url] = c
                 okServers++
-                log("MCP「${s.name}」已连接：${list.size} 个工具")
+                if (isMakerServer(s)) {
+                    makerConnected = true
+                    // 只算子进程真正注册的工具：桥的本地工具永远在，
+                    // 拿它们当就绪证据就会把「生成类工具还没起来」误判成正常。
+                    val real = list.count { !BRIDGE_LOCAL_TOOLS.contains(it.name) }
+                    makerStarved = real == 0
+                    log("MCP「${s.name}」已连接：${list.size} 个工具（生成类 $real 个）")
+                } else {
+                    log("MCP「${s.name}」已连接：${list.size} 个工具")
+                }
             } catch (t: Throwable) {
                 errs += "${s.name}: ${t.message}"
                 log("MCP「${s.name}」连接失败：${t.message}")
@@ -237,7 +274,15 @@ class McpHub {
     fun clear() {
         index.clear()
         clients.clear()
+        makerConnected = false
+        makerStarved = false
         lastInfo = "未连接"
+    }
+
+    /** 当前可用工具名（给报错文案用，太长了就截断） */
+    private fun availableNames(): String {
+        val all = index.keys.toList()
+        return if (all.size <= 40) all.joinToString("、") else all.take(40).joinToString("、") + " …"
     }
 
     fun specs(): List<JSONObject> = index.map { (exposed, e) ->
@@ -263,7 +308,33 @@ class McpHub {
     var onEnsure: (() -> Boolean)? = null
 
     fun call(name: String, argsJson: String): String {
-        if (!index.containsKey(name)) return "未知的 MCP 工具：$name"
+        if (!index.containsKey(name)) {
+            // 工具名不在索引里，先别急着跟模型说「未知工具」。
+            //
+            // 用户报的「生图一会儿能用一会儿不能用」就是这里：MCP 服务刚起 / 正在重启的那一两秒
+            // 把清单抓走了，清单里没有 maker_generate_image；模型第二次调就被判「未知工具」，
+            // 它很听话地放弃了 —— 于是表现为「明明授权好了，生图工具却不在」。
+            //
+            // 现在：先把服务拉一次、把清单重抓一遍，抓到了就直接执行，用户完全无感。
+            val revived = runCatching { onEnsure?.invoke() == true }.getOrDefault(false)
+            if (revived && index.containsKey(name)) {
+                return runCatching { direct(name, argsJson) }
+                    .getOrElse { "[MCP 调用失败] ${it.message}" + authOwnershipHint(it.message, name) }
+            }
+            val why = if (makerStarved && !makerConnected) {
+                "（本地 Maker 服务还没起来）"
+            } else if (makerStarved) {
+                "（Maker 通道已连上，但生成类工具还在注册 —— 通常几秒内就好）"
+            } else {
+                ""
+            }
+            return "未知的 MCP 工具：$name$why\n" +
+                "【重要】不要就此放弃，也不要跟用户说「我没有这个能力 / 工具不存在」。" +
+                "这是工具清单的注册时序问题，正确做法是：**等 5 秒左右，用完全相同的工具名再调用一次**" +
+                "（最多重试 3 次）。三次都失败，再告诉用户「Maker 工具通道还没注册好，" +
+                "可到 设置 → MCP 服务器 点『启动 / 重连』」。\n" +
+                "当前清单里可用的工具：${availableNames()}"
+        }
         return try {
             direct(name, argsJson)
         } catch (t: Throwable) {
