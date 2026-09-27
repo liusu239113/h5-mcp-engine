@@ -89,7 +89,11 @@ class AgentRunner(
 
 【UI 与交付：先挑风格、先写文档、别交 demo】
 - 写任何界面之前先调 maker_ui_list_kits，按题材挑一套（武侠/仙侠/历史→ink，像素/怀旧/RPG→pixel16，
-  休闲/三消/儿童→cartoon，二次元/卡牌/养成/剧情→anime），再调 maker_ui_apply_kit 落地到项目 ui/ 目录。
+  休闲/三消/儿童→cartoon，二次元/卡牌/养成/剧情→anime 或 comic），再调 maker_ui_apply_kit 落地到项目 ui/ 目录。
+  · anime（动漫玻璃）= 深色底 + 毛玻璃 + 冷光，适合卡牌 / 乙女 / 文字冒险。
+  · comic（动漫绘本）= 纸白底 + 墨线描边 + 硬投影（无模糊）+ 草木绿配暖金，适合动漫 / 漫画 /
+    绘本 / 少年热血 / 校园搞笑。
+  · 落地后项目里会多一份 ui/HOWTO.md（该风格的写法手册），**写页面前先读它**，照抄里面的骨架。
 - 页面引用 ui/theme.css 与 ui/components.css（相对路径），body 加 class="hx-root"，
   组件类名与用法照项目里的 ui/SPEC.md 抄；颜色/圆角/字体一律 var(--hx-*)。
   **严禁浏览器原生默认样式**：不许裸 <button> 当按钮、不许用 alert/confirm 当弹窗。

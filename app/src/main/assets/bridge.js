@@ -286,9 +286,16 @@ function uiListKits(tdir) {
     ok: true,
     count: idx.kits.length,
     current,
-    kits: idx.kits.map((k) => ({ id: k.id, name: k.name, scenes: k.scenes, mood: k.mood, in_use: k.id === current })),
+    kits: idx.kits.map((k) => ({
+      id: k.id, name: k.name, scenes: k.scenes, mood: k.mood,
+      // rules 一定要带上：它是「这套风格该怎么写」的要点，不带 AI 就只能自己猜
+      rules: k.rules || [],
+      in_use: k.id === current,
+    })),
     usage:
-      '挑好之后调 maker_ui_apply_kit 落地。页面里用 <link rel="stylesheet" href="ui/theme.css"> + ui/components.css，' +
+      '挑好之后调 maker_ui_apply_kit 落地。落地后项目 ui/ 里会多一份 HOWTO.md（该风格的写法手册，' +
+      '含骨架代码与禁忌清单）——**写页面前先读它**。' +
+      '页面里用 <link rel="stylesheet" href="ui/theme.css"> + ui/components.css，' +
       '组件类名照 ui/SPEC.md 抄，颜色一律 var(--hx-*)，不要自己写死颜色。',
   };
 }

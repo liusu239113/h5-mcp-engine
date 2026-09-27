@@ -1,0 +1,67 @@
+:root {
+  /* 动漫绘本（纸墨描边）：纸白底 + 墨线描边 + 硬投影（无模糊）+ 草木绿 / 暖金点缀。
+     提炼自一款同类动漫风 H5 游戏的实际写法（内联样式 + ICO 图标函数）。
+
+     灵魂是「硬投影」：没有模糊半径的实心偏移阴影（--hx-shadow），
+     它让每个面板/按钮都像贴在纸上的一层贴纸，一眼就是绘本 / 漫画的质感。
+     换掉它这套风格就废了。
+
+     适用题材：动漫 / 漫画 / 绘本 / 少年热血 / 剧情养成 / 搞笑日常 / 校园。 */
+  --hx-bg: #f2f5ee;
+  --hx-bg-image: linear-gradient(180deg, #ffffff 0%, #f2f5ee 60%, #eaf0e6 100%);
+  --hx-panel: #ffffff;
+  --hx-panel-2: #f2f5ee;
+  --hx-border: rgba(26, 36, 28, .8);
+  --hx-border-w: 2px;
+  --hx-radius: 12px;
+  --hx-radius-sm: 10px;
+  --hx-corner: none;
+  --hx-text: #1a241c;
+  --hx-text-dim: rgba(26, 36, 28, .62);
+  --hx-accent: #2e8a45;
+  --hx-accent-2: #4db563;
+  --hx-on-accent: #ffffff;
+  --hx-danger: #c0392b;
+  --hx-ok: #4db563;
+
+  /* —— 本风格的额外令牌（写页面时可以直接 var() 引用）—— */
+  --hx-gold: #e8c15a;      /* 暖金：奖励 / 稀有 / 高光点缀 */
+  --hx-gold-2: #a5721a;    /* 深金：金字压在白底上的描边色 */
+  --hx-gold-lt: #f4d888;   /* 亮金：渐变上端 */
+  --hx-green-lt: #7fd4a2;  /* 淡绿：渐变 / 次要点缀 */
+  --hx-dark: #241f16;      /* 墨夜底：夜戏 / 深色弹窗 / 对话条 */
+  --hx-dark-2: #3a3428;    /* 墨夜次层 */
+  --hx-ink: rgba(26, 36, 28, .8);  /* 墨线：描边专用 */
+  --hx-line: 2px solid var(--hx-ink);
+
+  /* 硬投影：0 模糊，纯偏移。**这是这套风格的签名，别改成带 blur 的软阴影** */
+  --hx-shadow: 2.5px 2.5px 0 rgba(26, 36, 28, .8);
+  --hx-shadow-btn: 2.5px 2.5px 0 rgba(26, 36, 28, .8);
+
+  --hx-btn-bg: #ffffff;
+  --hx-btn-border: rgba(26, 36, 28, .8);
+  --hx-btn-text: #1a241c;
+  --hx-blur: blur(0px);
+  --hx-mask: rgba(26, 36, 28, .55);
+  --hx-pad: 14px;
+  --hx-gap: 12px;
+  --hx-font: "PingFang SC", "HarmonyOS Sans", "Noto Sans CJK SC", system-ui, sans-serif;
+  --hx-font-title: var(--hx-font);
+  --hx-title-w: 900;
+  --hx-title-ls: .02em;
+  --hx-btn-ls: .04em;
+  --hx-img-render: auto;
+  --hx-transition: all .12s ease-out;
+}
+
+/* 按下去要有「压扁」的手感：位移吃掉投影，像真的纸片被压到桌面上 */
+.hx-root .hx-btn:active,
+.hx-root .hx-panel:active {
+  transform: translate(2px, 2px);
+  box-shadow: 0 0 0 rgba(26, 36, 28, .8);
+}
+
+/* 标题用重字重 + 细墨线描边，接近漫画标题字 */
+.hx-root .hx-title {
+  text-shadow: 1.5px 1.5px 0 rgba(232, 193, 90, .55);
+}
