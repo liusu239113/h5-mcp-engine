@@ -611,16 +611,20 @@ class MainActivity : AppCompatActivity(), GameUi {
 
     private fun buildNav() {
         val holder = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
+            orientation = LinearLayout.VERTICAL
             setBackgroundColor(pal.navBg)
         }
+        // 发丝分隔线：底部导航与内容之间一道 1dp 线，跟顶栏那道对称，边界更清楚
+        holder.addView(View(this).apply { setBackgroundColor(pal.border) },
+            LinearLayout.LayoutParams(-1, dp(1)))
+        val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         navChat = navItemView("对话")
         navPreview = navItemView("预览")
         navPub = navItemView("发布")
-        val lp = LinearLayout.LayoutParams(0, -2, 1f)
-        holder.addView(navChat, lp)
-        holder.addView(navPreview, LinearLayout.LayoutParams(0, -2, 1f))
-        holder.addView(navPub, LinearLayout.LayoutParams(0, -2, 1f))
+        row.addView(navChat, LinearLayout.LayoutParams(0, -2, 1f))
+        row.addView(navPreview, LinearLayout.LayoutParams(0, -2, 1f))
+        row.addView(navPub, LinearLayout.LayoutParams(0, -2, 1f))
+        holder.addView(row, LinearLayout.LayoutParams(-1, -2))
 
         navChat.setOnClickListener { showTab(0) }
         navPreview.setOnClickListener { showTab(1) }
@@ -699,6 +703,14 @@ class MainActivity : AppCompatActivity(), GameUi {
                 flags and View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR.inv()
             } else {
                 flags or View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR
+            }
+            // 导航栏同理：白底 + 白图标的话，三个虚拟键等于看不见 —— 这是「原生味」里最扎眼的一种。
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                flags = if (pal.dark) {
+                    flags and View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR.inv()
+                } else {
+                    flags or View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR
+                }
             }
             window.decorView.systemUiVisibility = flags
         }
@@ -3701,33 +3713,67 @@ class MainActivity : AppCompatActivity(), GameUi {
             setPadding(dp(18), dp(4), dp(18), dp(4))
         }
 
-        fun section(t: String) = col.addView(TextView(ctx).apply {
-            text = t
-            textSize = 11f
-            letterSpacing = 0.1f
-            typeface = MEDIUM
-            setTextColor(pal.faint)
-            setPadding(dp(2), dp(20), 0, dp(8))
+        fun section(t: String) = col.addView(LinearLayout(ctx).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(2), dp(24), 0, dp(10))
+            // 分组标题：小号大写感 + 一道强调色短横线，比一行灰字更像「有设计」的界面
+            addView(TextView(ctx).apply {
+                text = t
+                textSize = 11.5f
+                letterSpacing = 0.12f
+                typeface = MEDIUM
+                setTextColor(pal.accent)
+            })
+            addView(View(ctx).apply {
+                setBackgroundColor(pal.border)
+                layoutParams = LinearLayout.LayoutParams(dp(30), dp(1)).apply { topMargin = dp(7) }
+            })
         })
 
         fun input(hint: String, value: String, numeric: Boolean = false): EditText =
             EditText(ctx).apply {
                 this.hint = hint
-                textSize = 13.5f
+                textSize = 14f
+                letterSpacing = 0.02f
                 setText(value)
                 setTextColor(pal.text)
                 setHintTextColor(pal.faint)
-                setPadding(dp(12), dp(10), dp(12), dp(10))
-                background = roundCard(ctx, pal.cardAlt, pal.border, 12)
+                // 输入框自己就是一块「平静的卡面」：白底 + 发丝描边 + 舒服的内边距，
+                // 不留系统那根下划线（那是「很原生」味的主要来源之一）。
+                setPadding(dp(14), dp(13), dp(14), dp(13))
+                includeFontPadding = false
+                setSingleLine()
+                background = roundCard(ctx, pal.card, pal.border, 12)
                 if (numeric) inputType = InputType.TYPE_CLASS_NUMBER or
                     InputType.TYPE_NUMBER_FLAG_DECIMAL
             }
 
         fun spinnerOf(labels: List<String>, selected: Int) = android.widget.Spinner(ctx).apply {
-            adapter = android.widget.ArrayAdapter(
+            // 自绘 item 文字颜色：系统默认的是纯黑，深色模式下等于看不见（这也是「原生味」来源）。
+            // 顺带把内边距和字号统一到跟输入框一致。
+            adapter = object : android.widget.ArrayAdapter<String>(
                 ctx, android.R.layout.simple_spinner_dropdown_item, labels
-            )
+            ) {
+                override fun getView(position: Int, convertView: View?, parent: ViewGroup): View {
+                    val v = super.getView(position, convertView, parent) as TextView
+                    v.setTextColor(pal.text)
+                    v.textSize = 14f
+                    v.setPadding(dp(14), dp(12), dp(8), dp(12))
+                    v.includeFontPadding = false
+                    return v
+                }
+
+                override fun getDropDownView(position: Int, convertView: View?, parent: ViewGroup): View {
+                    val v = super.getDropDownView(position, convertView, parent) as TextView
+                    v.setTextColor(pal.text)
+                    v.textSize = 14.5f
+                    v.setPadding(dp(18), dp(14), dp(18), dp(14))
+                    return v
+                }
+            }
             setSelection(selected.coerceIn(0, (labels.size - 1).coerceAtLeast(0)))
+            // 下拉箭头跟着强调色走，别留系统默认的灰三角
+            backgroundTintList = android.content.res.ColorStateList.valueOf(pal.accent)
         }
 
         // ---------- 外观 ----------
@@ -3878,6 +3924,54 @@ makerRow1.addView(ghostBtnOf(ctx, pal, "扫码登录").apply {
         val keyEt = input("API Key（只存本机，不会上传）", cfgStore.keyOf(curProvider.id))
         col.addView(urlEt, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(6) })
         col.addView(keyEt, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(6) })
+
+        // ---------- 去哪申请 Key（用户要求：配置的时候就得能直接点到官网） ----------
+        val applyTitle = TextView(ctx).apply {
+            textSize = 13f
+            setTextColor(pal.accent)
+            typeface = MEDIUM
+        }
+        val applySub = TextView(ctx).apply {
+            textSize = 11.5f
+            setTextColor(pal.sub)
+            setPadding(0, dp(4), 0, 0)
+        }
+        val applyRow = LinearLayout(ctx).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(14), dp(12), dp(14), dp(12))
+            background = pressable(roundCard(ctx, pal.accentSoft, pal.border, 12), 0x14000000)
+            addView(applyTitle)
+            addView(applySub)
+        }
+
+        fun bindApply() {
+            val u = AiProviders.applyUrlOf(curProvider)
+            applyTitle.text =
+                if (u.isBlank()) "这个厂商不需要申请 Key" else "去官网申请 API Key · 点这里打开"
+            applySub.text = AiProviders.applyHintOf(curProvider) + if (u.isBlank()) "" else "\n$u"
+        }
+
+        applyRow.setOnClickListener {
+            val u = AiProviders.applyUrlOf(curProvider)
+            if (u.isBlank()) {
+                toast("该厂商没有固定申请地址，按上面的说明到它的控制台里创建")
+            } else {
+                runCatching { startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(u))) }
+                    .onFailure { toast("打不开浏览器：${it.message}") }
+            }
+        }
+        // 长按把地址复制走：手机上从浏览器跳回来粘贴 Key 更顺手
+        applyRow.setOnLongClickListener {
+            val u = AiProviders.applyUrlOf(curProvider)
+            if (u.isNotBlank()) {
+                (getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager)
+                    .setPrimaryClip(ClipData.newPlainText("apply-url", u))
+                toast("已复制申请地址")
+            }
+            true
+        }
+        col.addView(applyRow, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(8) })
+        bindApply()
 
         val testBtn = ghostBtnOf(ctx, pal, "测试连通")
         col.addView(testBtn, LinearLayout.LayoutParams(-2, -2).apply { topMargin = dp(8) })
@@ -4036,6 +4130,8 @@ makerRow1.addView(ghostBtnOf(ctx, pal, "扫码登录").apply {
                 keyEt.setText(cfgStore.keyOf(curProvider.id))
                 modelEt.setText(cfgStore.modelOf(curProvider.id))
                 testResult.text = ""
+                // 换厂商时把「去哪申请 Key」那一行一起换掉，免得看着还是上一家的地址
+                bindApply()
             }
 
             override fun onNothingSelected(parent: android.widget.AdapterView<*>?) {}

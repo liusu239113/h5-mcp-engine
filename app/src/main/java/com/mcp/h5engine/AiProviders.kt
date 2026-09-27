@@ -320,4 +320,56 @@ object AiProviders {
     }
 
     fun groupOrder(): List<String> = listOf("国内", "国外", "本地")
+
+    /**
+     * 各厂商「去哪儿申请 API Key」的地址。
+     *
+     * 用户的要求：配置的时候就得能直接点到官网，别让他自己去搜。
+     * 放在这里而不是写死在设置页里 —— 以后厂商换页面（这类控制台改版很勤）只改这一处。
+     * 地址是控制台里「创建 / 查看 API Key」的那一页，点开就能建，不用再找菜单。
+     */
+    private val APPLY_URLS: Map<String, String> = mapOf(
+        // ---------- 国内 ----------
+        "deepseek" to "https://platform.deepseek.com/api_keys",
+        "dashscope" to "https://bailian.console.aliyun.com/?apiKey=1",
+        "zhipu" to "https://open.bigmodel.cn/usercenter/apikeys",
+        "moonshot" to "https://platform.moonshot.cn/console/api-keys",
+        "ark" to "https://console.volcengine.com/ark/region:ark+cn-beijing/apiKey",
+        "hunyuan" to "https://console.cloud.tencent.com/hunyuan/api-key",
+        "qianfan" to "https://console.bce.baidu.com/iam/#/iam/apikey/list",
+        "minimax" to "https://platform.minimaxi.com/user-center/basic-information/interface-key",
+        "spark" to "https://console.xfyun.cn/services/cbm",
+        "stepfun" to "https://platform.stepfun.com/interface-key",
+        "yi" to "https://platform.lingyiwanwu.com/apikeys",
+        "sensenova" to "https://platform.sensenova.cn/",
+        "agnes" to "https://agnes.ai/",
+        "siliconflow" to "https://cloud.siliconflow.cn/account/ak",
+        // ---------- 国外 ----------
+        "openai" to "https://platform.openai.com/api-keys",
+        "anthropic" to "https://console.anthropic.com/settings/keys",
+        "gemini" to "https://aistudio.google.com/app/apikey",
+        "xai" to "https://console.x.ai/",
+        "mistral" to "https://console.mistral.ai/api-keys",
+        "groq" to "https://console.groq.com/keys",
+        "openrouter" to "https://openrouter.ai/keys",
+        "together" to "https://api.together.xyz/settings/api-keys",
+        // ---------- 本地 / 自建 ----------
+        "ollama" to "https://ollama.com/download",
+        "lmstudio" to "https://lmstudio.ai/",
+        "custom" to ""
+    )
+
+    /** 该厂商申请 API Key 的官网地址；没有（自定义 / 中转）就返回空串 */
+    fun applyUrlOf(p: Provider): String = APPLY_URLS[p.id] ?: ""
+
+    /** 申请页的简短说明，写进设置页那一行 */
+    fun applyHintOf(p: Provider): String = when {
+        p.group == "本地" && p.id == "ollama" -> "下载安装 Ollama，本地跑模型不需要 Key"
+        p.group == "本地" && p.id == "lmstudio" -> "下载 LM Studio，本地跑模型不需要 Key"
+        p.id == "custom" -> "中转站 / 自建代理：Key 找你的服务商要"
+        p.id == "ark" -> "方舟控制台 → API Key 管理（模型名建议填接入点 ID）"
+        p.id == "qianfan" -> "百度智能云 → 访问控制 → API Key（bce-v3/ 开头）"
+        p.id == "spark" -> "讯飞开放平台 → 星火 → 服务管理（格式 APIKey:APISecret）"
+        else -> "去官网控制台创建 API Key 后，粘贴到上面"
+    }
 }

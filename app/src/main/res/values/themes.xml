@@ -1,22 +1,84 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
 
-    <!-- 浅色（默认）：手绘简洁风，米白纸感底 -->
+    <!--
+      全局主题。
+      配色口径跟代码里的 Palette 对齐（浅色：米白纸感底 + 深松石绿强调色；
+      深色：近黑底 + 亮松石绿），这样「窗口底 / 状态栏 / 对话框」不会跟页面脱节。
+      对话框统一换成 HxDialog：把散落各处的系统默认弹窗一次性变成圆角卡 + 强调色按钮。
+    -->
+
+    <!-- 浅色（默认） -->
     <style name="AppTheme" parent="Theme.AppCompat.Light.NoActionBar">
-        <item name="android:windowBackground">#FAF7F2</item>
-        <item name="android:colorAccent">#12BFA3</item>
-        <item name="colorAccent">#12BFA3</item>
+        <item name="android:windowBackground">#F5F5F3</item>
+        <item name="android:colorAccent">#12695C</item>
+        <item name="colorAccent">#12695C</item>
+        <item name="android:textColorPrimary">#1A1A1A</item>
+        <item name="android:textColorSecondary">#6B6B68</item>
         <item name="android:statusBarColor">#FFFFFF</item>
         <item name="android:navigationBarColor">#FFFFFF</item>
+        <item name="android:windowLightStatusBar">true</item>
+        <item name="alertDialogTheme">@style/HxDialog</item>
     </style>
 
     <!-- 深色 -->
     <style name="AppThemeDark" parent="Theme.AppCompat.NoActionBar">
-        <item name="android:windowBackground">#16181C</item>
-        <item name="android:colorAccent">#3BD6BC</item>
-        <item name="colorAccent">#3BD6BC</item>
-        <item name="android:statusBarColor">#1B1E22</item>
-        <item name="android:navigationBarColor">#1B1E22</item>
+        <item name="android:windowBackground">#0F1011</item>
+        <item name="android:colorAccent">#4FCFB4</item>
+        <item name="colorAccent">#4FCFB4</item>
+        <item name="android:textColorPrimary">#EDEDED</item>
+        <item name="android:textColorSecondary">#9A9A9A</item>
+        <item name="android:statusBarColor">#141516</item>
+        <item name="android:navigationBarColor">#141516</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="alertDialogTheme">@style/HxDialogDark</item>
+    </style>
+
+    <!-- 对话框按钮：统一字号 / 字距 / 热区，用强调色，不再是系统灰 -->
+    <style name="HxDialogButton" parent="Widget.AppCompat.Button.ButtonBar.AlertDialog">
+        <item name="android:textColor">#12695C</item>
+        <item name="android:textSize">14sp</item>
+        <item name="android:letterSpacing">0.06</item>
+        <item name="android:minWidth">0dp</item>
+        <item name="android:minHeight">46dp</item>
+        <item name="android:gravity">center</item>
+    </style>
+
+    <style name="HxDialogButtonDark" parent="Widget.AppCompat.Button.ButtonBar.AlertDialog">
+        <item name="android:textColor">#4FCFB4</item>
+        <item name="android:textSize">14sp</item>
+        <item name="android:letterSpacing">0.06</item>
+        <item name="android:minWidth">0dp</item>
+        <item name="android:minHeight">46dp</item>
+        <item name="android:gravity">center</item>
+    </style>
+
+    <!-- 对话框（浅色）：圆角白卡，宽度别贴屏幕边 -->
+    <style name="HxDialog" parent="Theme.AppCompat.Light.Dialog.Alert">
+        <item name="android:windowBackground">@drawable/hx_dialog_bg</item>
+        <item name="android:windowIsFloating">true</item>
+        <item name="android:windowMinWidthMajor">86%</item>
+        <item name="android:windowMinWidthMinor">92%</item>
+        <item name="android:backgroundDimAmount">0.42</item>
+        <item name="android:colorAccent">#12695C</item>
+        <item name="colorAccent">#12695C</item>
+        <item name="android:textColorPrimary">#1A1A1A</item>
+        <item name="android:textColorSecondary">#6B6B68</item>
+        <item name="buttonStyle">@style/HxDialogButton</item>
+    </style>
+
+    <!-- 对话框（深色）：同样形状，换深色卡面 + 亮色强调 -->
+    <style name="HxDialogDark" parent="Theme.AppCompat.Dialog.Alert">
+        <item name="android:windowBackground">@drawable/hx_dialog_bg_dark</item>
+        <item name="android:windowIsFloating">true</item>
+        <item name="android:windowMinWidthMajor">86%</item>
+        <item name="android:windowMinWidthMinor">92%</item>
+        <item name="android:backgroundDimAmount">0.55</item>
+        <item name="android:colorAccent">#4FCFB4</item>
+        <item name="colorAccent">#4FCFB4</item>
+        <item name="android:textColorPrimary">#EDEDED</item>
+        <item name="android:textColorSecondary">#9A9A9A</item>
+        <item name="buttonStyle">@style/HxDialogButtonDark</item>
     </style>
 
 </resources>
