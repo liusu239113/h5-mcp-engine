@@ -303,7 +303,14 @@ function uiApplyKit(tdir, kit) {
   const root = tdir || projectDir || cwd;
   const dir = kitsDir(tdir);
   const dst = path.join(root, 'ui');
-  const n = copyTree(path.join(dir, kit), dst) + copyTree(path.join(dir, '_shared'), dst);
+  // 共享样式（components.css / components.js / SPEC.md）和主题一起落地到项目 ui/。
+  // 注意目录名**不能**以 `_` 开头：Android 打包 assets 时会忽略 `_` / `.` 开头的目录，
+  // 曾经叫 ui-kits/_shared 时整个目录没进 APK，换肤后组件样式全部缺失。
+  // 这里同时兼容旧名字，免得老设备上残留 _shared 时又出一次同样的坑。
+  const sharedDir = fs.existsSync(path.join(dir, 'shared'))
+    ? path.join(dir, 'shared')
+    : path.join(dir, '_shared');
+  const n = copyTree(path.join(dir, kit), dst) + copyTree(sharedDir, dst);
   fs.writeFileSync(
     path.join(dst, '.kit.json'),
     JSON.stringify({ id: kit, name: meta.name, mood: meta.mood, at: Date.now() }, null, 2),

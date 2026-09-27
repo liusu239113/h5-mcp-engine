@@ -2780,7 +2780,7 @@ class MainActivity : AppCompatActivity(), GameUi {
     /** 落地一套主题到当前项目 ui/：与桥里的 maker_ui_apply_kit 走同一套目录结构 */
     private fun applyUiKit(id: String): Int {
         val dst = File(projDir(), "ui")
-        val n = copyAssetTree("ui-kits/$id", dst) + copyAssetTree("ui-kits/_shared", dst)
+        val n = copyAssetTree("ui-kits/$id", dst) + copyAssetTree("ui-kits/shared", dst)
         runCatching {
             File(dst, ".kit.json").writeText("""{"id":"$id","at":${System.currentTimeMillis()}}""")
         }
