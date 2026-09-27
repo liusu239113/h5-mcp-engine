@@ -17,7 +17,7 @@ import java.util.UUID
  *
  * 协议要点：
  *   - initialize 返回 protocolVersion / capabilities / serverInfo
- *   - notifications/* 无 id，直接 202
+ *   - notifications 开头的通知无 id，直接 202 确认
  *   - 响应头带 Mcp-Session-Id
  *   - 同时开 CORS，方便网页端 AI 直连
  */
