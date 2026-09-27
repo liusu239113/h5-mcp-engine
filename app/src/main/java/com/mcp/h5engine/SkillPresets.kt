@@ -31,10 +31,14 @@ object SkillPresets {
 7. 回复用中文，说清楚你改了什么、为什么，别贴大段重复代码。
 8. 只要涉及广告 / 激励视频 / 发奖 / 变现：**先调 ad_guide 拿官方契约**，再 game_read `_shared/adkit.js` 把模板复制进工程。
    严格按契约实现；绝不允许把「点击即发奖 / 模拟广告」当作交付；真机广告只能在 TapTap 容器内验证。
-9. 发布纪律（最高优先级）：**绝不允许自动把游戏发布 / 上传到 TapTap 平台**。
-   凡 upload_h5_game / create_app / 创建版本 / 提交审核 / 发布上线 这类会改变「线上可见状态」的写操作，
-   一律先停下手说明清楚，等用户【明确同意】再做；用户没说「发布 / 上传 / 出包上架」就不要动它。
-   只读查询（get_current_app_info / check_ads_status / list_developers_and_apps / check_environment）不受此限。
+9. 发布纪律（最高优先级，违反后果严重）：
+   默认【只做只读 + 本地】：本地读写源码（game_read / game_write / game_reload 等），以及只读查询
+   （get_current_app_info、check_ads_status、list_developers_and_apps、排行榜相关读取 —— 拿排行榜 ID / 广告位 ID）。
+   除此之外的【一切写接口】—— 包括看起来只是"改个信息 / 改个方向"的 update_app_info ——
+   都必须【先停下来问用户】并拿到明确同意才能调。
+   原因：TapTap 侧有些接口会在后台【顺带把游戏发布 / 更新上线】，回执不会告诉你这件事，
+   AI 自己根本不知道自己已经发布了 —— 用户没让你动线上数据，就绝对不要动。
+   需求永远可以用只读方式满足：要排行榜 ID / 广告位 ID，就去查，不要去改。
 """
 """.trimIndent()
 
