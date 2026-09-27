@@ -12,6 +12,7 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Canvas
 import android.graphics.Typeface
+import android.graphics.drawable.BitmapDrawable
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -21,7 +22,9 @@ import android.os.Looper
 import android.os.SystemClock
 import android.provider.MediaStore
 import android.provider.Settings
+import android.text.Editable
 import android.text.InputType
+import android.text.TextWatcher
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
@@ -34,6 +37,8 @@ import android.webkit.WebViewClient
 import android.widget.CheckBox
 import android.widget.EditText
 import android.widget.FrameLayout
+import android.widget.HorizontalScrollView
+import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
@@ -513,19 +518,21 @@ class MainActivity : AppCompatActivity(), GameUi {
             setPadding(dp(14), dp(2), dp(14), dp(8))
         }
         toolRow.addView(
-            entryTile(this, pal, "image", "素材") { pickMedia("media") },
+            entryTile(this, pal, "image", "素材") { openWorkspace("media") },
             LinearLayout.LayoutParams(0, -2, 1f).apply { rightMargin = dp(6) }
         )
         toolRow.addView(
-            entryTile(this, pal, "doc", "文档") { pickMedia("doc") },
+            entryTile(this, pal, "doc", "文档") { openWorkspace("doc") },
             LinearLayout.LayoutParams(0, -2, 1f).apply { rightMargin = dp(6) }
         )
         toolRow.addView(
-            entryTile(this, pal, "skill", "技能") { pickMedia("skill") },
+            entryTile(this, pal, "skill", "技能") { openWorkspace("skill") },
             LinearLayout.LayoutParams(0, -2, 1f).apply { rightMargin = dp(6) }
         )
         toolRow.addView(
-            entryTile(this, pal, "code", "代码", onLongClick = { editMainCode() }) { showCode() },
+            entryTile(this, pal, "code", "代码", onLongClick = { editMainCode() }) {
+                openWorkspace("code")
+            },
             LinearLayout.LayoutParams(0, -2, 1f)
         )
         page.addView(toolRow)
@@ -1150,7 +1157,9 @@ class MainActivity : AppCompatActivity(), GameUi {
                     toast("已加入待发送区 ${ok.size} 个文件")
                 }
                 if (bad > 0) toast("有 $bad 个文件读不了（可能没给读取权限）")
+                // 上传完刷新工作区（常驻列表立刻能看到新文件）
                 updateAttachInfo()
+                if (wsDlg != null) renderWs()
             }
         }.start()
     }
@@ -1819,14 +1828,18 @@ class MainActivity : AppCompatActivity(), GameUi {
         fullDlg = dlg
         dlg.show()
         dlg.window?.setLayout(-1, -1)
-        // 全屏看游戏横过来更合理
-        requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
+        // 只做「铺满屏幕」的扩展，不旋转屏幕（用户明确不要横屏）
+        @Suppress("DEPRECATION")
+        dlg.window?.decorView?.systemUiVisibility =
+            View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY or
+                View.SYSTEM_UI_FLAG_FULLSCREEN or
+                View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or
+                View.SYSTEM_UI_FLAG_LAYOUT_STABLE
     }
 
-    /** 退出全屏：把预览容器搬回预览页原位，恢复竖屏 */
+    /** 退出全屏：把预览容器搬回预览页原位 */
     private fun restorePreview() {
         fullDlg = null
-        requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
         if (!::previewWrapHolder.isInitialized) return
         (previewWrapHolder.parent as? ViewGroup)?.removeView(previewWrapHolder)
         if (::previewSlot.isInitialized &&
@@ -1834,6 +1847,676 @@ class MainActivity : AppCompatActivity(), GameUi {
         ) {
             previewSlot.addView(previewWrapHolder, LinearLayout.LayoutParams(-1, 0, 1f))
         }
+    }
+
+    // ==================== 工作区（素材 / 文档 / 技能 / 代码） ====================
+    //
+    // 这是「常驻资源面板」，不是一次性选择器：
+    // 列的是磁盘上真实存在的文件，重启 / 覆盖安装后还在，可预览、可多选、可反复加入对话。
+
+    private var wsDlg: Dialog? = null
+    private var wsTab = "media"        // media / doc / skill / code
+    private var wsKind = "image"       // 素材页内：image / audio / video
+    private var wsGrid = false         // 列表 / 网格
+    private var wsSort = 0             // 0 名称 / 1 大小 / 2 时间
+    private var wsSearch = ""
+    private val wsSel = HashSet<String>()   // 勾选的相对路径
+    private val wsOpen = HashSet<String>()  // 已展开的目录
+    private var wsBody: LinearLayout? = null
+    private var wsTabsRow: LinearLayout? = null
+    private var wsBottom: LinearLayout? = null
+    private var wsTitle: TextView? = null
+
+    private fun openWorkspace(tab: String) {
+        wsTab = tab
+        if (wsDlg != null) {
+            renderWs()
+            return
+        }
+        val box = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(pal.bg)
+        }
+        val bar = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(14), dp(10), dp(12), dp(8))
+            setBackgroundColor(pal.navBg)
+        }
+        wsTitle = TextView(this).apply {
+            textSize = 14f
+            setTextColor(pal.text)
+            typeface = MEDIUM
+        }
+        bar.addView(wsTitle, LinearLayout.LayoutParams(0, -2, 1f))
+        bar.addView(ghostBtnOf(this, pal, "关闭").apply { setOnClickListener { wsDlg?.dismiss() } })
+        box.addView(bar, LinearLayout.LayoutParams(-1, -2))
+
+        wsTabsRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(14), dp(8), dp(14), dp(4))
+        }
+        box.addView(wsTabsRow, LinearLayout.LayoutParams(-1, -2))
+
+        wsBody = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(14), dp(4), dp(14), dp(10))
+        }
+        box.addView(ScrollView(this).apply { addView(wsBody) }, LinearLayout.LayoutParams(-1, 0, 1f))
+
+        wsBottom = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(14), dp(8), dp(14), dp(12))
+            setBackgroundColor(pal.navBg)
+        }
+        box.addView(wsBottom, LinearLayout.LayoutParams(-1, -2))
+
+        val dlg = Dialog(this)
+        dlg.setContentView(box)
+        dlg.setOnDismissListener {
+            wsDlg = null
+            wsSel.clear()
+        }
+        wsDlg = dlg
+        dlg.show()
+        dlg.window?.setLayout(-1, -1)
+        renderWs()
+    }
+
+    private fun renderWs() {
+        val body = wsBody ?: return
+        val tabs = wsTabsRow ?: return
+        wsTitle?.text = "工作区 · $currentGame"
+
+        tabs.removeAllViews()
+        for ((t, label) in listOf(
+            "media" to "素材", "doc" to "文档", "skill" to "技能", "code" to "代码"
+        )) {
+            tabs.addView(
+                chipOf(this, pal, label, t == wsTab).apply {
+                    setOnClickListener {
+                        wsTab = t
+                        wsSel.clear()
+                        renderWs()
+                    }
+                },
+                LinearLayout.LayoutParams(-2, -2).apply { rightMargin = dp(6) }
+            )
+        }
+
+        body.removeAllViews()
+        when (wsTab) {
+            "media" -> renderMediaTab(body)
+            "doc" -> renderDocTab(body, "doc")
+            "skill" -> renderDocTab(body, "skill")
+            else -> renderCodeTab(body)
+        }
+        renderWsBottom()
+    }
+
+    // ---------- 素材页 ----------
+
+    private fun renderMediaTab(body: LinearLayout) {
+        val kinds = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        for ((k, label) in listOf("image" to "图片", "audio" to "音频", "video" to "视频")) {
+            kinds.addView(
+                chipOf(this, pal, label, k == wsKind).apply {
+                    setOnClickListener {
+                        wsKind = k
+                        wsSel.clear()
+                        renderWs()
+                    }
+                },
+                LinearLayout.LayoutParams(-2, -2).apply { rightMargin = dp(6) }
+            )
+        }
+        body.addView(kinds, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(10) })
+
+        val tools = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        tools.addView(actionChip("upload", "上传") { pickMedia("media") })
+        tools.addView(
+            actionChip("search", sortLabel()) {
+                wsSort = (wsSort + 1) % 3
+                renderWs()
+            },
+            LinearLayout.LayoutParams(-2, -2).apply { leftMargin = dp(6) }
+        )
+        tools.addView(
+            actionChip(if (wsGrid) "list" else "grid", if (wsGrid) "列表" else "网格") {
+                wsGrid = !wsGrid
+                renderWs()
+            },
+            LinearLayout.LayoutParams(-2, -2).apply { leftMargin = dp(6) }
+        )
+        body.addView(tools, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(10) })
+
+        val files = listMedia(wsKind)
+        if (files.isEmpty()) {
+            body.addView(emptyHint("还没有素材。点「上传」加图片 / 音频 / 视频（落在 _uploads/media/，重启后还在）"))
+            return
+        }
+        if (wsGrid) {
+            body.addView(mediaGrid(files))
+        } else {
+            for (f in files) {
+                body.addView(mediaRow(f), LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(8) })
+            }
+        }
+    }
+
+    private fun sortLabel() = when (wsSort) {
+        1 -> "按大小"
+        2 -> "按时间"
+        else -> "按名称"
+    }
+
+    private fun emptyHint(t: String): TextView = TextView(this).apply {
+        text = t
+        textSize = 12.5f
+        setTextColor(pal.faint)
+        setPadding(dp(4), dp(18), dp(4), dp(18))
+    }
+
+    /** 工具条按钮：手绘图标 + 文字 */
+    private fun actionChip(kind: String, label: String, onClick: () -> Unit): LinearLayout {
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(10), dp(7), dp(12), dp(7))
+            background = pressable(roundCard(this@MainActivity, pal.cardAlt, pal.border, 10), 0x14000000)
+            isClickable = true
+            setOnClickListener { onClick() }
+        }
+        val iv = ImageView(this).apply {
+            setImageDrawable(LineIcon(kind, pal.sub, dp(2).toFloat()))
+            setPadding(dp(6), dp(6), dp(6), dp(6))
+        }
+        row.addView(iv, LinearLayout.LayoutParams(dp(26), dp(26)))
+        row.addView(TextView(this).apply {
+            text = label
+            textSize = 12.5f
+            setTextColor(pal.text)
+        })
+        return row
+    }
+
+    /** 素材行：勾选框 + 缩略图 + 文件名/大小 + ⋮；点行 = 预览 */
+    private fun mediaRow(f: File): LinearLayout {
+        val kind = kindOfFile(f.name)
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(8), dp(8), dp(8), dp(8))
+            background = pressable(roundCard(this@MainActivity, pal.card, pal.border, 12), 0x14000000)
+            isClickable = true
+            setOnClickListener { previewFile(f, kind) }
+        }
+        row.addView(selBox(f.relativeTo(gameRoot).path))
+        row.addView(
+            thumbView(f, 44),
+            LinearLayout.LayoutParams(dp(44), dp(44)).apply { leftMargin = dp(8) }
+        )
+        val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        col.addView(TextView(this).apply {
+            text = f.name
+            textSize = 13f
+            setTextColor(pal.text)
+            maxLines = 1
+            ellipsize = android.text.TextUtils.TruncateAt.MIDDLE
+        })
+        col.addView(TextView(this).apply {
+            text = fmtSize(f.length())
+            textSize = 11f
+            setTextColor(pal.faint)
+        })
+        row.addView(col, LinearLayout.LayoutParams(0, -2, 1f).apply { leftMargin = dp(10) })
+        row.addView(moreBtn(f, kind))
+        return row
+    }
+
+    private fun mediaGrid(files: List<File>): LinearLayout {
+        val wrap = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        var line: LinearLayout? = null
+        files.forEachIndexed { i, f ->
+            if (i % 3 == 0) {
+                line = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+                wrap.addView(line, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(10) })
+            }
+            val kind = kindOfFile(f.name)
+            val rel = f.relativeTo(gameRoot).path
+            val cell = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                gravity = Gravity.CENTER
+                isClickable = true
+                setOnClickListener { previewFile(f, kind) }
+                setOnLongClickListener {
+                    if (wsSel.contains(rel)) wsSel.remove(rel) else wsSel.add(rel)
+                    renderWs()
+                    true
+                }
+            }
+            cell.addView(thumbView(f, 92), LinearLayout.LayoutParams(-1, dp(92)))
+            cell.addView(TextView(this).apply {
+                text = f.name
+                textSize = 11f
+                setTextColor(if (wsSel.contains(rel)) pal.accent else pal.sub)
+                gravity = Gravity.CENTER
+                maxLines = 1
+                ellipsize = android.text.TextUtils.TruncateAt.MIDDLE
+                setPadding(dp(2), dp(4), dp(2), 0)
+            })
+            line?.addView(cell, LinearLayout.LayoutParams(0, -2, 1f).apply { rightMargin = dp(8) })
+        }
+        return wrap
+    }
+
+    private fun selBox(rel: String): CheckBox = CheckBox(this).apply {
+        isChecked = wsSel.contains(rel)
+        buttonTintList = android.content.res.ColorStateList.valueOf(pal.accent)
+        setOnCheckedChangeListener { _, b ->
+            if (b) wsSel.add(rel) else wsSel.remove(rel)
+            renderWsBottom()
+        }
+    }
+
+    private fun moreBtn(f: File, kind: String): ImageView = ImageView(this).apply {
+        setImageDrawable(LineIcon("more", pal.faint, dp(2).toFloat()))
+        setPadding(dp(8), dp(8), dp(8), dp(8))
+        setOnClickListener {
+            val rel = f.relativeTo(gameRoot).path
+            AlertDialog.Builder(themed())
+                .setTitle(f.name)
+                .setItems(arrayOf("预览 / 播放", "加入对话", "复制路径", "删除")) { _, i ->
+                    when (i) {
+                        0 -> previewFile(f, kind)
+                        1 -> {
+                            attached += Attach(f.name, rel, kind)
+                            toast("已加入待发送区：${f.name}")
+                            updateAttachInfo()
+                        }
+                        2 -> copyToClipboard(rel)
+                        else -> confirmDelete(f)
+                    }
+                }
+                .show()
+        }
+    }
+
+    private fun thumbView(f: File, sizeDp: Int): ImageView {
+        val iv = ImageView(this).apply {
+            scaleType = ImageView.ScaleType.CENTER_CROP
+            background = roundCard(this@MainActivity, pal.cardAlt, pal.border, 8)
+        }
+        val k = kindOfFile(f.name)
+        if (k == "image") {
+            val bmp = runCatching { decodeSmall(f, dp(sizeDp)) }.getOrNull()
+            if (bmp != null) {
+                iv.setImageBitmap(bmp)
+            } else {
+                iv.setImageDrawable(LineIcon("image", pal.faint, dp(2).toFloat()))
+                iv.setPadding(dp(10), dp(10), dp(10), dp(10))
+            }
+        } else {
+            iv.setPadding(dp(11), dp(11), dp(11), dp(11))
+            iv.setImageDrawable(LineIcon(k, pal.faint, dp(2).toFloat()))
+        }
+        return iv
+    }
+
+    private fun decodeSmall(f: File, target: Int): Bitmap? {
+        val o = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeFile(f.absolutePath, o)
+        if (o.outWidth <= 0) return null
+        var s = 1
+        while (o.outWidth / (s * 2) >= target && o.outHeight / (s * 2) >= target) s *= 2
+        return BitmapFactory.decodeFile(f.absolutePath, BitmapFactory.Options().apply { inSampleSize = s })
+    }
+
+    // ---------- 文档 / 技能页 ----------
+
+    private fun renderDocTab(body: LinearLayout, kind: String) {
+        val dir = kindDir(kind)
+        val card = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER
+            setPadding(dp(14), dp(18), dp(14), dp(14))
+            background = pressable(roundCard(this@MainActivity, pal.cardAlt, pal.border, 12), 0x14000000)
+            isClickable = true
+            setOnClickListener { pickMedia(kind) }
+        }
+        val ic = ImageView(this).apply {
+            setImageDrawable(LineIcon("upload", pal.sub, dp(2).toFloat()))
+            setPadding(dp(10), dp(10), dp(10), dp(10))
+        }
+        card.addView(ic, LinearLayout.LayoutParams(dp(44), dp(44)))
+        card.addView(TextView(this).apply {
+            text = if (kind == "skill") "点击上传技能（供 AI 读取）" else "点击上传文档"
+            textSize = 13.5f
+            setTextColor(pal.text)
+            gravity = Gravity.CENTER
+            setPadding(0, dp(6), 0, 0)
+        })
+        card.addView(TextView(this).apply {
+            text = if (kind == "skill")
+                "支持 .txt .md .json .js .lua 等 · 上传到 _skills/"
+            else
+                "支持 .txt .json .md .xml .lua .docx .pdf .zip · 上传到 _uploads/doc/"
+            textSize = 11.5f
+            setTextColor(pal.faint)
+            gravity = Gravity.CENTER
+            setPadding(0, dp(4), 0, 0)
+        })
+        body.addView(card, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(12) })
+
+        val tools = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        tools.addView(actionChip("search", sortLabel()) {
+            wsSort = (wsSort + 1) % 3
+            renderWs()
+        })
+        tools.addView(
+            actionChip(if (wsGrid) "list" else "grid", if (wsGrid) "列表" else "网格") {
+                wsGrid = !wsGrid
+                renderWs()
+            },
+            LinearLayout.LayoutParams(-2, -2).apply { leftMargin = dp(6) }
+        )
+        body.addView(tools, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(10) })
+
+        val files = sortFiles(dir.listFiles()?.filter { it.isFile } ?: emptyList())
+        body.addView(TextView(this).apply {
+            text = (if (kind == "skill") "技能" else "项目文档") + "（${files.size}）  ${dir.name}/"
+            textSize = 12f
+            setTextColor(pal.faint)
+            setPadding(dp(4), 0, dp(4), dp(8))
+        })
+        if (files.isEmpty()) {
+            body.addView(emptyHint(if (kind == "skill") "还没有技能文件" else "还没有文档"))
+            return
+        }
+        for (f in files) {
+            body.addView(docRow(f, kind), LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(8) })
+        }
+    }
+
+    private fun docRow(f: File, kind: String): LinearLayout {
+        val rel = f.relativeTo(gameRoot).path
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(8), dp(10), dp(8), dp(10))
+            background = pressable(roundCard(this@MainActivity, pal.card, pal.border, 12), 0x14000000)
+            isClickable = true
+        }
+        row.addView(selBox(rel))
+        val iv = ImageView(this).apply {
+            setImageDrawable(LineIcon(kindOfFile(f.name), pal.sub, dp(2).toFloat()))
+            setPadding(dp(5), dp(5), dp(5), dp(5))
+        }
+        row.addView(iv, LinearLayout.LayoutParams(dp(26), dp(26)).apply { leftMargin = dp(6) })
+        val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        col.addView(TextView(this).apply {
+            text = f.name
+            textSize = 13f
+            setTextColor(pal.text)
+            maxLines = 1
+            ellipsize = android.text.TextUtils.TruncateAt.MIDDLE
+        })
+        col.addView(TextView(this).apply {
+            text = fmtSize(f.length())
+            textSize = 11f
+            setTextColor(pal.faint)
+        })
+        row.addView(col, LinearLayout.LayoutParams(0, -2, 1f).apply { leftMargin = dp(10) })
+        row.addView(moreBtn(f, kind))
+        row.setOnClickListener { openFileEditor(f, f.parentFile ?: gameRoot) }
+        return row
+    }
+
+    // ---------- 代码页 ----------
+
+    private fun renderCodeTab(body: LinearLayout) {
+        val dir = File(gameRoot, currentGame)
+        val search = EditText(this).apply {
+            hint = "搜索文件名"
+            textSize = 13f
+            setText(wsSearch)
+            setTextColor(pal.text)
+            setHintTextColor(pal.faint)
+            setPadding(dp(12), dp(9), dp(12), dp(9))
+            background = roundCard(this@MainActivity, pal.card, pal.border, 12)
+            addTextChangedListener(object : TextWatcher {
+                override fun afterTextChanged(s: Editable?) {
+                    val now = s?.toString().orEmpty()
+                    if (now == wsSearch) return
+                    wsSearch = now
+                    renderWs()
+                }
+
+                override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+                override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+            })
+        }
+        body.addView(search, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(10) })
+
+        val files = dir.walkTopDown().filter { it.isFile }
+            .filterNot { it.path.contains("/_shots/") }
+            .filter { wsSearch.isBlank() || it.relativeTo(dir).path.contains(wsSearch, true) }
+            .sortedBy { it.relativeTo(dir).path }
+            .take(300).toList()
+
+        body.addView(TextView(this).apply {
+            text = "${dir.name}（${files.size} 个文件）"
+            textSize = 12f
+            setTextColor(pal.faint)
+            setPadding(dp(4), 0, dp(4), dp(8))
+        })
+        if (files.isEmpty()) {
+            body.addView(emptyHint("没有匹配的文件"))
+            return
+        }
+
+        files.groupBy { it.relativeTo(dir).path.substringBeforeLast('/', "") }
+            .toSortedMap()
+            .forEach { (folder, list) ->
+                val key = folder.ifBlank { "." }
+                val head = LinearLayout(this).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                    setPadding(dp(6), dp(10), dp(6), dp(8))
+                    isClickable = true
+                    setOnClickListener {
+                        if (wsOpen.contains(key)) wsOpen.remove(key) else wsOpen.add(key)
+                        renderWs()
+                    }
+                }
+                val fi = ImageView(this).apply {
+                    setImageDrawable(LineIcon("folder_sm", pal.accent, dp(2).toFloat()))
+                    setPadding(dp(4), dp(4), dp(4), dp(4))
+                }
+                head.addView(fi, LinearLayout.LayoutParams(dp(24), dp(24)))
+                head.addView(TextView(this).apply {
+                    text = (if (folder.isBlank()) "根目录" else folder) + "（${list.size}）"
+                    textSize = 13.5f
+                    setTextColor(pal.text)
+                    typeface = MEDIUM
+                    setPadding(dp(6), 0, 0, 0)
+                }, LinearLayout.LayoutParams(0, -2, 1f))
+                head.addView(TextView(this).apply {
+                    text = if (wsOpen.contains(key)) "收起" else "展开"
+                    textSize = 11.5f
+                    setTextColor(pal.faint)
+                })
+                body.addView(head)
+
+                if (wsOpen.contains(key)) {
+                    for (f in list) {
+                        val rel = f.relativeTo(dir).path
+                        val row = fileRow(
+                            name = rel,
+                            kind = kindOfFile(rel),
+                            onOpen = { openFileEditor(f, dir) },
+                            onAdd = {
+                                attached += Attach(rel, rel, "code")
+                                toast("已加入待发送区：$rel")
+                                updateAttachInfo()
+                            }
+                        )
+                        body.addView(row, LinearLayout.LayoutParams(-1, -2).apply {
+                            leftMargin = dp(14)
+                            bottomMargin = dp(6)
+                        })
+                    }
+                }
+            }
+    }
+
+    // ---------- 底部「加入对话」 ----------
+
+    private fun renderWsBottom() {
+        val b = wsBottom ?: return
+        b.removeAllViews()
+        val total = wsSel.size
+        b.addView(TextView(this).apply {
+            text = if (total == 0) "勾选文件后可加入对话" else "已选 $total 项"
+            textSize = 12f
+            setTextColor(pal.faint)
+        }, LinearLayout.LayoutParams(0, -2, 1f))
+        if (total > 0) {
+            b.addView(primaryBtnOf(this, pal, "加入对话 ($total)").apply {
+                setOnClickListener { queueSelected() }
+            })
+        }
+    }
+
+    /** 勾选的文件 → 加入对话（图片同时进多模态） */
+    private fun queueSelected() {
+        val rels = wsSel.toList()
+        if (rels.isEmpty()) return
+        Thread {
+            val out = mutableListOf<Attach>()
+            for (rel in rels) {
+                val kind = when {
+                    rel.startsWith("_skills") -> "skill"
+                    rel.startsWith("_uploads/doc") -> "doc"
+                    rel.startsWith("_uploads/media") -> kindOfFile(rel)
+                    else -> "code"
+                }
+                val a = attachFromFile(File(gameRoot, rel), rel, kind) ?: continue
+                out += a
+            }
+            main.post {
+                for (a in out) {
+                    if (a.kind == "image") shotBytes[a.rel]?.let { pendingShots += it }
+                    queued += a
+                }
+                wsSel.clear()
+                toast("已加入对话 ${out.size} 项")
+                updateAttachInfo()
+                renderWs()
+            }
+        }.start()
+    }
+
+    private fun attachFromFile(f: File, rel: String, kind: String): Attach? = runCatching {
+        if (!f.isFile) return@runCatching null
+        val bytes = f.readBytes()
+        val text = if (kind == "image" || kind == "audio" || kind == "video") ""
+        else extractText(f.name, bytes).take(60000)
+        if (kind == "image") shrinkToJpeg(bytes, 1024, 80)?.let { shotBytes[rel] = it }
+        Attach(f.name, rel, kind, text)
+    }.getOrNull()
+
+    // ---------- 工具 ----------
+
+    private fun kindDir(kind: String): File = when (kind) {
+        "doc" -> File(gameRoot, "_uploads/doc")
+        "skill" -> File(gameRoot, "_skills")
+        else -> File(gameRoot, "_uploads/media")
+    }
+
+    private fun listMedia(kind: String): List<File> {
+        val all = kindDir("media").listFiles()?.filter { it.isFile } ?: emptyList()
+        return sortFiles(all.filter { kindOfFile(it.name) == kind })
+    }
+
+    private fun sortFiles(l: List<File>): List<File> = when (wsSort) {
+        1 -> l.sortedByDescending { it.length() }
+        2 -> l.sortedByDescending { it.lastModified() }
+        else -> l.sortedBy { it.name.lowercase() }
+    }
+
+    private fun fmtSize(n: Long): String = when {
+        n < 1024 -> "${n}B"
+        n < 1024 * 1024 -> "${n / 1024}KB"
+        else -> String.format(java.util.Locale.US, "%.1fMB", n / 1024.0 / 1024.0)
+    }
+
+    /** 图片预览用内置全屏；音频 / 视频交给系统播放器 */
+    private fun previewFile(f: File, kind: String) {
+        if (kind == "image") {
+            val bmp = runCatching { BitmapFactory.decodeFile(f.absolutePath) }.getOrNull()
+            if (bmp == null) {
+                toast("这张图打不开")
+                return
+            }
+            val iv = ImageView(this).apply {
+                setImageBitmap(bmp)
+                scaleType = ImageView.ScaleType.FIT_CENTER
+            }
+            val d = Dialog(this, android.R.style.Theme_Black_NoActionBar_Fullscreen)
+            val wrap = FrameLayout(this).apply {
+                setBackgroundColor(0xFF000000.toInt())
+                addView(iv, FrameLayout.LayoutParams(-1, -1))
+                setOnClickListener { d.dismiss() }
+            }
+            d.setContentView(wrap)
+            d.show()
+            d.window?.setLayout(-1, -1)
+        } else {
+            val uri = runCatching {
+                FileProvider.getUriForFile(this, "$packageName.files", f)
+            }.getOrNull()
+            if (uri == null) {
+                toast("打不开这个文件")
+                return
+            }
+            val i = Intent(Intent.ACTION_VIEW)
+                .setDataAndType(uri, mimeOf(f.name))
+                .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            runCatching { startActivity(i) }.onFailure { toast("没有能打开它的 App") }
+        }
+    }
+
+    private fun mimeOf(n: String): String = when (kindOfFile(n)) {
+        "image" -> "image/*"
+        "audio" -> "audio/*"
+        "video" -> "video/*"
+        else -> "*/*"
+    }
+
+    private fun confirmDelete(f: File) {
+        AlertDialog.Builder(themed())
+            .setTitle("删除文件")
+            .setMessage(f.name)
+            .setPositiveButton("删除") { _, _ ->
+                runCatching { f.delete() }.onSuccess {
+                    toast("已删除")
+                    renderWs()
+                }
+            }
+            .setNegativeButton("取消", null)
+            .show()
     }
 
     // ==================== 发布页 ====================

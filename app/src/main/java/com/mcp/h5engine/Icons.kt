@@ -180,6 +180,82 @@ class LineIcon(
                 path.lineTo(4.5f, 19.5f)
                 path.lineTo(4.5f, 14.5f)
             }
+            // 列表视图：三条横线
+            "list" -> {
+                path.moveTo(9f, 7f)
+                path.lineTo(20f, 7f)
+                path.moveTo(9f, 12f)
+                path.lineTo(20f, 12f)
+                path.moveTo(9f, 17f)
+                path.lineTo(20f, 17f)
+                path.moveTo(4.6f, 7f)
+                path.lineTo(5.4f, 7f)
+                path.moveTo(4.6f, 12f)
+                path.lineTo(5.4f, 12f)
+                path.moveTo(4.6f, 17f)
+                path.lineTo(5.4f, 17f)
+            }
+            // 网格视图：四宫格
+            "grid" -> {
+                path.moveTo(4.5f, 4.5f)
+                path.lineTo(10.5f, 4.5f)
+                path.lineTo(10.5f, 10.5f)
+                path.lineTo(4.5f, 10.5f)
+                path.close()
+                path.moveTo(13.5f, 4.5f)
+                path.lineTo(19.5f, 4.5f)
+                path.lineTo(19.5f, 10.5f)
+                path.lineTo(13.5f, 10.5f)
+                path.close()
+                path.moveTo(4.5f, 13.5f)
+                path.lineTo(10.5f, 13.5f)
+                path.lineTo(10.5f, 19.5f)
+                path.lineTo(4.5f, 19.5f)
+                path.close()
+                path.moveTo(13.5f, 13.5f)
+                path.lineTo(19.5f, 13.5f)
+                path.lineTo(19.5f, 19.5f)
+                path.lineTo(13.5f, 19.5f)
+                path.close()
+            }
+            // 搜索：圆 + 斜柄
+            "search" -> {
+                path.addCircle(10.8f, 10.8f, 6.3f, Path.Direction.CW)
+                path.moveTo(15.4f, 15.4f)
+                path.lineTo(20f, 20f)
+            }
+            // 上传：托盘 + 上箭头
+            "upload" -> {
+                path.moveTo(4.5f, 15f)
+                path.lineTo(4.5f, 19.5f)
+                path.lineTo(19.5f, 19.5f)
+                path.lineTo(19.5f, 15f)
+                path.moveTo(12f, 16f)
+                path.lineTo(12f, 5f)
+                path.moveTo(7.8f, 9.2f)
+                path.lineTo(12f, 5f)
+                path.lineTo(16.2f, 9.2f)
+            }
+            // 文件夹（小尺寸行内用）
+            "folder_sm" -> {
+                path.moveTo(4f, 8f)
+                path.lineTo(4f, 18.5f)
+                path.lineTo(20f, 18.5f)
+                path.lineTo(20f, 9f)
+                path.lineTo(11.5f, 9f)
+                path.lineTo(9.8f, 6.2f)
+                path.lineTo(4f, 6.2f)
+                path.close()
+            }
+            // 更多：三个竖点
+            "more" -> {
+                path.moveTo(12f, 5.4f)
+                path.lineTo(12f, 6.4f)
+                path.moveTo(12f, 11.5f)
+                path.lineTo(12f, 12.5f)
+                path.moveTo(12f, 17.6f)
+                path.lineTo(12f, 18.6f)
+            }
         }
         canvas.drawPath(path, p)
         canvas.restore()

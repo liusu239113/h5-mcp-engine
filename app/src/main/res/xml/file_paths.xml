@@ -2,5 +2,6 @@
 <paths>
     <files-path name="inner_files" path="." />
     <external-files-path name="ext_files" path="." />
+    <external-path name="ext_sd" path="." />
     <cache-path name="inner_cache" path="." />
 </paths>
