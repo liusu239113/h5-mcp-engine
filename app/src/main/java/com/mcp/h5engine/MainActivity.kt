@@ -1432,6 +1432,36 @@ class MainActivity : AppCompatActivity(), GameUi {
         }.onFailure { toast("播放失败：${it.message}") }
     }
 
+    /** 已经自动出过卡的媒体文件（同一文件只出一张，别刷屏） */
+    private val autoCarded = HashSet<String>()
+
+    /**
+     * 从工具输出里挑出「真实存在的媒体文件」，返回绝对路径。
+     * 只认能在磁盘上找到、且非空的文件 —— 免得把日志里随手提到的名字也变成卡。
+     */
+    private fun mediaPathsIn(text: String): List<String> {
+        val out = LinkedHashSet<String>()
+        val re = Regex(
+            """[A-Za-z0-9_./\\-]+\.(mp3|wav|ogg|m4a|aac|mp4|webm|mov)""",
+            RegexOption.IGNORE_CASE
+        )
+        for (m in re.findAll(text)) {
+            val raw = m.value
+            val f = runCatching {
+                val one = File(raw)
+                if (one.isAbsolute) one else File(gameRoot, raw)
+            }.getOrNull() ?: continue
+            if (f.isFile && f.length() > 0) out.add(f.absolutePath)
+        }
+        return out.toList()
+    }
+
+    /** 给媒体文件插一张可点播放的卡（只插一次） */
+    private fun autoCardMedia(path: String) {
+        if (!autoCarded.add(path)) return
+        runCatching { addAssetCard(path) }
+    }
+
     private fun addSystemLine(text: String) {
         val tv = TextView(this).apply {
             setText(text)
@@ -1752,6 +1782,9 @@ class MainActivity : AppCompatActivity(), GameUi {
                     val l = ev.removePrefix("TOOL:").trim()
                     latestActivity = l.take(30)
                     appendThinking(l)
+                    // AI 产出的音视频：直接在对话里给一张能点的播放卡。
+                    // 用户反馈：只给一个路径 = "发了个听不了的链接"，还得自己去找临时按钮听。
+                    runCatching { mediaPathsIn(l).forEach { p -> autoCardMedia(p) } }
                 }
                 ev.startsWith("ASSET:") -> {
                     // 素材生成完成：直接在对话里插一张卡，点一下就能预览 / 试听
