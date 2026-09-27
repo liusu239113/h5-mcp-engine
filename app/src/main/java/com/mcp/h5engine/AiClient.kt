@@ -72,9 +72,11 @@ class AiClient(private val cfg: ProviderConfig) {
 
         var last: ChatReply = ChatReply(null, emptyList(), "未发起请求")
         for (attempt in 1..3) {
-            last = once(body)
-            if (last.error == null) return last
-            if (!isTransient(last.error)) return last
+            val r = once(body)
+            last = r
+            val err = r.error
+            if (err == null) return r          // 成功
+            if (!isTransient(err)) return r    // 硬错误（鉴权/模型名）不重试
             if (attempt < 3) {
                 runCatching { Thread.sleep(if (attempt == 1) 500L else 1500L) }
             }

@@ -3,6 +3,7 @@ package com.mcp.h5engine
 import android.annotation.SuppressLint
 import android.content.ClipData
 import android.content.ClipboardManager
+import android.content.Context
 import android.content.ContentValues
 import android.content.Intent
 import android.graphics.Bitmap
@@ -845,7 +846,8 @@ class MainActivity : AppCompatActivity(), GameUi {
         val themeIds = listOf("light", "dark", "auto")
         var themeSel = themeIds.indexOf(cfgStore.themeMode).coerceAtLeast(0)
         val themeRow = LinearLayout(ctx).apply { orientation = LinearLayout.HORIZONTAL }
-        val themeViews = themeChips.mapIndexed { i, t ->
+        var themeViews: List<TextView> = emptyList()
+        themeViews = themeChips.mapIndexed { i, t ->
             chipOf(ctx, pal, t, i == themeSel).also { c ->
                 c.setOnClickListener {
                     themeSel = i
@@ -915,7 +917,8 @@ class MainActivity : AppCompatActivity(), GameUi {
         val visIds = listOf("auto", "on", "off")
         var visSel = visIds.indexOf(cfgStore.visionMode).coerceAtLeast(0)
         val visRow = LinearLayout(ctx).apply { orientation = LinearLayout.HORIZONTAL }
-        val visViews = visChips.mapIndexed { i, t ->
+        var visViews: List<TextView> = emptyList()
+        visViews = visChips.mapIndexed { i, t ->
             chipOf(ctx, pal, t, i == visSel).also { c ->
                 c.setOnClickListener {
                     visSel = i
