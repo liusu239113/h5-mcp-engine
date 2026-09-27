@@ -1,6 +1,14 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
+}
+
+// 正式签名：优先读仓库根的 keystore.properties；私钥在 app/keystore/hexora.jks（已随仓库提交）
+val ks = Properties().apply {
+    val f = rootProject.file("keystore.properties")
+    if (f.exists()) f.inputStream().use { load(it) }
 }
 
 android {
@@ -11,13 +19,27 @@ android {
         applicationId = "com.mcp.h5engine"
         minSdk = 24
         targetSdk = 34
-        versionCode = 5
-        versionName = "1.4"
+        versionCode = 6
+        versionName = "1.5"
+    }
+
+    signingConfigs {
+        create("release") {
+            storeFile = file(ks.getProperty("storeFile") ?: "keystore/hexora.jks")
+            storePassword = ks.getProperty("storePassword") ?: "Hexora2026"
+            keyAlias = ks.getProperty("keyAlias") ?: "hexora"
+            keyPassword = ks.getProperty("keyPassword") ?: "Hexora2026"
+        }
     }
 
     buildTypes {
         release {
             isMinifyEnabled = false
+            signingConfig = signingConfigs.getByName("release")
+        }
+        debug {
+            // 调试包也用正式签名，免得装来装去签名冲突
+            signingConfig = signingConfigs.getByName("release")
         }
     }
 

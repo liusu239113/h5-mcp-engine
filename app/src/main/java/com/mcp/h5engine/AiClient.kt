@@ -25,7 +25,9 @@ data class ChatMsg(
 data class ChatReply(
     val text: String?,
     val toolCalls: List<ToolCall>,
-    val error: String? = null
+    val error: String? = null,
+    /** 部分模型（deepseek-reasoner 等）会把思维链单独返回，拿出来给「思考过程」面板用 */
+    val reasoning: String? = null
 )
 
 /**
@@ -46,6 +48,18 @@ class AiClient(private val cfg: ProviderConfig) {
         .retryOnConnectionFailure(true)
         .build()
 
+    /** 正在飞的请求。点「停止」时要立刻掐断，而不是干等 240 秒读超时 */
+    @Volatile
+    private var inflight: okhttp3.Call? = null
+
+    @Volatile
+    private var aborted = false
+
+    fun abort() {
+        aborted = true
+        runCatching { inflight?.cancel() }
+    }
+
     private val endpoint: String
         get() {
             val base = cfg.baseUrl.trim()
@@ -64,6 +78,7 @@ class AiClient(private val cfg: ProviderConfig) {
      * 鉴权、模型名这种硬错误会立刻返回，不做无意义重试。
      */
     fun chat(history: List<ChatMsg>, tools: List<JSONObject>): ChatReply {
+        aborted = false
         val body = when (cfg.provider.protocol) {
             Protocol.OPENAI -> bodyOpenAi(history, tools)
             Protocol.ANTHROPIC -> bodyAnthropic(history, tools)
@@ -76,6 +91,7 @@ class AiClient(private val cfg: ProviderConfig) {
             last = r
             val err = r.error
             if (err == null) return r          // 成功
+            if (aborted) return ChatReply(null, emptyList(), "已取消")   // 用户点了停止
             if (!isTransient(err)) return r    // 硬错误（鉴权/模型名）不重试
             if (attempt < 3) {
                 runCatching { Thread.sleep(if (attempt == 1) 500L else 1500L) }
@@ -98,8 +114,10 @@ class AiClient(private val cfg: ProviderConfig) {
                 rb.header("x-goog-api-key", cfg.apiKey)
         }
 
+        val call = newHttp().newCall(rb.build())
+        inflight = call
         return try {
-            newHttp().newCall(rb.build()).execute().use { r ->
+            call.execute().use { r ->
                 val text = r.body?.string() ?: ""
                 if (!r.isSuccessful) {
                     ChatReply(null, emptyList(), "HTTP ${r.code} ${text.take(600)}")
@@ -109,6 +127,8 @@ class AiClient(private val cfg: ProviderConfig) {
             }
         } catch (t: Throwable) {
             ChatReply(null, emptyList(), "${t.javaClass.simpleName}: ${t.message}")
+        } finally {
+            inflight = null
         }
     }
 
@@ -488,7 +508,14 @@ class AiClient(private val cfg: ProviderConfig) {
                 )
             }
         }
-        return ChatReply(textOfNode(msg.opt("content")), tcs)
+        val reason = msg.optString("reasoning_content", "")
+            .ifBlank { msg.optString("reasoning", "") }
+        return ChatReply(
+            textOfNode(msg.opt("content")),
+            tcs,
+            null,
+            reason.takeIf { it.isNotBlank() }
+        )
     }
 
     private fun parseAnthropic(raw: String): ChatReply {

@@ -16,7 +16,9 @@ import android.os.Bundle
 import android.os.Environment
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.provider.MediaStore
+import android.provider.Settings
 import android.text.InputType
 import android.view.Gravity
 import android.view.View
@@ -97,6 +99,32 @@ class MainActivity : AppCompatActivity(), GameUi {
     @Volatile
     private var currentGame = "demo"
 
+    /** 顶栏左上角「项目」入口 */
+    private lateinit var projBtn: TextView
+
+    private var projectDlg: AlertDialog? = null
+    private var rootInited = false
+
+    // ---------- 运行状态可视化：折叠思考面板 + 计时 ----------
+    private var runHead: TextView? = null
+    private var runBody: TextView? = null
+    private var runTicker: Runnable? = null
+    private var runStartAt = 0L
+    private var runSteps = 0
+    private var bodyExpanded = false
+    private var latestActivity = ""
+    private var runSeq = 0
+    private var runWrote = false
+
+    /** 事件批量合并用的缓冲：忙的时候一秒几十条，逐条建 View 会明显卡 */
+    private val pendingEvents = mutableListOf<String>()
+    private var flushScheduled = false
+    private var scrollPending = false
+
+    /** 预览页：上次加载的项目与目录指纹，用来判断要不要自动重载 */
+    private var lastLoadedGame = ""
+    private var lastLoadedStamp = 0L
+
     @Volatile
     private var running = false
 
@@ -130,7 +158,8 @@ class MainActivity : AppCompatActivity(), GameUi {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        gameRoot = File(filesDir, "games").apply { mkdirs() }
+        gameRoot = pickProjectRoot().apply { mkdirs() }
+        migrateProjectsIfNeeded()
         seedBundledGames()
         seedSharedRuntime()
 
@@ -167,6 +196,56 @@ class MainActivity : AppCompatActivity(), GameUi {
 
     // ==================== 顶栏 ====================
 
+    /** 拿到「所有文件访问」后，项目就落在 /sdcard/Hexora —— 路径在文件管理器里看得见 */
+    private fun pickProjectRoot(): File {
+        val ext = runCatching {
+            if (Environment.isExternalStorageManager()) {
+                File(Environment.getExternalStorageDirectory(), "Hexora")
+            } else null
+        }.getOrNull()
+        return ext ?: File(filesDir, "games")
+    }
+
+    /** 从旧的内部目录一次性迁移项目（只补不覆盖） */
+    private fun migrateProjectsIfNeeded() {
+        if (!gameRoot.absolutePath.contains("Hexora")) return
+        val old = File(filesDir, "games")
+        if (!old.isDirectory) return
+        for (p in old.listFiles().orEmpty()) {
+            if (!p.isDirectory || p.name.startsWith("_")) continue
+            val dst = File(gameRoot, p.name)
+            if (dst.exists()) continue
+            runCatching { copyDir(p, dst) }
+        }
+    }
+
+    private fun copyDir(src: File, dst: File) {
+        if (src.isDirectory) {
+            dst.mkdirs()
+            for (c in src.listFiles().orEmpty()) copyDir(c, File(dst, c.name))
+        } else {
+            dst.parentFile?.mkdirs()
+            src.inputStream().use { i -> dst.outputStream().use { o -> i.copyTo(o) } }
+        }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        // 授权「所有文件访问」返回后，把项目根目录切到 /sdcard/Hexora
+        if (rootInited && Environment.isExternalStorageManager() && !gameRoot.absolutePath.contains("Hexora")) {
+            gameRoot = pickProjectRoot().apply { mkdirs() }
+            migrateProjectsIfNeeded()
+            seedBundledGames()
+            seedSharedRuntime()
+            runCatching { bridge.setSandbox(File(gameRoot, currentGame)) }
+            lastLoadedGame = ""
+            refreshHeader()
+            addSystemLine("项目根目录已切到 ${gameRoot.absolutePath}")
+            toast("项目目录已切换")
+        }
+        rootInited = true
+    }
+
     private fun buildTopBar() {
         val top = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -197,6 +276,15 @@ class MainActivity : AppCompatActivity(), GameUi {
             setOnClickListener { showSettings() }
         }
 
+        projBtn = TextView(this).apply {
+            textSize = 13f
+            letterSpacing = 0.04f
+            setTextColor(pal.text)
+            setPadding(dp(12), dp(7), dp(12), dp(7))
+            background = pressable(roundCard(this@MainActivity, pal.cardAlt, pal.border, 10), 0x14000000)
+            setOnClickListener { showProjects() }
+        }
+        row.addView(projBtn, LinearLayout.LayoutParams(-2, -2).apply { rightMargin = dp(10) })
         row.addView(titleTv, LinearLayout.LayoutParams(0, -2, 1f))
         row.addView(settings)
         top.addView(row)
@@ -299,6 +387,7 @@ class MainActivity : AppCompatActivity(), GameUi {
         tintNav(navChat, tab == 0)
         tintNav(navPreview, tab == 1)
         tintNav(navPub, tab == 2)
+        if (tab == 1) ensurePreviewFresh()
         if (tab == 2) refreshExportRow()
     }
 
@@ -383,11 +472,13 @@ class MainActivity : AppCompatActivity(), GameUi {
             setPadding(dp(6), dp(8), dp(6), dp(8))
             setOnClickListener { showSettings() }
         }
-        stopBtn = chipOf(this, pal, "■ 停", false).apply {
+        stopBtn = ghostBtnOf(this, pal, "停止").apply {
             visibility = View.GONE
             setOnClickListener {
-                runner?.cancel()
-                toast("已请求停止")
+                // 立刻掐断在飞的网络请求，不用等 240 秒读超时
+                runCatching { runner?.cancel() }
+                runHead?.text = "正在停止…"
+                toast("已停止")
             }
         }
         sendBtn = primaryBtnOf(this, pal, "发送").apply { setOnClickListener { send() } }
@@ -470,8 +561,14 @@ class MainActivity : AppCompatActivity(), GameUi {
         scrollChatToBottom()
     }
 
+    /** 同一帧内多次滚动请求合并：事件密集时不再反复 fullScroll（卡顿主因之一） */
     private fun scrollChatToBottom() {
-        chatScroll.post { chatScroll.fullScroll(View.FOCUS_DOWN) }
+        if (scrollPending) return
+        scrollPending = true
+        chatScroll.post {
+            scrollPending = false
+            chatScroll.fullScroll(View.FOCUS_DOWN)
+        }
     }
 
     private fun updateAttachInfo() {
@@ -494,8 +591,9 @@ class MainActivity : AppCompatActivity(), GameUi {
 
     private fun send() {
         if (running) {
-            toast("AI 正在干活，先点「停」或等它做完")
-            return
+            // 运行中也能直接发：先掐断上一轮，再把新消息发出去
+            runCatching { runner?.cancel() }
+            toast("已中断上一轮，接着发新的")
         }
         val text = inputEt.text.toString().trim().ifEmpty { lastUserText }
         if (text.isEmpty() && pendingShots.isEmpty()) return
@@ -527,24 +625,24 @@ class MainActivity : AppCompatActivity(), GameUi {
             shotDir = File(gameRoot, "_shots")
         ) { ev -> onAgentEvent(ev) }
 
+        runSeq++
+        val mySeq = runSeq
         runner = r
         running = true
-        sendBtn.isEnabled = false
-        sendBtn.alpha = 0.5f
+        runSteps = 0
+        runWrote = false
         stopBtn.visibleIf(true)
+        startRunCard()
 
         Thread {
             try {
                 r.run(history, text.ifEmpty { "请看我发的图片，并按图片内容改进游戏。" }, images)
             } catch (t: Throwable) {
-                main.post { addErrorCard(AiClient.friendly("${t.javaClass.simpleName}: ${t.message}")) }
-            } finally {
                 main.post {
-                    running = false
-                    sendBtn.isEnabled = true
-                    sendBtn.alpha = 1f
-                    stopBtn.visibleIf(false)
+                    if (mySeq == runSeq) addErrorCard(AiClient.friendly("${t.javaClass.simpleName}: ${t.message}"))
                 }
+            } finally {
+                main.post { if (mySeq == runSeq) finishRun() }
             }
         }.start()
     }
@@ -552,11 +650,354 @@ class MainActivity : AppCompatActivity(), GameUi {
     private fun onAgentEvent(ev: String) {
         main.post {
             when {
-                ev.startsWith("AI: ") -> addBubble(ev.removePrefix("AI: "), false)
-                ev.startsWith("[失败]") -> addErrorCard(ev.removePrefix("[失败] 请求失败：").trim())
-                else -> addSystemLine(ev)
+                ev.startsWith("AI: ") -> {
+                    flushNow()
+                    addBubble(ev.removePrefix("AI: "), false)
+                }
+                ev.startsWith("[失败]") -> {
+                    flushNow()
+                    addErrorCard(ev.removePrefix("[失败] 请求失败：").trim())
+                }
+                ev.startsWith("STEP:") -> {
+                    runSteps = ev.removePrefix("STEP:").trim().toIntOrNull() ?: runSteps
+                    latestActivity = ""
+                }
+                ev.startsWith("THINK:") -> {
+                    val t = ev.removePrefix("THINK:").trim()
+                    if (t.isNotEmpty()) appendThinking("思考：\n" + t.take(1500))
+                }
+                ev.startsWith("TOOL:") -> {
+                    val l = ev.removePrefix("TOOL:").trim()
+                    latestActivity = l.take(30)
+                    appendThinking(l)
+                }
+                ev == "RELOAD" -> {
+                    runWrote = true
+                    ensurePreviewFresh()
+                }
+                ev.startsWith("INFO: ") -> {
+                    pendingEvents += ev.removePrefix("INFO: ")
+                    scheduleFlush()
+                }
+                else -> {
+                    pendingEvents += ev
+                    scheduleFlush()
+                }
             }
         }
+    }
+
+    // ==================== 运行状态（折叠思考面板 + 计时） ====================
+
+    /** 折叠面板：收起时也能看到「跑了多久 + 第几轮 + 正在干什么」，不会以为它在发呆 */
+    private fun startRunCard() {
+        val head = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(12), dp(9), dp(10), dp(9))
+        }
+        val title = TextView(this).apply {
+            text = "思考过程"
+            textSize = 12.5f
+            letterSpacing = 0.06f
+            typeface = MEDIUM
+            setTextColor(pal.text)
+        }
+        val stat = TextView(this).apply {
+            textSize = 11.5f
+            setTextColor(pal.sub)
+            setPadding(dp(8), 0, 0, 0)
+        }
+        val toggle = TextView(this).apply {
+            textSize = 11.5f
+            setTextColor(pal.accent)
+            setPadding(dp(8), 0, dp(2), 0)
+        }
+        head.addView(title)
+        head.addView(stat, LinearLayout.LayoutParams(0, -2, 1f))
+        head.addView(toggle)
+
+        val body = TextView(this).apply {
+            textSize = 11.5f
+            setTextColor(pal.sub)
+            setPadding(dp(12), 0, dp(12), dp(10))
+            visibility = View.GONE
+            setTextIsSelectable(true)
+        }
+        val card = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = roundCard(this@MainActivity, pal.card, pal.border, 12)
+        }
+        card.addView(head)
+        card.addView(body)
+        chatList.addView(card, LinearLayout.LayoutParams(-1, -2).apply {
+            topMargin = dp(4)
+            bottomMargin = dp(6)
+        })
+
+        runHead = stat
+        runBody = body
+        bodyExpanded = false
+        latestActivity = ""
+        runStartAt = SystemClock.elapsedRealtime()
+        stat.text = "启动中…"
+        toggle.text = "展开"
+        toggle.setOnClickListener {
+            bodyExpanded = !bodyExpanded
+            body.visibleIf(bodyExpanded)
+            toggle.text = if (bodyExpanded) "收起" else "展开"
+            if (bodyExpanded) scrollChatToBottom()
+        }
+        startTicker()
+        scrollChatToBottom()
+    }
+
+    private fun startTicker() {
+        runTicker?.let { main.removeCallbacks(it) }
+        val t = object : Runnable {
+            override fun run() {
+                if (!running) return
+                val ms = SystemClock.elapsedRealtime() - runStartAt
+                runHead?.text = "${fmtDur(ms)} · 第 ${runSteps.coerceAtLeast(1)} 轮 · " +
+                    latestActivity.ifEmpty { "思考中" }
+                main.postDelayed(this, 500)
+            }
+        }
+        runTicker = t
+        main.postDelayed(t, 200)
+    }
+
+    private fun fmtDur(ms: Long): String {
+        val s = ms / 1000
+        return when {
+            s < 60 -> "${s} 秒"
+            s < 3600 -> "${s / 60} 分 ${s % 60} 秒"
+            else -> "${s / 3600} 时 ${(s % 3600) / 60} 分"
+        }
+    }
+
+    private fun finishRun() {
+        running = false
+        runTicker?.let { main.removeCallbacks(it) }
+        stopBtn.visibleIf(false)
+        val ms = SystemClock.elapsedRealtime() - runStartAt
+        runHead?.text = "共用时 ${fmtDur(ms)} · ${runSteps} 轮 · 已结束"
+        latestActivity = ""
+        if (runWrote) ensurePreviewFresh()
+    }
+
+    private fun appendThinking(line: String) {
+        val tv = runBody ?: return
+        val cur = tv.text.toString()
+        val next = if (cur.isEmpty()) line else "$cur\n$line"
+        tv.text = if (next.length > 6000) next.takeLast(6000) else next
+    }
+
+    private fun scheduleFlush() {
+        if (flushScheduled) return
+        flushScheduled = true
+        main.postDelayed({
+            flushScheduled = false
+            if (pendingEvents.isEmpty()) return@postDelayed
+            val txt = pendingEvents.joinToString("\n")
+            pendingEvents.clear()
+            val tv = TextView(this).apply {
+                setText(txt)
+                textSize = 11.5f
+                setTextColor(pal.faint)
+                gravity = Gravity.CENTER
+                setPadding(dp(10), dp(4), dp(10), dp(4))
+            }
+            chatList.addView(tv, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(1) })
+            scrollChatToBottom()
+        }, 140)
+    }
+
+    private fun flushNow() {
+        if (pendingEvents.isEmpty()) return
+        val txt = pendingEvents.joinToString("\n")
+        pendingEvents.clear()
+        addSystemLine(txt)
+    }
+
+    // ==================== 项目（一个项目一个目录） ====================
+
+    private fun listProjects(): List<File> =
+        (gameRoot.listFiles() ?: emptyArray())
+            .filter { it.isDirectory && !it.name.startsWith("_") }
+            .sortedBy { it.name.lowercase() }
+
+    private fun showProjects() {
+        val col = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(14), dp(8), dp(14), dp(8))
+        }
+        col.addView(TextView(this).apply {
+            text = "根目录 ${gameRoot.absolutePath}"
+            textSize = 11f
+            setTextColor(pal.faint)
+            setPadding(dp(4), 0, dp(4), dp(10))
+            setTextIsSelectable(true)
+        })
+
+        if (!Environment.isExternalStorageManager()) {
+            col.addView(ghostBtnOf(this, pal, "授权所有文件访问 → 项目存到 /sdcard/Hexora").apply {
+                setOnClickListener {
+                    runCatching {
+                        startActivity(
+                            Intent(
+                                Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
+                                Uri.parse("package:$packageName")
+                            )
+                        )
+                    }
+                }
+            }, LinearLayout.LayoutParams(-2, -2).apply { bottomMargin = dp(10) })
+        }
+
+        val projects = listProjects()
+        if (projects.isEmpty()) {
+            col.addView(TextView(this).apply {
+                text = "还没有项目，点下面的「新建项目」"
+                textSize = 13f
+                setTextColor(pal.sub)
+                setPadding(dp(4), dp(2), dp(4), dp(8))
+            })
+        }
+        for (p in projects) {
+            val row = listRowOf(
+                this, pal,
+                p.name + if (p.name == currentGame) " · 当前" else "",
+                p.absolutePath
+            )
+            row.setOnClickListener {
+                switchProject(p.name)
+                projectDlg?.dismiss()
+            }
+            col.addView(row, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(8) })
+        }
+
+        val dlg = AlertDialog.Builder(themed())
+            .setTitle("项目")
+            .setView(ScrollView(this).apply { addView(col) })
+            .setPositiveButton("新建项目", null)
+            .setNeutralButton("导出当前", null)
+            .setNegativeButton("关闭", null)
+            .create()
+        projectDlg = dlg
+        dlg.setOnShowListener {
+            dlg.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+                dlg.dismiss()
+                newProjectDialog()
+            }
+            dlg.getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener {
+                dlg.dismiss()
+                exportZip()
+            }
+        }
+        dlg.show()
+    }
+
+    private fun switchProject(name: String) {
+        openGame(name)
+        refreshHeader()
+        lastLoadedGame = ""
+        addSystemLine("已打开项目「$name」 · ${File(gameRoot, name).absolutePath}")
+        if (activeTab == 1) ensurePreviewFresh()
+    }
+
+    private fun newProjectDialog() {
+        val et = EditText(this).apply {
+            hint = "项目名，例如 snake-01"
+            textSize = 14f
+            setTextColor(pal.text)
+            setHintTextColor(pal.faint)
+            setPadding(dp(12), dp(10), dp(12), dp(10))
+            background = roundCard(this@MainActivity, pal.cardAlt, pal.border, 12)
+        }
+        val wrap = LinearLayout(this).apply {
+            setPadding(dp(16), dp(10), dp(16), dp(4))
+            addView(et, LinearLayout.LayoutParams(-1, -2))
+        }
+        val d = AlertDialog.Builder(themed())
+            .setTitle("新建项目")
+            .setMessage("一个项目一个目录，互不干扰。创建后先给一个可运行的空白页，之后 AI 的所有改动都只写进这个目录。")
+            .setView(wrap)
+            .setPositiveButton("创建", null)
+            .setNegativeButton("取消", null)
+            .create()
+        d.setOnShowListener {
+            d.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+                val name = et.text.toString().trim()
+                    .map { if (it.isLetterOrDigit() || it == '-' || it == '_') it else '-' }
+                    .joinToString("")
+                    .trim('-')
+                if (name.isEmpty()) {
+                    toast("先起个名字")
+                    return@setOnClickListener
+                }
+                val dir = File(gameRoot, name)
+                if (dir.exists()) {
+                    toast("已存在同名项目")
+                    return@setOnClickListener
+                }
+                dir.mkdirs()
+                runCatching { File(dir, "index.html").writeText(starterHtml(name)) }
+                d.dismiss()
+                switchProject(name)
+                showTab(1)
+            }
+        }
+        d.show()
+    }
+
+    /** 新项目的空白页：打开就能跑，不是白屏 */
+    private fun starterHtml(name: String): String = """
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
+<title>$name</title>
+<style>
+  html,body{margin:0;height:100%;background:#0F1011;color:#EDEDED;
+    font:14px/1.7 -apple-system,"PingFang SC","Microsoft YaHei",sans-serif;
+    display:flex;align-items:center;justify-content:center}
+  .c{text-align:center;padding:28px;max-width:80%}
+  h1{font-size:17px;font-weight:500;letter-spacing:.1em;margin:0 0 10px}
+  p{color:#9A9A9A;font-size:13px;margin:6px 0}
+</style>
+</head>
+<body>
+  <div class="c">
+    <h1>$name</h1>
+    <p>项目已创建，这是一个独立的目录。</p>
+    <p>回到「对话」页说要做什么，AI 会直接写进这个目录。</p>
+  </div>
+</body>
+</html>
+""".trimIndent()
+
+    // ==================== 预览自动刷新 ====================
+
+    private fun dirStamp(dir: File): Long {
+        var st = dir.lastModified()
+        for (f in dir.listFiles().orEmpty()) {
+            st = st * 31 + f.lastModified() + f.name.hashCode()
+        }
+        return st
+    }
+
+    /** 切到预览页时调用：项目换了或文件变了才重载，不再每次进来都白一下 */
+    private fun ensurePreviewFresh() {
+        val dir = File(gameRoot, currentGame)
+        val idx = File(dir, "index.html")
+        val stamp = dirStamp(dir)
+        if (currentGame == lastLoadedGame && stamp == lastLoadedStamp) return
+        lastLoadedGame = currentGame
+        lastLoadedStamp = stamp
+        if (!idx.exists()) addSystemLine("「$currentGame」还没有 index.html，先让 AI 构建一次")
+        reloadGame()
     }
 
     private fun attachScreenshot() {
@@ -620,8 +1061,8 @@ class MainActivity : AppCompatActivity(), GameUi {
         val shot = chipOf(this, pal, "发给 AI", false).apply {
             setOnClickListener { attachScreenshot() }
         }
-        val switch = chipOf(this, pal, "切换", false).apply {
-            setOnClickListener { pickGame() }
+        val switch = chipOf(this, pal, "项目", false).apply {
+            setOnClickListener { showProjects() }
         }
 
         bar.addView(previewLabel, LinearLayout.LayoutParams(0, -2, 1f))
@@ -669,7 +1110,7 @@ class MainActivity : AppCompatActivity(), GameUi {
             Triple("导出工程包", "打包成 zip，并自动另存到「下载/H5Games」", { exportZip() }),
             Triple("查看当前游戏文件", "列出文件与体积", { showTree() }),
             Triple("查看 console 输出", "游戏里的 log / warn / error", { showConsole() }),
-            Triple("切换当前游戏", "切到别的游戏继续改", { pickGame() }),
+            Triple("切换 / 新建项目", "一个项目一个目录，互不干扰", { showProjects() }),
             Triple("复制工程路径", gameRoot.absolutePath, { copyToClipboard(gameRoot.absolutePath) }),
             Triple("清空对话历史", "AI 会忘掉之前的上下文", { clearHistory() })
         )
@@ -698,9 +1139,9 @@ class MainActivity : AppCompatActivity(), GameUi {
         Thread {
             runCatching {
                 val dir = getExternalFilesDir(null) ?: filesDir
-                val out = File(dir, "h5games_${System.currentTimeMillis()}.zip")
+                val out = File(dir, "hexora_${currentGame}_${System.currentTimeMillis()}.zip")
                 ZipOutputStream(out.outputStream()).use { z ->
-                    for (g in gameRoot.listFiles().orEmpty().sortedBy { it.name }) {
+                    for (g in listOf(File(gameRoot, currentGame))) {
                         if (!g.isDirectory) continue
                         if (g.name.startsWith("_")) continue
                         for (f in g.walkTopDown().filter { it.isFile }) {
@@ -1079,13 +1520,14 @@ class MainActivity : AppCompatActivity(), GameUi {
         val skill = SkillPresets.byId(cfgStore.skillId)
         titleTv.text = "Hexora"
         subTv.text = buildString {
-            append("当前游戏 $currentGame")
+            append("项目 $currentGame")
             append("  ·  ${cfg.provider.label} / ${cfg.modelLabel}")
             append(if (cfg.vision) "  ·  视觉开" else "  ·  视觉关")
             append("  ·  ${skill.label}")
         }
         modelBtn.text = "${cfg.provider.label} / ${cfg.model} ▾"
-        previewLabel.text = "当前游戏：$currentGame"
+        projBtn.text = "$currentGame ▾"
+        previewLabel.text = "项目：$currentGame"
     }
 
     // ==================== 小工具 ====================
@@ -1202,10 +1644,25 @@ class MainActivity : AppCompatActivity(), GameUi {
         currentGame = id
         val dir = File(gameRoot, id).apply { mkdirs() }
         bridge.setSandbox(dir)
+        lastLoadedGame = id
+        lastLoadedStamp = dirStamp(dir)
         val url = "https://appassets.androidplatform.net/games/$id/index.html"
         main.post {
-            logs.add("[system] 打开游戏 $id")
-            web.loadUrl(url)
+            logs.add("[system] 打开项目 $id")
+            if (File(dir, "index.html").exists()) {
+                web.loadUrl(url)
+            } else {
+                // 没有 index.html 时给个说明页，而不是白屏
+                web.loadDataWithBaseURL(
+                    null,
+                    "<html><body style='background:#0F1011;color:#9A9A9A;font-family:sans-serif;padding:40px;line-height:1.8'>" +
+                        "<h3 style='color:#EDEDED;font-weight:500'>「" + id + "」还没有 index.html</h3>" +
+                        "<p>回到「对话」页告诉 AI 你想做什么，它会构建到这个目录：</p>" +
+                        "<p style='color:#4FCFB4;word-break:break-all'>" + dir.absolutePath + "</p>" +
+                        "</body></html>",
+                    "text/html", "utf-8", null
+                )
+            }
         }
     }
 

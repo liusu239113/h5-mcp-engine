@@ -5,9 +5,14 @@ import java.io.File
 /**
  * AI 代理循环：把「用户一句话」变成「多轮工具调用」。
  *
- * 关键点是多模态回灌：
- *   screenshot 工具返回的图片会被塞进下一条 tool 消息里，
- *   带视觉的模型就能自己看到画面，从而形成 写代码 → 看画面 → 改 的闭环。
+ * 事件协议（界面靠前缀分流，别改前缀）：
+ *   STEP:n            第 n 轮开始
+ *   THINK:xxx         模型的思维链（deepseek-reasoner 之类）
+ *   AI:xxx            模型说出来的一段话
+ *   TOOL:[名字] 摘要   一次工具调用
+ *   RELOAD            文件被改过，预览该刷新了
+ *   INFO:xxx          普通提示，进日志
+ *   [失败] xxx         错误卡片
  */
 class AgentRunner(
     private val cfg: ProviderConfig,
@@ -22,20 +27,23 @@ class AgentRunner(
     var cancelled = false
         private set
 
+    private val client = AiClient(cfg)
+
+    /** 停止：置位 + 立刻掐断在飞的 HTTP 请求（否则要等 240 秒读超时） */
     fun cancel() {
         cancelled = true
+        runCatching { client.abort() }
     }
 
     /**
      * 必须从子线程调用。
-     * userImages 是用户自己发的图（相册选图 / 当前游戏截图），会一起作为多模态输入。
+     * userImages 是用户自己发的图（相册选图 / 当前画面截图），会一起作为多模态输入。
      */
     fun run(
         history: MutableList<ChatMsg>,
         userText: String,
         userImages: List<ByteArray> = emptyList()
     ) {
-        val client = AiClient(cfg)
         val spec = tools.specs(skill.allowTools)
         val names = spec.map { it.getJSONObject("function").getString("name") }
 
@@ -63,23 +71,28 @@ class AgentRunner(
 
         val limit = cfg.maxSteps.coerceAtMost(skill.maxSteps)
         var step = 0
+        var wrote = false
 
         while (!cancelled && step < limit) {
             step++
-            onEvent("⋯ 第 $step 轮 · ${cfg.provider.label}/${cfg.model}")
+            onEvent("STEP:$step")
 
             val reply = client.chat(history, spec)
             if (cancelled) return
             if (reply.error != null) {
+                if (reply.error == "已取消") return
                 onEvent("[失败] 请求失败：\n" + AiClient.friendly(reply.error))
                 return
             }
+
+            reply.reasoning?.let { onEvent("THINK:" + it) }
 
             history += ChatMsg("assistant", reply.text, toolCalls = reply.toolCalls)
             if (!reply.text.isNullOrBlank()) onEvent("AI: ${reply.text}")
 
             if (reply.toolCalls.isEmpty()) {
-                onEvent("结束 · 共 $step 轮")
+                if (wrote) onEvent("RELOAD")
+                onEvent("INFO: 完成 · 共跑了 $step 轮")
                 return
             }
 
@@ -97,14 +110,23 @@ class AgentRunner(
 
                 var head = res.text.lineSequence().firstOrNull() ?: ""
                 if (head.length > 150) head = head.take(150) + "…"
-                onEvent("  [${tc.name}] $head")
+                onEvent("TOOL:[${tc.name}] $head")
+
+                if (tc.name == "game_write" || tc.name == "game_patch" ||
+                    tc.name == "game_create" || tc.name == "game_launch"
+                ) {
+                    wrote = true
+                }
             }
+
+            // 写完就通知刷新预览，不用等整轮结束
+            if (wrote) onEvent("RELOAD")
         }
 
         if (cancelled) {
-            onEvent("■ 已停止")
+            onEvent("INFO: 已停止")
         } else {
-            onEvent("已到步数上限（$limit），先停下。可以再发一条消息让它继续，或在设置里调大上限。")
+            onEvent("INFO: 到步数上限（$limit），可再发一条让它继续，或在设置里调大上限。")
         }
     }
 

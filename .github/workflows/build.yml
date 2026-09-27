@@ -66,13 +66,22 @@ jobs:
           echo "--- assets/lib 内容 ---"
           ls -la app/src/main/assets/lib
 
-      - name: Build debug APK
-        run: gradle :app:assembleDebug --no-daemon --stacktrace
+      - name: Build release APK (正签)
+        run: gradle :app:assembleRelease --no-daemon --stacktrace
+
+      - name: Verify signature
+        continue-on-error: true
+        run: |
+          set +e
+          BT=$(ls -d /usr/local/lib/android/sdk/build-tools/* 2>/dev/null | tail -1)
+          APK=$(ls app/build/outputs/apk/release/*.apk 2>/dev/null | head -1)
+          echo "APK: $APK"
+          "${BT}/apksigner" verify --print-certs "$APK" | head -8
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: app-debug
-          path: app/build/outputs/apk/debug/*.apk
+          name: Hexora-release
+          path: app/build/outputs/apk/release/*.apk
           if-no-files-found: error
           retention-days: 30
