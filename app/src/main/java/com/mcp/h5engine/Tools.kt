@@ -511,13 +511,20 @@ class EngineTools(private val ui: GameUi, private val root: File) {
         "screenshot" -> {
             val w = a.optInt("maxWidth", 720)
             val img = ui.snapshotCss(w)
-            if (img == null || img.isEmpty()) {
-                ToolResult("截图失败（WebView 可能还没加载完）")
-            } else {
+            if (img == null || img.size < 128) {
                 ToolResult(
-                    "截图完成，${img.size / 1024} KB。图片坐标 = 屏幕 CSS 像素坐标，" +
+                    "截图失败：只拿到 ${img?.size ?: 0} 字节（画面多半还没加载完/是空白页）。" +
+                        "等 1-2 秒再截一次；不要拿这张图下结论。"
+                )
+            } else {
+                val kb = img.size / 1024
+                val warn = if (img.size < 3 * 1024)
+                    " ⚠ 这张图只有 ${img.size} 字节，很可能是空白/纯色页（真有问题先看 console_logs）。"
+                else ""
+                ToolResult(
+                    "截图完成，${kb} KB（${img.size} 字节）。图片坐标 = 屏幕 CSS 像素坐标，" +
                     "可直接用于 tap(x,y)。请检查：是否白屏、元素是否出屏或被遮挡、" +
-                    "文字对比度与重叠、布局是否居中、有没有明显错位。",
+                    "文字对比度与重叠、布局是否居中、有没有明显错位。$warn",
                     listOf(img)
                 )
             }

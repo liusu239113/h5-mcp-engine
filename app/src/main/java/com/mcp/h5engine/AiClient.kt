@@ -41,12 +41,23 @@ data class ChatReply(
 class AiClient(private val cfg: ProviderConfig) {
 
     /** 每次请求都新建客户端：避免切后台回来复用了已经死掉的连接池（Software caused connection abort） */
-    private fun newHttp(): OkHttpClient = OkHttpClient.Builder()
-        .connectTimeout(20, TimeUnit.SECONDS)
-        .readTimeout(240, TimeUnit.SECONDS)
-        .writeTimeout(90, TimeUnit.SECONDS)
-        .retryOnConnectionFailure(true)
-        .build()
+    private fun newHttp(direct: Boolean = false): OkHttpClient {
+        val b = OkHttpClient.Builder()
+            .connectTimeout(20, TimeUnit.SECONDS)
+            .readTimeout(240, TimeUnit.SECONDS)
+            .writeTimeout(90, TimeUnit.SECONDS)
+            .retryOnConnectionFailure(true)
+        // direct=true 时强制直连：忽略系统代理/VPN 设的 HTTP 代理。
+        // 这类代理层回的错误（402 / 403 / 各种网关页）经常和「余额不足」长得一模一样。
+        if (direct) runCatching { b.proxy(java.net.Proxy.NO_PROXY) }
+        return b.build()
+    }
+
+    /** 当前是否走了系统代理（Android 的系统代理设置，VPN/代理类 App 会写入） */
+    private fun systemProxyInUse(): Boolean = runCatching {
+        val sel = java.net.ProxySelector.getDefault() ?: return false
+        sel.select(java.net.URI(endpoint)).any { it.type() != java.net.Proxy.Type.DIRECT }
+    }.getOrDefault(false)
 
     /** 正在飞的请求。点「停止」时要立刻掐断，而不是干等 240 秒读超时 */
     @Volatile
@@ -129,19 +140,39 @@ class AiClient(private val cfg: ProviderConfig) {
     fun chat(rawHistory: List<ChatMsg>, tools: List<JSONObject>): ChatReply {
         aborted = false
         val history = sanitizeHistory(rawHistory)
-        val body = when (cfg.provider.protocol) {
+        val base = when (cfg.provider.protocol) {
             Protocol.OPENAI -> bodyOpenAi(history, tools)
             Protocol.ANTHROPIC -> bodyAnthropic(history, tools)
             Protocol.GEMINI -> bodyGemini(history, tools)
         }
+        // 「余额/额度」类错误原样重试没有意义（余额、请求体量都没变），
+        // 必须换一种形状再试：去掉工具定义、把输出 token 压小。
+        // 这能救回「账户其实有钱、只是这条请求被服务商判超额」的情况。
+        var body = base
+        var lightTried = false
+        var directTried = false
+        var direct = false
 
         var last: ChatReply = ChatReply(null, emptyList(), "未发起请求")
         for (attempt in 1..3) {
-            val r = once(body)
+            val r = once(body, direct)
             last = r
             val err = r.error
             if (err == null) return r          // 成功
             if (aborted) return ChatReply(null, emptyList(), "已取消")   // 用户点了停止
+            // 头号嫌疑：手机开着 VPN / 代理类 App，Android 系统代理被 OkHttp 继承，
+            // 请求根本没到服务商，是代理层回的 402 —— 和「余额不足」长得一样。
+            // 先绕过代理解析直连再试一次（同样的 key、同样的请求体，只换出口）。
+            if (!direct && !directTried && systemProxyInUse()) {
+                directTried = true
+                direct = true
+                continue
+            }
+            if (isBalanceError(err) && !lightTried) {
+                lightTried = true
+                body = lightweight(base)
+                continue                        // 立刻换轻量请求再试，不 sleep
+            }
             if (!isTransient(err)) return r    // 硬错误（鉴权/模型名）不重试
             if (attempt < 3) {
                 runCatching { Thread.sleep(if (attempt == 1) 500L else 1500L) }
@@ -150,7 +181,29 @@ class AiClient(private val cfg: ProviderConfig) {
         return last
     }
 
-    private fun once(body: JSONObject): ChatReply {
+    /** 余额 / 额度类错误（只有这类才值得降级重试） */
+    private fun isBalanceError(err: String): Boolean {
+        val e = err.lowercase()
+        return e.contains("http 402") || e.contains("insufficient balance") ||
+            e.contains("insufficient_balance") || e.contains("exceeded your current quota")
+    }
+
+    /**
+     * 轻量版请求体：去掉全部工具定义、把输出上限压到 512。
+     * 工具定义（官方 MCP 50+ 个）本身就是几万 token 的大头，去掉后请求能小一个量级。
+     */
+    private fun lightweight(body: JSONObject): JSONObject {
+        val o = JSONObject(body.toString())
+        o.remove("tools")
+        o.remove("tool_choice")
+        when (cfg.provider.protocol) {
+            Protocol.OPENAI, Protocol.ANTHROPIC -> o.put("max_tokens", 512)
+            Protocol.GEMINI -> {}
+        }
+        return o
+    }
+
+    private fun once(body: JSONObject, direct: Boolean = false): ChatReply {
         val rb = Request.Builder().url(endpoint)
             .header("Connection", "close")
             .post(body.toString().toRequestBody("application/json".toMediaType()))
@@ -164,13 +217,21 @@ class AiClient(private val cfg: ProviderConfig) {
                 rb.header("x-goog-api-key", cfg.apiKey)
         }
 
-        val call = newHttp().newCall(rb.build())
+        val call = newHttp(direct).newCall(rb.build())
         inflight = call
         return try {
             call.execute().use { r ->
                 val text = r.body?.string() ?: ""
                 if (!r.isSuccessful) {
-                    ChatReply(null, emptyList(), "HTTP ${r.code} ${text.take(600)}")
+                    // 把「这条请求到底发给了谁、带了多大东西」一并带出来。
+                    // 以前只显示服务商原文，用户和 AI 都无从判断是 Key / Base URL / 请求体量哪一环的问题
+                    // （比如「明明有钱却报余额不足」，很可能根本是另一把 Key 或另一条 URL）。
+                    val diag = "[诊断] url=$endpoint · model=${cfg.model} · key=${AiConfigStore.mask(cfg.apiKey)}" +
+                        " · 请求体 ${body.toString().length} 字节" +
+                        " · 消息 ${body.optJSONArray("messages")?.length() ?: 0} 条" +
+                        " · 工具 ${body.optJSONArray("tools")?.length() ?: 0} 个" +
+                        (if (direct) " · 直连(已绕过系统代理)" else " · 走系统代理")
+                    ChatReply(null, emptyList(), "HTTP ${r.code} ${text.take(600)}\n$diag")
                 } else {
                     parse(text)
                 }
@@ -313,12 +374,16 @@ class AiClient(private val cfg: ProviderConfig) {
         Base64.encodeToString(img, Base64.NO_WRAP)
 
     private fun contentOrParts(text: String?, images: List<ByteArray>): Any {
-        if (images.isEmpty()) return text ?: ""
+        // 0 字节的图片绝不能进请求体：截图失败时（画面没加载完）会产出空 Bitmap，
+        // 服务商一律回 400 invalid_request_error（"unsupported image"），白烧一次请求，
+        // 而且这类错误文案跟「余额/权限」很像，最容易把人带偏。
+        val imgs = images.filter { it.isNotEmpty() }
+        if (imgs.isEmpty()) return text ?: ""
         val parts = JSONArray()
         if (!text.isNullOrBlank()) {
             parts.put(JSONObject().put("type", "text").put("text", text))
         }
-        for (img in images) {
+        for (img in imgs) {
             parts.put(
                 JSONObject().put("type", "image_url")
                     .put("image_url", JSONObject().put("url", dataUrl(img)))
@@ -414,6 +479,7 @@ class AiClient(private val cfg: ProviderConfig) {
             val inner = JSONArray()
             m.text?.let { inner.put(JSONObject().put("type", "text").put("text", it)) }
             for (img in m.images) {
+                if (img.isEmpty()) continue   // 空图片（截图失败的产物）不进请求体
                 inner.put(
                     JSONObject().put("type", "image")
                         .put(
@@ -440,6 +506,7 @@ class AiClient(private val cfg: ProviderConfig) {
             )
         }
         for (img in m.images) {
+            if (img.isEmpty()) continue   // 空图片（截图失败的产物）不进请求体
             parts.put(
                 JSONObject().put("type", "image")
                     .put(
