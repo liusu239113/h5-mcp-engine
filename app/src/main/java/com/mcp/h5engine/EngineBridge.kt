@@ -15,20 +15,19 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
-import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 
 /**
- * JS <-> 原生 的桥（WebView 内部用，和 MCP 服务端是两回事）
+ * JS <-> 原生 的桥。
  *
  * JS 侧发：  Native.post(JSON.stringify({ id, op, data }))
  * 原生回：    window.__nativeResolve(payload)
  *
  * op：
- *   ping / log / http / mcp.open / mcp.request / fs.list / fs.read / fs.write
- *
- * 注意：这里的 mcp.* 是让**游戏自己**去连外部 MCP 服务；
- *      而 McpServer.kt 是让**外面的 AI** 来连这个 App。两者方向相反。
+ *   ping          探活
+ *   log           把 console 输出回传给原生（AI 用 console_logs 读）
+ *   http          游戏里发起网络请求（需要自己处理 CORS 时用这个）
+ *   fs.list / fs.read / fs.write   游戏沙箱内的文件读写（存档用）
  */
 class EngineBridge(
     private val web: WebView,
@@ -50,8 +49,6 @@ class EngineBridge(
         .connectTimeout(15, TimeUnit.SECONDS)
         .readTimeout(180, TimeUnit.SECONDS)
         .build()
-
-    private val sessions = ConcurrentHashMap<String, McpClient>()
 
     @JavascriptInterface
     fun post(raw: String) {
@@ -79,15 +76,12 @@ class EngineBridge(
         }
 
         "http" -> httpRequest(d)
-        "mcp.open" -> mcpOpen(d)
-        "mcp.request" -> mcpRequest(d)
         "fs.list" -> fsList(d)
         "fs.read" -> fsRead(d)
         "fs.write" -> fsWrite(d)
+        "fs.delete" -> fsDelete(d)
         else -> throw IllegalArgumentException("unknown op: $op")
     }
-
-    // ---------------- http ----------------
 
     private fun httpRequest(d: JSONObject): JSONObject {
         val url = d.getString("url")
@@ -114,54 +108,7 @@ class EngineBridge(
         }
     }
 
-    // ---------------- 游戏侧主动连外部 MCP ----------------
-
-    private fun mcpOpen(d: JSONObject): JSONObject {
-        val url = d.getString("url")
-
-        val headers = HashMap<String, String>()
-        d.optJSONObject("headers")?.let { h ->
-            val it = h.keys()
-            while (it.hasNext()) {
-                val k = it.next()
-                headers[k] = h.optString(k)
-            }
-        }
-
-        val client = McpClient(url, headers)
-        val info = client.initialize(d.optString("name", "h5-game"), "1.0.0")
-
-        val key = d.optString("id").ifEmpty { url }
-        sessions[key] = client
-
-        return JSONObject()
-            .put("serverInfo", client.serverInfo ?: JSONObject())
-            .put("protocolVersion", client.negotiatedProtocol ?: "")
-            .put("raw", info)
-    }
-
-    private fun mcpRequest(d: JSONObject): JSONObject {
-        val client = sessions[d.optString("session")]
-            ?: sessions.values.firstOrNull()
-            ?: throw IllegalStateException("MCP 未连接，先调 mcp.open")
-
-        val method = d.getString("method")
-        val params = d.optJSONObject("params") ?: JSONObject()
-
-        return when (method) {
-            "tools/list" -> client.listTools()
-            "tools/call" -> client.callTool(
-                params.getString("name"),
-                params.optJSONObject("arguments") ?: JSONObject()
-            )
-            "resources/list" -> client.listResources()
-            "resources/read" -> client.readResource(params.getString("uri"))
-            "prompts/list" -> client.listPrompts()
-            else -> throw IllegalArgumentException("unsupported MCP method: $method")
-        }
-    }
-
-    // ---------------- 沙箱文件 ----------------
+    // ---------------- 游戏沙箱文件（存档） ----------------
 
     private fun sandbox(path: String): File {
         val clean = path.trimStart('/').replace("..", "_")
@@ -185,6 +132,11 @@ class EngineBridge(
         f.parentFile?.mkdirs()
         f.writeText(d.optString("text"))
         return JSONObject().put("bytes", f.length())
+    }
+
+    private fun fsDelete(d: JSONObject): JSONObject {
+        val f = sandbox(d.getString("path"))
+        return JSONObject().put("ok", f.delete())
     }
 
     // ---------------- 回传 ----------------

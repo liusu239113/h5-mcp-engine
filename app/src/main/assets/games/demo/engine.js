@@ -1,186 +1,98 @@
 /*
- * MCP H5 Engine —— 游戏侧运行时，挂到 window.Engine
+ * H5 引擎运行时 —— 挂在 window.Engine 上，所有游戏共用。
  *
- * 游戏里可以：
- *   await Engine.mcp.connect(url)       // 游戏主动去连外部 MCP 服务
- *   await Engine.mcp.listTools()
- *   await Engine.mcp.callTool(name, {})
- *   await Engine.store.save('slot1.json', {...})
- *   await Engine.http.get(url)          // 走原生，绕过 CORS
- *
- * 另外这里会把 console 输出上报给原生，AI 用 game_console 就能看到。
+ * 做的事：
+ *   1. 把 console 输出托管给原生，AI 可以用 console_logs 读走
+ *   2. 提供 store（存档）/ http / ping 给游戏用
+ *   3. 捕获 window.onerror 与未处理的 Promise 异常，一并回报
  */
-(function (global) {
-    'use strict';
+(function (w) {
+  'use strict';
 
-    /* ---------------- 0. console 上报 ---------------- */
+  var Native = w.Native;
+  var seq = 0;
+  var waiting = {};
 
-    const origLog = console.log.bind(console);
-    const origWarn = console.warn.bind(console);
-    const origError = console.error.bind(console);
+  w.__nativeResolve = function (payload) {
+    var cb = waiting[payload.id];
+    if (!cb) return;
+    delete waiting[payload.id];
+    if (payload.error) cb.reject(new Error(payload.error));
+    else cb.resolve(payload.result || {});
+  };
 
-    function fmt(v) {
-        if (typeof v === 'string') return v;
-        if (v instanceof Error) return v.stack || v.message;
-        try { return JSON.stringify(v); } catch (e) { return String(v); }
-    }
-
-    function report(level, args) {
-        try {
-            if (nativeOk()) {
-                window.Native.post(JSON.stringify({
-                    id: '__log',
-                    op: 'log',
-                    data: { level: level, text: Array.prototype.map.call(args, fmt).join(' ') }
-                }));
-            }
-        } catch (e) { /* 忽略 */ }
-    }
-
-    console.log = function () { report('log', arguments); origLog.apply(null, arguments); };
-    console.warn = function () { report('warn', arguments); origWarn.apply(null, arguments); };
-    console.error = function () { report('error', arguments); origError.apply(null, arguments); };
-
-    window.addEventListener('error', function (e) {
-        report('error', ['未捕获异常: ' + (e.message || e.type) +
-            ' @' + (e.filename || '?') + ':' + (e.lineno || 0)]);
+  function call(op, data, timeoutMs) {
+    if (!Native || !Native.post) return Promise.reject(new Error('原生桥不可用'));
+    return new Promise(function (resolve, reject) {
+      var id = 'r' + (++seq) + '_' + Date.now();
+      waiting[id] = { resolve: resolve, reject: reject };
+      try {
+        Native.post(JSON.stringify({ id: id, op: op, data: data || {} }));
+      } catch (e) {
+        delete waiting[id];
+        reject(e);
+        return;
+      }
+      setTimeout(function () {
+        if (waiting[id]) {
+          delete waiting[id];
+          reject(new Error('原生调用超时: ' + op));
+        }
+      }, timeoutMs || 15000);
     });
+  }
 
-    window.addEventListener('unhandledrejection', function (e) {
-        report('error', ['未处理的 Promise 拒绝: ' + fmt(e.reason)]);
-    });
-
-    /* ---------------- 1. 原生桥 ---------------- */
-
-    const pending = new Map();
-    let seq = 0;
-
-    function nativeOk() {
-        return typeof window.Native !== 'undefined' &&
-            window.Native !== null &&
-            typeof window.Native.post === 'function';
-    }
-
-    window.__nativeResolve = function (payload) {
-        if (!payload) return;
-        const p = pending.get(payload.id);
-        if (!p) return;
-        pending.delete(payload.id);
-        if (payload.error) p.reject(new Error(payload.error));
-        else p.resolve(payload.result);
+  /* ---------- console 托管 ---------- */
+  var orig = {};
+  ['log', 'warn', 'error', 'info'].forEach(function (level) {
+    orig[level] = console[level];
+    console[level] = function () {
+      var text = Array.prototype.map.call(arguments, function (a) {
+        if (typeof a === 'string') return a;
+        try { return JSON.stringify(a); } catch (e) { return String(a); }
+      }).join(' ');
+      try { orig[level].apply(console, arguments); } catch (e) { /* ignore */ }
+      call('log', { level: level, text: text }, 3000).catch(function () { /* ignore */ });
     };
+  });
 
-    function call(op, data) {
-        return new Promise(function (resolve, reject) {
-            if (!nativeOk()) {
-                reject(new Error('原生桥不可用：需要在 Android 容器里跑'));
-                return;
-            }
-            const id = 'r' + (++seq);
-            pending.set(id, { resolve: resolve, reject: reject });
-            setTimeout(function () {
-                if (pending.has(id)) {
-                    pending.delete(id);
-                    reject(new Error('原生调用超时: ' + op));
-                }
-            }, 120000);
-            window.Native.post(JSON.stringify({ id: id, op: op, data: data || {} }));
+  w.addEventListener('error', function (e) {
+    console.error('[onerror] ' + (e.message || '') + ' @' + (e.lineno || 0) + ':' + (e.colno || 0));
+  });
+  w.addEventListener('unhandledrejection', function (e) {
+    console.error('[unhandledrejection] ' + (e.reason && (e.reason.message || e.reason)));
+  });
+
+  /* ---------- 给游戏用的接口 ---------- */
+  w.Engine = {
+    version: '2.0.0',
+    hasNative: !!(Native && Native.post),
+    call: call,
+    ping: function () { return call('ping', {}, 3000); },
+
+    store: {
+      save: function (key, obj) {
+        return call('fs.write', { path: 'saves/' + key, text: JSON.stringify(obj) });
+      },
+      load: function (key) {
+        return call('fs.read', { path: 'saves/' + key }).then(function (r) {
+          try { return r.text ? JSON.parse(r.text) : null; } catch (e) { return null; }
         });
+      },
+      remove: function (key) { return call('fs.delete', { path: 'saves/' + key }); },
+      list: function () { return call('fs.list', { path: 'saves' }); }
+    },
+
+    http: function (url, opt) {
+      opt = opt || {};
+      return call('http', {
+        url: url,
+        method: opt.method || 'GET',
+        headers: opt.headers || {},
+        body: opt.body || ''
+      });
     }
+  };
 
-    /* ---------------- 2. 游戏主动连 MCP ---------------- */
-
-    const mcp = {
-        connect: function (url, options) {
-            const opt = options || {};
-            return call('mcp.open', {
-                url: url,
-                headers: opt.headers || {},
-                name: opt.name || 'h5-game',
-                id: opt.id || url
-            });
-        },
-
-        listTools: function (session) {
-            return call('mcp.request', { session: session, method: 'tools/list' });
-        },
-
-        callTool: function (name, args, session) {
-            return call('mcp.request', {
-                session: session,
-                method: 'tools/call',
-                params: { name: name, arguments: args || {} }
-            });
-        },
-
-        listResources: function (session) {
-            return call('mcp.request', { session: session, method: 'resources/list' });
-        },
-
-        readResource: function (uri, session) {
-            return call('mcp.request', {
-                session: session,
-                method: 'resources/read',
-                params: { uri: uri }
-            });
-        },
-
-        /** 把 tools/call 的 content 数组拍平成文本 */
-        text: function (result) {
-            if (!result) return '';
-            if (typeof result === 'string') return result;
-            if (Array.isArray(result.content)) {
-                return result.content.map(function (c) {
-                    if (c.type === 'text') return c.text;
-                    if (c.type === 'image') return '[image]';
-                    return JSON.stringify(c);
-                }).join('\n');
-            }
-            return JSON.stringify(result);
-        }
-    };
-
-    /* ---------------- 3. 沙箱存档 ---------------- */
-
-    const store = {
-        save: function (name, obj) {
-            return call('fs.write', { path: 'saves/' + name, text: JSON.stringify(obj) });
-        },
-        load: function (name, fallback) {
-            return call('fs.read', { path: 'saves/' + name }).then(function (r) {
-                if (!r || !r.text) return fallback === undefined ? null : fallback;
-                try { return JSON.parse(r.text); }
-                catch (e) { return fallback === undefined ? null : fallback; }
-            });
-        },
-        list: function () {
-            return call('fs.list', { path: 'saves' }).then(function (r) {
-                return (r && r.files) || [];
-            });
-        }
-    };
-
-    /* ---------------- 4. HTTP（绕过 CORS） ---------------- */
-
-    const http = {
-        get: function (url, headers) {
-            return call('http', { method: 'GET', url: url, headers: headers || {} });
-        },
-        post: function (url, body, headers) {
-            return call('http', {
-                method: 'POST',
-                url: url,
-                headers: headers || {},
-                body: typeof body === 'string' ? body : JSON.stringify(body)
-            });
-        }
-    };
-
-    global.Engine = {
-        call: call,
-        mcp: mcp,
-        store: store,
-        http: http,
-        hasNative: nativeOk
-    };
+  console.log('[engine] ready v' + w.Engine.version + ', native=' + w.Engine.hasNative);
 })(window);

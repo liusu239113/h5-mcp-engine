@@ -1,53 +1,36 @@
 <!DOCTYPE html>
 <html lang="zh-CN">
 <head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
-    <title>MCP H5 Demo</title>
-    <style>
-        html, body { margin:0; height:100%; background:#0e1116; color:#e6e9ef;
-            font-family:-apple-system,"Noto Sans SC",sans-serif; overflow:hidden; }
-        #cv { position:fixed; inset:0; width:100%; height:100%; display:block; touch-action:none; }
-        #hud { position:fixed; top:calc(env(safe-area-inset-top) + 8px); left:12px; right:12px;
-            display:flex; justify-content:space-between; font-size:13px; pointer-events:none;
-            text-shadow:0 1px 3px #000; }
-        #status { color:#4ade80; }
-        #panel { position:fixed; left:0; right:0; bottom:0; background:rgba(18,22,28,.94);
-            border-top:1px solid #2a313c; padding:10px 12px calc(env(safe-area-inset-bottom) + 10px);
-            font-size:12px; }
-        .row { display:flex; gap:8px; margin-bottom:8px; }
-        input, select, button { background:#1b212a; color:#e6e9ef; border:1px solid #2a313c;
-            border-radius:8px; padding:7px 9px; font-size:12px; font-family:inherit; }
-        input, select { flex:1; min-width:0; }
-        button { background:#22304a; border-color:#33456a; white-space:nowrap; }
-        button:active { background:#2d3f60; }
-        #log { height:72px; overflow:auto; background:#12161c; border:1px solid #222a35;
-            border-radius:8px; padding:6px 8px; font-family:ui-monospace,monospace; font-size:11px;
-            line-height:1.5; white-space:pre-wrap; color:#9fb3c8; }
-    </style>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<title>接方块 · Demo</title>
+<style>
+  html, body {
+    margin: 0; height: 100%; background: #0e1116; color: #e6e9ef; overflow: hidden;
+    font-family: -apple-system, "Noto Sans SC", sans-serif;
+    -webkit-user-select: none; -webkit-tap-highlight-color: transparent;
+  }
+  #cv { position: fixed; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; }
+  #hud {
+    position: fixed; top: calc(env(safe-area-inset-top) + 12px); left: 16px; right: 16px;
+    display: flex; justify-content: space-between; font-size: 15px; pointer-events: none;
+    text-shadow: 0 1px 4px #000; letter-spacing: .5px;
+  }
+  #hud b { font-size: 19px; color: #4ade80; }
+  #tip {
+    position: fixed; left: 0; right: 0; bottom: calc(env(safe-area-inset-bottom) + 16px);
+    text-align: center; font-size: 12px; color: #6b7a8d; pointer-events: none;
+  }
+</style>
 </head>
 <body>
-    <canvas id="cv"></canvas>
-
-    <div id="hud">
-        <div>得分 <b id="score">0</b></div>
-        <div id="status">未连接</div>
-    </div>
-
-    <div id="panel">
-        <div class="row">
-            <input id="url" value="http://10.0.2.2:3000/mcp" placeholder="MCP server URL">
-            <button id="connect">连接</button>
-        </div>
-        <div class="row">
-            <select id="tool"><option>（先连接）</option></select>
-            <button id="call">调用</button>
-            <button id="save">存档</button>
-        </div>
-        <div id="log"></div>
-    </div>
-
-    <script src="engine.js"></script>
-    <script src="game.js"></script>
+<canvas id="cv"></canvas>
+<div id="hud">
+  <div>得分 <b id="score">0</b></div>
+  <div>最高 <b id="best">0</b></div>
+</div>
+<div id="tip">手指按住屏幕拖动，接住绿色方块</div>
+<script src="engine.js"></script>
+<script src="game.js"></script>
 </body>
 </html>
