@@ -40,6 +40,32 @@ jobs:
         with:
           gradle-version: '8.2'
 
+      - name: Fetch H5 frameworks into assets/lib
+        continue-on-error: true
+        run: |
+          set +e
+          mkdir -p app/src/main/assets/lib
+          fetch () {
+            local name="$1"; shift
+            for u in "$@"; do
+              if curl -fsSL --retry 2 --retry-delay 2 --max-time 90 "$u" -o "app/src/main/assets/lib/$name"; then
+                echo "OK   $name <- $u ($(wc -c < "app/src/main/assets/lib/$name") bytes)"
+                return 0
+              fi
+            done
+            rm -f "app/src/main/assets/lib/$name"
+            echo "SKIP $name (所有镜像都失败，运行时会自动退回 CDN)"
+            return 0
+          }
+          fetch phaser.min.js  https://cdn.jsdelivr.net/npm/phaser@3.80.1/dist/phaser.min.js       https://unpkg.com/phaser@3.80.1/dist/phaser.min.js
+          fetch pixi.min.js    https://cdn.jsdelivr.net/npm/pixi.js@7.4.2/dist/pixi.min.js         https://unpkg.com/pixi.js@7.4.2/dist/pixi.min.js
+          fetch three.min.js   https://cdn.jsdelivr.net/npm/three@0.137.0/build/three.min.js       https://unpkg.com/three@0.137.0/build/three.min.js
+          fetch matter.min.js  https://cdn.jsdelivr.net/npm/matter-js@0.19.0/build/matter.min.js   https://unpkg.com/matter-js@0.19.0/build/matter.min.js
+          fetch p5.min.js      https://cdn.jsdelivr.net/npm/p5@1.9.0/lib/p5.min.js                https://unpkg.com/p5@1.9.0/lib/p5.min.js
+          fetch howler.min.js  https://cdn.jsdelivr.net/npm/howler@2.2.4/dist/howler.min.js        https://unpkg.com/howler@2.2.4/dist/howler.min.js
+          echo "--- assets/lib 内容 ---"
+          ls -la app/src/main/assets/lib
+
       - name: Build debug APK
         run: gradle :app:assembleDebug --no-daemon --stacktrace
 

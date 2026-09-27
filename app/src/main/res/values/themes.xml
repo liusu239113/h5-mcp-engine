@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+
+    <!-- 浅色（默认）：手绘简洁风，米白纸感底 -->
+    <style name="AppTheme" parent="Theme.AppCompat.Light.NoActionBar">
+        <item name="android:windowBackground">#FAF7F2</item>
+        <item name="android:colorAccent">#12BFA3</item>
+        <item name="colorAccent">#12BFA3</item>
+        <item name="android:statusBarColor">#FFFFFF</item>
+        <item name="android:navigationBarColor">#FFFFFF</item>
+    </style>
+
+    <!-- 深色 -->
+    <style name="AppThemeDark" parent="Theme.AppCompat.NoActionBar">
+        <item name="android:windowBackground">#16181C</item>
+        <item name="android:colorAccent">#3BD6BC</item>
+        <item name="colorAccent">#3BD6BC</item>
+        <item name="android:statusBarColor">#1B1E22</item>
+        <item name="android:navigationBarColor">#1B1E22</item>
+    </style>
+
+</resources>

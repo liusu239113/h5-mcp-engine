@@ -44,9 +44,12 @@ class AgentRunner(
             append("\n\n可用工具：").append(names.joinToString(", "))
             append("\n\n启动时的引擎状态：\n")
             append(runCatching { tools.call("engine_status", "{}").text }.getOrDefault("(取状态失败)"))
-            if (!cfg.vision) {
+            if (cfg.vision) {
+                append("\n\n你已开启视觉：screenshot 工具会把画面作为图片直接给你，")
+                append("请务必用它自己确认 UI 是否正常，不要凭空猜坐标。")
+            } else {
                 append("\n\n注意：当前模型没有启用视觉。screenshot 只会返回文字说明，")
-                append("你无法自己看画面；若任务强依赖看 UI，请在回复里提醒用户换成带「看图」的模型。")
+                append("你无法自己看画面；若任务强依赖看 UI，请在回复里提醒用户到设置里开启视觉或换带「看图」的模型。")
             }
         }
 
@@ -68,7 +71,7 @@ class AgentRunner(
             val reply = client.chat(history, spec)
             if (cancelled) return
             if (reply.error != null) {
-                onEvent("✗ 请求失败：${reply.error}")
+                onEvent("✗ 请求失败：\n" + AiClient.friendly(reply.error))
                 return
             }
 

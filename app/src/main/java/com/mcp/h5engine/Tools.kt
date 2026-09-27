@@ -126,7 +126,12 @@ class EngineTools(private val ui: GameUi, private val root: File) {
             fn("console_logs", "读取游戏 console 输出（log/warn/error），排查运行时报错",
                 """{"lines":{"type":"integer","description":"默认 40"},
                    "clear":{"type":"boolean"}}""",
-                emptyList())
+                emptyList()),
+
+            fn("game_libs", "查看内置的 H5 游戏框架（Phaser/PixiJS/Three/Matter/p5/Howler）及用法。" +
+                "写较完整的游戏前先调它，别自己从零造轮子",
+                "{}", emptyList()),
+            fn("lib_usage", "同 game_libs：查看内置框架清单与引用方式", "{}", emptyList())
         )
     }
 
@@ -173,12 +178,12 @@ class EngineTools(private val ui: GameUi, private val root: File) {
                 "当前游戏: ${ui.currentGameId()}\n" +
                 "屏幕: $size\n" +
                 "工程目录: ${root.absolutePath}\n" +
-                "游戏列表: " + (root.listFiles()?.filter { it.isDirectory }?.joinToString { it.name } ?: "无")
+                "游戏列表: " + (root.listFiles()?.filter { it.isDirectory && !it.name.startsWith("_") }?.joinToString { it.name } ?: "无")
             )
         }
 
         "game_list" -> ToolResult(
-            root.listFiles()?.filter { it.isDirectory }?.joinToString("\n") { "  - ${it.name}" }
+            root.listFiles()?.filter { it.isDirectory && !it.name.startsWith("_") }?.joinToString("\n") { "  - ${it.name}" }
                 ?: "(还没有游戏)"
         )
 
@@ -306,6 +311,8 @@ class EngineTools(private val ui: GameUi, private val root: File) {
             if (a.optBoolean("clear")) ui.consoleClear()
             ToolResult(if (lines.isEmpty()) "(暂无 console 输出)" else lines.joinToString("\n"))
         }
+
+        "game_libs", "lib_usage" -> ToolResult(Frameworks.catalogText())
 
         else -> ToolResult("未知工具: $n（可用: ${names().joinToString()}）")
     }

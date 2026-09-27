@@ -94,7 +94,69 @@ DPR 上限 2；避免每帧 new 对象；大量粒子用 typed array。
 6. 加开始页 / 结束页 / 重开
 7. 最后整体验收：连续截图 + console_logs + 说明操作方式
 
-不要一口气写 2000 行再跑，宁可分 5 轮。""")
+不要一口气写 2000 行再跑，宁可分 5 轮。"""),
+
+        Skill("ads", "广告接入（TapTap 激励视频）", false, 45, null, COMMON + """
+
+【当前技能：广告接入（激励视频变现）】
+目标：给当前游戏接上激励视频广告。接口契约**严格对齐 TapTap 小游戏官方文档**，不许凭印象改。
+
+第一步（先拿模板，再动代码）：
+- game_read 读 `_shared/adkit.js` —— App 已释放好的广告桥，八条硬纪律全部内置。
+- game_read 读 `_shared/AD_KIT.md` —— 接入说明、官方契约核对表、典型广告位、验收清单。
+- 把 adkit.js 内容复制进游戏工程（发布要自包含，不能只依赖外部地址）。
+
+官方契约（TapTap 小游戏）：
+- 创建：tap.createRewardedVideoAd({ adUnitId: '广告位ID' })。这是**单例组件**，多次调用返回同一实例 → 只创建一次、全程复用。
+- 组件创建后**自动拉取素材**：成功 onLoad()，失败 onError(err)。
+- 播放：show() 返回 Promise；素材未就绪会 rejected → 按官方建议 load().then(show) 重试一次。
+- 发奖判据**只有一条**：onClose(res) 里 res.isEnded === true 才发奖；中途关掉不发奖。
+- 开发者不能主动隐藏或关闭广告；看完或关闭后素材清空、自动加载下一份。
+- 另一条通道（热点资讯底座，本 App 场景）：window.ColorboxAI.vatask.completeRewardVideo()，恒零参数，成功判据 code===200 且 data.rewarded===true。
+- 两条桥都探测不到（纯网页 / 预览环境）：mode() 返回 blocked / broken → **只提示，不发奖**，绝不允许降级成"点击即发奖"。
+
+八条硬纪律（模板已内置，改代码时不要破坏）：
+1. 只有用户点击能触发广告，文件加载期零副作用；
+2. 单飞：同一时间只允许一条流程，重复点击只提示、不重复拉起；
+3. 成功唯一定义：code===200 且 data.rewarded===true（或 isEnded===true）；
+4. 失败**绝不补发奖励**；
+5. 看门狗 90s：平台 Promise 永不 settle 时复位，否则玩家只能刷新页面；
+6. 流程纪元：迟到结果丢弃，防一次广告发两份奖励；
+7. 配额只在 onReward 回调里消耗（失败不扣，玩家可重试）；
+8. 每条出口都有玩家可读的中文提示，绝不静默。
+
+接线模板（placement 用英文小写下划线；先写闸门再写流程）：
+  AdKit.toast = function (msg, color) { /* 接到你自己的提示组件 */ };
+  AdKit.onBeforeShow = function () { try { State.save(); } catch (e) {} };   // 看广告期间被杀进程是丢档高发点
+  AdKit.track = function (kind, placement, info) { console.log('[ad]', kind, placement, (info && info.reason) || ''); };
+  AdKit.preload();                       // 启动预热：只拉素材，不弹界面
+
+  btn.addEventListener('click', function () {
+    if (AdKit.dailyLeft(State, 'revive', 1) <= 0) { uiToast('今天的复活次数已用完'); return; }
+    AdKit.show('revive', function () {          // onReward：只有真完播才进来
+      AdKit.consumeDaily(State, 'revive');      // 配额在此消耗
+      doRevive();
+      State.save();
+      uiToast('复活成功！', 'green');
+    }, function (reason) {                      // onFail：模态卡场景必须用它，否则玩家失败后僵死
+      uiToast('未获得奖励：' + (AdKit.REASON_TEXT[reason] || '请稍后再试'), 'red');
+    });
+  });
+
+设计要求：
+- 单次奖励要"爽"（大额、即时可见），总量要"省"（每日/每赛季配额），别让广告一季推平数值。
+- 次数用完就把按钮藏掉或置灰，**不要留一个点了没反应的按钮**（不骗点击）。
+- 稀有决策点（升级/自选/重赛）失败时要给第二条出路。
+
+验收（做完逐条自检，并把结果说清楚）：
+- 预览环境下面板能正常显示、点广告按钮会给出诚实提示（本 App 没有广告 SDK，恒 blocked，这是预期行为）；
+- 连点只拉起一条流程；未完整观看配额不被扣；console 有 [ad] 埋点行；
+- 全部出口都有中文提示；
+- 真机真实广告必须在 TapTap 容器内验证 —— 明确告诉用户这一点，别在预览里假装验过了；
+- 本地想跑通发奖链路：地址后加 ?admock=1（仅本地来源生效，发布前把 adkit.js 里 MOCK_ENABLED 改 false）。
+
+发布前提醒用户（一句话即可）：TapTap 制造 / H5 小游戏在开发者中心「商店 → 小游戏广告」开通并创建广告位拿 adUnitId；
+Tap 小游戏 / APK 游戏要走 Dirichlet 广告联盟（ssp.dirichlet.cn）。adUnitId 用 AdKit.setAdUnitId 或 window.TAP_AD_UNIT_ID 配一次即可。""")
     )
 
     fun byId(id: String): Skill = ALL.firstOrNull { it.id == id } ?: ALL.first()

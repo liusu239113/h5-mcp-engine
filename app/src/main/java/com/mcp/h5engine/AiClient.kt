@@ -38,27 +38,53 @@ data class ChatReply(
  */
 class AiClient(private val cfg: ProviderConfig) {
 
-    private val http = OkHttpClient.Builder()
+    /** 每次请求都新建客户端：避免切后台回来复用了已经死掉的连接池（Software caused connection abort） */
+    private fun newHttp(): OkHttpClient = OkHttpClient.Builder()
         .connectTimeout(20, TimeUnit.SECONDS)
         .readTimeout(240, TimeUnit.SECONDS)
         .writeTimeout(90, TimeUnit.SECONDS)
+        .retryOnConnectionFailure(true)
         .build()
 
-    fun chat(history: List<ChatMsg>, tools: List<JSONObject>): ChatReply {
-        val base = cfg.provider.baseUrl.trimEnd('/')
-        val url = when (cfg.provider.protocol) {
-            Protocol.OPENAI -> "$base/chat/completions"
-            Protocol.ANTHROPIC -> "$base/messages"
-            Protocol.GEMINI -> "$base/models/${cfg.model}:generateContent"
+    private val endpoint: String
+        get() {
+            val base = cfg.baseUrl.trim()
+                .removeSuffix("/")
+                .ifBlank { cfg.provider.baseUrl.trimEnd('/') }
+            return when (cfg.provider.protocol) {
+                Protocol.OPENAI -> "$base/chat/completions"
+                Protocol.ANTHROPIC -> "$base/messages"
+                Protocol.GEMINI -> "$base/models/${cfg.model}:generateContent"
+            }
         }
 
+    /**
+     * 带自动重试的对话请求。
+     * 重试只针对「网络类」错误（切后台 / 切网 / 连接被系统掐断），
+     * 鉴权、模型名这种硬错误会立刻返回，不做无意义重试。
+     */
+    fun chat(history: List<ChatMsg>, tools: List<JSONObject>): ChatReply {
         val body = when (cfg.provider.protocol) {
             Protocol.OPENAI -> bodyOpenAi(history, tools)
             Protocol.ANTHROPIC -> bodyAnthropic(history, tools)
             Protocol.GEMINI -> bodyGemini(history, tools)
         }
 
-        val rb = Request.Builder().url(url)
+        var last: ChatReply = ChatReply(null, emptyList(), "未发起请求")
+        for (attempt in 1..3) {
+            last = once(body)
+            if (last.error == null) return last
+            if (!isTransient(last.error)) return last
+            if (attempt < 3) {
+                runCatching { Thread.sleep(if (attempt == 1) 500L else 1500L) }
+            }
+        }
+        return last
+    }
+
+    private fun once(body: JSONObject): ChatReply {
+        val rb = Request.Builder().url(endpoint)
+            .header("Connection", "close")
             .post(body.toString().toRequestBody("application/json".toMediaType()))
 
         when (cfg.provider.protocol) {
@@ -71,16 +97,119 @@ class AiClient(private val cfg: ProviderConfig) {
         }
 
         return try {
-            http.newCall(rb.build()).execute().use { r ->
+            newHttp().newCall(rb.build()).execute().use { r ->
                 val text = r.body?.string() ?: ""
                 if (!r.isSuccessful) {
-                    ChatReply(null, emptyList(), "HTTP ${r.code}  ${text.take(700)}")
+                    ChatReply(null, emptyList(), "HTTP ${r.code} ${text.take(600)}")
                 } else {
                     parse(text)
                 }
             }
         } catch (t: Throwable) {
             ChatReply(null, emptyList(), "${t.javaClass.simpleName}: ${t.message}")
+        }
+    }
+
+    /** 发一条极短消息，用来验证 Key / Base URL / 模型名是否可用 */
+    fun test(): String {
+        val started = System.currentTimeMillis()
+        val body = when (cfg.provider.protocol) {
+            Protocol.OPENAI -> JSONObject()
+                .put("model", cfg.model)
+                .put("temperature", 0.0)
+                .put("max_tokens", 16)
+                .put(
+                    "messages",
+                    JSONArray().put(JSONObject().put("role", "user").put("content", "ping"))
+                )
+            Protocol.ANTHROPIC -> JSONObject()
+                .put("model", cfg.model)
+                .put("max_tokens", 16)
+                .put(
+                    "messages",
+                    JSONArray().put(
+                        JSONObject().put("role", "user")
+                            .put("content", "ping")
+                    )
+                )
+            Protocol.GEMINI -> JSONObject()
+                .put(
+                    "contents",
+                    JSONArray().put(
+                        JSONObject().put("role", "user")
+                            .put("parts", JSONArray().put(JSONObject().put("text", "ping")))
+                    )
+                )
+        }
+
+        val r = once(body)
+        val ms = System.currentTimeMillis() - started
+        return if (r.error == null) {
+            val echo = (r.text ?: "").trim().take(30).replace("\n", " ")
+            "✅ 连通正常 · ${ms}ms" + if (echo.isNotEmpty()) " · 回：$echo" else ""
+        } else {
+            "❌ " + friendly(r.error!!) + " · ${ms}ms"
+        }
+    }
+
+    companion object {
+
+        private val NET_HINTS = listOf(
+            "socket", "connection abort", "connection reset", "broken pipe",
+            "timeout", "timed out", "unknownhost", "unable to resolve host",
+            "stream reset", "unexpected end of stream", "eof", "closed",
+            "软件导致连接中止", "failed to connect", "network is unreachable"
+        )
+
+        /** 网络类错误才重试 */
+        fun isTransient(err: String): Boolean {
+            val e = err.lowercase()
+            if (NET_HINTS.any { e.contains(it) }) return true
+            val m = Regex("HTTP (\\d{3})").find(err) ?: return false
+            val code = m.groupValues[1].toIntOrNull() ?: return false
+            return code >= 500 || code == 408 || code == 429
+        }
+
+        /** 把英文堆栈翻译成人话，别让用户在黑底上看一段 SocketException */
+        fun friendly(err: String): String {
+            val e = err.lowercase()
+            return when {
+                e.contains("connection abort") || e.contains("broken pipe") ->
+                    "网络连接被系统掐断（多为切后台或切网导致）\n→ 已自动重试仍失败，直接再点一次发送即可。"
+
+                e.contains("connection reset") ->
+                    "连接被对端重置，通常是网络抖动或代理不稳定。\n→ 稍等两秒再发一次。"
+
+                e.contains("unknownhost") || e.contains("unable to resolve") ||
+                    e.contains("network is unreachable") ->
+                    "连不上服务器：域名解析失败。\n→ 检查网络，或核对设置里的 Base URL。"
+
+                e.contains("timeout") || e.contains("timed out") ->
+                    "请求超时：模型没在 240 秒内返回。\n→ 换更快的模型，或把问题拆小一点。"
+
+                e.contains("http 401") || e.contains("unauthorized") ->
+                    "API Key 不对或没有该模型的权限（401）。\n→ 到设置里重新粘贴 Key，并点「测试连通」。"
+
+                e.contains("http 402") || e.contains("insufficient") ->
+                    "账户余额不足（402）。\n→ 去服务商后台充值。"
+
+                e.contains("http 403") ->
+                    "被拒绝（403）：Key 权限不足，或该地区/该模型不可用。"
+
+                e.contains("http 404") ->
+                    "找不到接口或模型（404）。\n→ 多半是 Base URL 或模型名写错了，用「测试连通」验证。"
+
+                e.contains("http 429") ->
+                    "请求太频繁或超出配额（429）。\n→ 等一会儿再试，或换一家模型。"
+
+                e.matches(Regex(".*http 5\\d\\d.*")) ->
+                    "服务端故障（5xx），不是你的问题。\n→ 换一家或过会儿再试。"
+
+                e.contains("unsupported") || e.contains("does not support") ->
+                    "该模型不支持当前请求形态（比如不吃图片/工具调用）。\n→ 换成带「看图」标记的模型。"
+
+                else -> err.take(500)
+            }
         }
     }
 
