@@ -22,6 +22,50 @@ class LogBuffer(private val cap: Int = 400) {
     fun clear() = q.clear()
 }
 
+/**
+ * 截图疑似空白时跑的「页面自检」。
+ *
+ * 为什么要有它：WebGL / canvas / 视频是硬件加速内容，某些路径下截图可能抓不到像素，
+ * 截出来是纯色。模型看到纯色图很容易下结论「引擎没加载 / Three.js 不存在」，
+ * 然后把好代码改坏。这段脚本从**运行时事实**出发回答「页面到底加载没有」，
+ * 让模型有依据，而不是靠一张图瞎猜。
+ */
+private const val SHOT_PROBE_JS = """
+(function(){
+  try {
+    var out = {};
+    out.readyState = document.readyState;
+    out.url = location.href;
+    var cvs = [].slice.call(document.querySelectorAll('canvas'));
+    out.canvasCount = cvs.length;
+    out.canvases = cvs.slice(0, 6).map(function(c){
+      var ctx3 = null;
+      try { ctx3 = !!(c.getContext && (c.getContext('webgl') || c.getContext('webgl2') || c.getContext('experimental-webgl'))); } catch(e){}
+      return c.width + 'x' + c.height + (ctx3 ? ' [webgl]' : ' [2d/other]') +
+             ' vis=' + (c.offsetWidth > 0 && c.offsetHeight > 0) +
+             ' px=' + c.offsetWidth + 'x' + c.offsetHeight;
+    });
+    out.scripts = document.scripts.length;
+    out.bodyChildren = document.body ? document.body.children.length : -1;
+    out.bodyText = document.body ? (document.body.innerText || '').replace(/\s+/g,' ').slice(0, 200) : '';
+    // 常见 3D / 游戏引擎是否露头
+    var g = window;
+    out.engine = {
+      THREE: typeof g.THREE !== 'undefined',
+      BABYLON: typeof g.BABYLON !== 'undefined',
+      Phaser: typeof g.Phaser !== 'undefined',
+      PIXI: typeof g.PIXI !== 'undefined',
+      CocosEngine: typeof g.cc !== 'undefined' || typeof g.CocosEngine !== 'undefined',
+      Laya: typeof g.Laya !== 'undefined'
+    };
+    out.err = (window.__hxErrors && window.__hxErrors.length) ? window.__hxErrors.slice(-5) : [];
+    return JSON.stringify(out);
+  } catch (e) {
+    return JSON.stringify({probeError: String(e)});
+  }
+})()
+"""
+
 /** 引擎与正在运行的 WebView 交互的能力，由 MainActivity 实现 */
 interface GameUi {
     fun currentGameId(): String
@@ -36,6 +80,25 @@ interface GameUi {
      * 因此模型在图上读出的坐标可以直接喂给 pointer()。
      */
     fun snapshotCss(maxWidth: Int = 720, quality: Int = 72): ByteArray?
+
+    /**
+     * 上一次 screenshot 是否疑似「空白 / 纯色」。
+     *
+     * 为什么需要它：WebGL / canvas / 视频这类硬件加速画面，某些机型或时机下抓不到像素，
+     * 截出来就是一片纯色。模型看到白图会直接断言「引擎没加载 / 画面没渲染」，
+     * 然后去瞎改本来没问题的代码 —— 所以工具层必须把这件事说清楚。
+     */
+    fun lastShotWasBlank(): Boolean = false
+
+    /**
+     * 上一次整屏截图的换算信息：
+     * `[scale, winW, winH, density, webLeft, webTop, webW, webH]`
+     * （scale = 图片px / 窗口px；web* 都是窗口 px）。
+     */
+    fun lastShotMeta(): FloatArray = FloatArray(0)
+
+    /** 把「截图里的像素坐标」换算成网页 CSS 坐标；没截过图返回 null */
+    fun shotToCss(x: Float, y: Float): FloatArray? = null
 
     /** kind: 0=down 1=up 2=move */
     fun pointer(x: Float, y: Float, kind: Int)
@@ -168,12 +231,16 @@ class EngineTools(private val ui: GameUi, private val root: File) {
                 """{"code":{"type":"string","description":"表达式或 IIFE，返回值需可 JSON 化"}}""",
                 listOf("code")),
 
-            fn("screenshot", "截取当前游戏画面（返回图片）。用它检查 UI 有没有白屏/错位/遮挡",
-                """{"maxWidth":{"type":"integer","description":"图片宽度，默认 720"}}""",
+            fn("screenshot", "截取**整屏**画面（跟手机自带截图一样，含 App 顶栏/底栏/游戏画面，返回图片）。" +
+                "用它检查 UI 有没有白屏/错位/遮挡。返回文本里带「图内坐标 → 点击坐标」的换算，" +
+                "也可以直接把图内像素喂给 tap(space=\"shot\")",
+                """{"maxWidth":{"type":"integer","description":"整屏图宽度，默认 720"}}""",
                 emptyList()),
 
-            fn("tap", "点击画面。坐标是 CSS 像素，与 screenshot 图片坐标一一对应",
-                """{"x":{"type":"number"},"y":{"type":"number"}}""",
+            fn("tap", "点击画面。默认坐标是网页 CSS 像素；space=\"shot\" 时直接用在 screenshot 图上量到的像素坐标" +
+                "（推荐，少一次换算、不会算错）",
+                """{"x":{"type":"number"},"y":{"type":"number"},
+                   "space":{"type":"string","description":"css（默认）或 shot（截图内像素）"}}""",
                 listOf("x", "y")),
 
             fn("swipe", "从一点滑到另一点（拖拽/翻页）",
@@ -541,31 +608,71 @@ class EngineTools(private val ui: GameUi, private val root: File) {
             val img = ui.snapshotCss(w)
             if (img == null || img.size < 128) {
                 ToolResult(
-                    "截图失败：只拿到 ${img?.size ?: 0} 字节（画面多半还没加载完/是空白页）。" +
-                        "等 1-2 秒再截一次；不要拿这张图下结论。"
+                    "截图失败：只拿到 ${img?.size ?: 0} 字节。等 1-2 秒再截一次；" +
+                        "**不要**据此下结论说「游戏没渲染」。"
                 )
             } else {
                 val kb = img.size / 1024
-                val warn = if (img.size < 3 * 1024)
-                    " ⚠ 这张图只有 ${img.size} 字节，很可能是空白/纯色页（真有问题先看 console_logs）。"
-                else ""
+                val m = ui.lastShotMeta()
+                val map = if (m.size >= 8 && m[0] > 0f) {
+                    val scale = m[0]
+                    val d = if (m[3] > 0f) m[3] else 1f
+                    val iw = (m[1] * scale).toInt()
+                    val ih = (m[2] * scale).toInt()
+                    val l = m[4] * scale
+                    val t = m[5] * scale
+                    val r = (m[4] + m[6]) * scale
+                    val b = (m[5] + m[7]) * scale
+                    val s3 = Math.round(scale * 1000f) / 1000.0
+                    "整屏图 ${iw}x${ih}（设备窗口 ${m[1].toInt()}x${m[2].toInt()}，缩放 ${s3}）；" +
+                        "图中游戏画面在 x ${l.toInt()}~${r.toInt()}、y ${t.toInt()}~${b.toInt()}。" +
+                        "要点击游戏里的东西，最省事的是直接把图内像素喂给它：tap(x=图内x, y=图内y, space=\"shot\")；" +
+                        "要用 CSS 坐标则是 css=(图内坐标/${'$'}scale-画面左上角)/${'$'}d，d=${d}。"
+                } else ""
+                val blankWarn = if (ui.lastShotWasBlank()) {
+                    val probe = runCatching { ui.runJsSync(SHOT_PROBE_JS, 4000) }.getOrNull().orEmpty()
+                    "\n⚠ 这次截出来的图疑似**空白 / 纯色**。两种常见原因：①画面是 WebGL / canvas / " +
+                        "视频这类硬件加速内容，像素没抓到；②页面确实还没渲染完。\n" +
+                        "**不要**因此断定「引擎没加载 / 画面没渲染 / Three.js 不存在」——这多半是误判。" +
+                        "先看下面的页面自检结果，或用 js_eval 核对真实状态，或等 1-2 秒再截一次。\n" +
+                        "页面自检：$probe"
+                } else if (img.size < 3 * 1024) {
+                    " ⚠ 这张图只有 ${img.size} 字节，可能是纯色页（真有问题先看 console_logs）。"
+                } else ""
                 ToolResult(
-                    "截图完成，${kb} KB（${img.size} 字节）。图片坐标 = 屏幕 CSS 像素坐标，" +
-                    "可直接用于 tap(x,y)。请检查：是否白屏、元素是否出屏或被遮挡、" +
-                    "文字对比度与重叠、布局是否居中、有没有明显错位。$warn",
+                    "截图完成（整屏），${kb} KB（${img.size} 字节）。$map\n" +
+                        "请检查：是否白屏、元素是否出屏或被遮挡、文字对比度与重叠、" +
+                        "布局是否居中、底部有没有被系统栏/安全区压住。$blankWarn",
                     listOf(img)
                 )
             }
         }
 
         "tap" -> {
-            val x = a.getDouble("x").toFloat()
-            val y = a.getDouble("y").toFloat()
-            ui.pointer(x, y, 0)
-            Thread.sleep(50)
-            ui.pointer(x, y, 1)
-            Thread.sleep(120)
-            ToolResult("已点击 ($x, $y)")
+            val rx = a.getDouble("x").toFloat()
+            val ry = a.getDouble("y").toFloat()
+            val space = a.optString("space", "css")
+            val conv = if (space == "shot") ui.shotToCss(rx, ry) else null
+            if (space == "shot" && conv == null) {
+                ToolResult(
+                    "还不能用截图坐标点击：先调一次 screenshot（记下换算信息），" +
+                        "或者直接给网页 CSS 坐标（space 省略）。"
+                )
+            } else {
+                val x = conv?.get(0) ?: rx
+                val y = conv?.get(1) ?: ry
+                ui.pointer(x, y, 0)
+                Thread.sleep(50)
+                ui.pointer(x, y, 1)
+                Thread.sleep(120)
+                if (conv != null) {
+                    val cx = Math.round(x * 10) / 10.0
+                    val cy = Math.round(y * 10) / 10.0
+                    ToolResult("已点击：截图坐标 ($rx, $ry) → 网页 CSS 坐标 ($cx, $cy)")
+                } else {
+                    ToolResult("已点击 ($x, $y)")
+                }
+            }
         }
 
         "swipe" -> {

@@ -26,6 +26,7 @@ import android.text.Editable
 import android.text.InputType
 import android.text.TextWatcher
 import android.view.Gravity
+import android.view.PixelCopy
 import android.view.View
 import android.view.ViewGroup
 import android.webkit.WebChromeClient
@@ -4599,37 +4600,156 @@ makerRow1.addView(ghostBtnOf(ctx, pal, "扫码登录").apply {
     override fun snapshotCss(maxWidth: Int, quality: Int): ByteArray? {
         if (Looper.myLooper() == Looper.getMainLooper()) return null
 
-        val latch = CountDownLatch(1)
-        val holder = AtomicReference<ByteArray?>()
+        val decor = window?.decorView ?: return null
+        val winW = decor.width.coerceAtLeast(1)
+        val winH = decor.height.coerceAtLeast(1)
+        val density = resources.displayMetrics.density.coerceAtLeast(1f)
 
-        main.post {
-            runCatching {
-                val w = web.width.coerceAtLeast(1)
-                val h = web.height.coerceAtLeast(1)
-                val density = resources.displayMetrics.density.coerceAtLeast(1f)
+        // 整屏截图（跟手机自带截图一样，不是只截 WebView 那一块）。
+        // 取像素有两条路，**必须两条都走一遍**：
+        //   ① PixelCopy：窗口的真实合成结果。只有它能拿到 WebGL / canvas / 视频这些
+        //      「硬件加速」画面。
+        //   ② decorView.draw()：软件绘制兜底 —— 它抓不到 GPU 内容，但 DOM 文字层通常还在。
+        // 以前只用 ②，于是 Three.js 游戏截出来一片空白，模型当场误判成
+        // 「Three.js 没加载 / canvas 没渲染」（用户报的就是这个），然后开始瞎改代码。
+        val viaCopy = runCatching { pixelCopyWindow(winW, winH) }.getOrNull()
+        val copyBlank = viaCopy == null || looksBlank(viaCopy)
+        val viaDraw = if (copyBlank) runCatching {
+            val raw = Bitmap.createBitmap(winW, winH, Bitmap.Config.ARGB_8888)
+            val latchDraw = CountDownLatch(1)
+            main.post {
+                runCatching { decor.draw(Canvas(raw)) }
+                latchDraw.countDown()
+            }
+            latchDraw.await(3, TimeUnit.SECONDS)
+            raw
+        }.getOrNull() else null
 
-                val raw = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
-                web.draw(Canvas(raw))
-
-                // 换算成 CSS 像素：模型在图上量到的坐标可直接用于 tap()
-                val cssW = (w / density).toInt().coerceAtLeast(1)
-                val cssH = (h / density).toInt().coerceAtLeast(1)
-                val targetW = cssW.coerceAtMost(maxWidth.coerceAtLeast(64))
-                val targetH = (cssH.toFloat() * targetW / cssW).toInt().coerceAtLeast(1)
-
-                val out = Bitmap.createScaledBitmap(raw, targetW, targetH, true)
-                val bos = ByteArrayOutputStream()
-                out.compress(Bitmap.CompressFormat.JPEG, quality.coerceIn(30, 95), bos)
-
-                raw.recycle()
-                if (out !== raw) out.recycle()
-                holder.set(bos.toByteArray())
-            }.onFailure { holder.set(null) }
-            latch.countDown()
+        val full = when {
+            !copyBlank -> viaCopy!!.also { viaDraw?.recycle() }
+            viaDraw != null && !looksBlank(viaDraw) -> viaDraw.also { viaCopy?.recycle() }
+            viaCopy != null -> viaCopy
+            else -> viaDraw ?: return null
         }
+        shotBlank = looksBlank(full)
 
-        latch.await(15, TimeUnit.SECONDS)
+        // 缩放：整屏宽不超过 maxWidth，并记住比例 —— 模型在图里量的坐标要能换算回点击坐标
+        val targetW = winW.coerceAtMost(maxWidth.coerceAtLeast(240))
+        val targetH = (winH.toFloat() * targetW / winW).toInt().coerceAtLeast(1)
+
+        val loc = IntArray(2)
+        val latchLoc = CountDownLatch(1)
+        main.post {
+            runCatching { web.getLocationInWindow(loc) }
+            latchLoc.countDown()
+        }
+        latchLoc.await(1, TimeUnit.SECONDS)
+
+        shotScale = targetW.toFloat() / winW.toFloat()
+        shotWinW = winW
+        shotWinH = winH
+        shotDensity = density
+        shotWebL = loc[0].toFloat()
+        shotWebT = loc[1].toFloat()
+        shotWebW = web.width.toFloat()
+        shotWebH = web.height.toFloat()
+
+        return runCatching {
+            val out = if (targetW == winW) full else Bitmap.createScaledBitmap(full, targetW, targetH, true)
+            val bos = ByteArrayOutputStream()
+            out.compress(Bitmap.CompressFormat.JPEG, quality.coerceIn(30, 95), bos)
+            if (out !== full) out.recycle()
+            full.recycle()
+            bos.toByteArray()
+        }.getOrNull()
+    }
+
+    /** 本次截图是否疑似「空白 / 纯色」——即 GPU 画面没抓到。工具层会据此提醒模型别误判。 */
+    @Volatile
+    private var shotBlank = false
+
+    override fun lastShotWasBlank(): Boolean = shotBlank
+
+    // ===== 上一次整屏截图的换算信息（工具层用它把「图内像素」换成「网页 CSS 像素」） =====
+    @Volatile
+    private var shotScale = 0f      // 图片 px / 窗口 px
+    @Volatile
+    private var shotWinW = 0
+    @Volatile
+    private var shotWinH = 0
+    @Volatile
+    private var shotDensity = 0f
+    @Volatile
+    private var shotWebL = 0f       // WebView 在窗口里的位置（窗口 px）
+    @Volatile
+    private var shotWebT = 0f
+    @Volatile
+    private var shotWebW = 0f
+    @Volatile
+    private var shotWebH = 0f
+
+    override fun lastShotMeta(): FloatArray =
+        floatArrayOf(shotScale, shotWinW.toFloat(), shotWinH.toFloat(), shotDensity,
+            shotWebL, shotWebT, shotWebW, shotWebH)
+
+    override fun shotToCss(x: Float, y: Float): FloatArray? {
+        if (shotScale <= 0f) return null
+        val wx = x / shotScale
+        val wy = y / shotScale
+        val d = if (shotDensity > 0f) shotDensity else 1f
+        return floatArrayOf((wx - shotWebL) / d, (wy - shotWebT) / d)
+    }
+
+    /**
+     * 用 PixelCopy 抓**整个窗口**的真实合成画面（含 WebGL / canvas / 视频）。
+     * 失败（窗口不可见、还没合成、低于 API 24）返回 null，由调用方退回软件绘制。
+     */
+    private fun pixelCopyWindow(w: Int, h: Int): Bitmap? {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.N) return null
+        val win = window ?: return null
+        val latch = CountDownLatch(1)
+        val holder = AtomicReference<Bitmap?>()
+        main.post {
+            var handled = false
+            runCatching {
+                val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+                PixelCopy.request(
+                    win,
+                    bmp,
+                    { res ->
+                        holder.set(if (res == PixelCopy.SUCCESS) bmp else null)
+                        latch.countDown()
+                    },
+                    Handler(Looper.getMainLooper())
+                )
+                handled = true
+            }
+            if (!handled) latch.countDown()
+        }
+        latch.await(3, TimeUnit.SECONDS)
         return holder.get()
+    }
+
+    /** 抽样判断是不是空白 / 纯色图：GPU 内容没抓到时的典型症状 */
+    private fun looksBlank(bmp: Bitmap): Boolean {
+        val stepX = (bmp.width / 24).coerceAtLeast(1)
+        val stepY = (bmp.height / 24).coerceAtLeast(1)
+        var first = 0
+        var same = 0
+        var total = 0
+        var y = 0
+        while (y < bmp.height) {
+            var x = 0
+            while (x < bmp.width) {
+                val p = bmp.getPixel(x, y)
+                if (total == 0) first = p
+                if (p == first) same++
+                total++
+                x += stepX
+            }
+            y += stepY
+        }
+        return total == 0 || same == total
     }
 
     override fun pointer(x: Float, y: Float, kind: Int) {
