@@ -1041,7 +1041,7 @@ class MainActivity : AppCompatActivity(), GameUi {
             main.post {
                 if (info == null) {
                     toast("读取失败，换个文件试试")
-                    return@main
+                    return@post
                 }
                 attachedDocs += info
                 updateAttachInfo()
@@ -1124,7 +1124,7 @@ class MainActivity : AppCompatActivity(), GameUi {
             main.post {
                 if (files.isEmpty()) {
                     toast("这个项目还没有文件")
-                    return@main
+                    return@post
                 }
                 val labels = files.map { it.relativeTo(dir).path + "  (${it.length()}B)" }
                     .toTypedArray()
@@ -1199,7 +1199,7 @@ class MainActivity : AppCompatActivity(), GameUi {
             main.post {
                 if (ids.isEmpty()) {
                     toast("没拉到模型：可能是协议不支持（Anthropic / Gemini），或 Key / 地址不对")
-                    return@main
+                    return@post
                 }
                 AlertDialog.Builder(themed())
                     .setTitle("${p.label} 可用模型（${ids.size}）")
