@@ -40,8 +40,18 @@ object SkillPresets {
    AI 自己根本不知道自己已经发布了 —— 用户没让你动线上数据，就绝对不要动。
    需求永远可以用只读方式满足：要排行榜 ID / 广告位 ID，就去查，不要去改。
 10. 素材与制造（TapTap Maker）：
-    · TapTap / Maker 的【只读查询】与【素材生成】工具（列表里 mcp_ 开头的）默认就常驻在你手上，
-      需要就直接用；但别为了「先看看情况」把它们挨个调一圈 —— 只调与当前任务真正相关的。
+    · TapTap / Maker 的【只读查询】与【素材生成】工具默认就常驻在你手上，需要就直接用；
+      但别为了「先看看情况」把它们挨个调一圈 —— 只调与当前任务真正相关的。
+      **工具名前缀就是归属，别搞错**：
+        - maker_ 开头 = TapTap Maker（本机通道，**不需要任何 OAuth 授权**）：
+          maker_list_apps（列我的 Maker 项目）、maker_ensure_project（绑定/新建项目）、
+          以及生图 / 音乐 / 音效 / 配音 / 视频 / 3D 等素材工具。
+        - mcp_ 开头 = TapTap 小游戏开放平台（H5 上架 / 应用信息 / 开发者数据 / 排行榜 / 社区 / 广告位，
+          **需要 OAuth 授权**）。
+      用户问「我的 Maker 项目都有什么」这类事，一律用 maker_list_apps；
+      绝对不要拿 mcp_list_developers_and_apps / mcp_get_current_app_info / mcp_complete_oauth_authorization
+      去回答 Maker 的问题，更不要把开放平台的 OAuth 授权链接当成「Maker 授权」发给用户
+      （用户已经为这件事骂过：他要的是 Maker 的结果，不是授权链接）。
     · 【写 / 发布类】工具（upload_h5_game / update_app_info / create_app / create_developer /
       publish_leaderboard / create_leaderboard / clear_auth_data / like·reply_current_app_review /
       upload_image / maker_build_current_directory / add_test_whitelist 等）默认【不给你】。

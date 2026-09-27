@@ -181,8 +181,20 @@ class McpHub {
     @Volatile
     var lastInfo: String = "未连接"
         private set
-
     val size: Int get() = index.size
+
+    /**
+     * 两台服务器的工具名不能长得一样。
+     *
+     * 以前不管来自哪台，全部统一加 "mcp_" 前缀 —— 结果模型（以及用户看界面）根本分不清
+     * 「Maker 生图」和「TapTap 开放平台的开发者接口」，于是问 Maker 的事它跑去调
+     * list_developers_and_apps / complete_oauth_authorization，还把 H5 的 OAuth 授权链接
+     * 甩给用户当答案。现在按服务器分流前缀：Maker = maker_，H5 开放平台 = mcp_。
+     */
+    private fun isMakerServer(s: McpServer): Boolean = s.url.contains(McpRt.MAKER_PORT.toString())
+
+    private fun prefixFor(s: McpServer): String = if (isMakerServer(s)) "maker_" else "mcp_"
+
 
     fun refresh(servers: List<McpServer>, log: (String) -> Unit) {
         index.clear()
@@ -195,7 +207,7 @@ class McpHub {
                 val c = McpClient(s.url)
                 c.initialize()
                 val list = c.listTools()
-                for (t in list) index["mcp_" + t.name] = Entry(s, t)
+                for (t in list) index[prefixFor(s) + t.name] = Entry(s, t)
                 clients[s.url] = c
                 okServers++
                 log("MCP「${s.name}」已连接：${list.size} 个工具")
@@ -215,11 +227,17 @@ class McpHub {
     }
 
     fun specs(): List<JSONObject> = index.map { (exposed, e) ->
+        // 描述里把「归属」写在最前面：模型挑工具时先看的是描述，
+        // 旧版只写服务器名，它照样把 H5 开放平台的开发者接口当成 Maker 的能力。
+        val tag = if (isMakerServer(e.server))
+            "[TapTap Maker / 素材生成 · 无需授权] "
+        else
+            "[TapTap 小游戏开放平台 / H5 上架与开发者数据 · 需 OAuth 授权，与 Maker 无关] "
         JSONObject().put("type", "function").put(
             "function",
             JSONObject()
                 .put("name", exposed)
-                .put("description", ("[" + e.server.name + "] " + e.tool.description.ifBlank { e.tool.name }).take(1200))
+                .put("description", (tag + e.tool.description.ifBlank { e.tool.name }).take(1200))
                 .put("parameters", e.tool.schema)
         )
     }
@@ -238,12 +256,31 @@ class McpHub {
             // 本地 node 被系统冻结/杀掉是常态：让守护逻辑把它拉回来，再重试一次
             val ok = runCatching { onEnsure?.invoke() == true }.getOrDefault(false)
             if (!ok) {
-                "[MCP 调用失败] ${t.message}（本地服务可能已退出，可到设置 → MCP 服务器点「启动 / 重连」）"
+                "[MCP 调用失败] ${t.message}（本地服务可能已退出，可到设置 → MCP 服务器点「启动 / 重连」）" +
+                    authOwnershipHint(t.message, name)
             } else {
                 runCatching { direct(name, argsJson) }
-                    .getOrElse { "[MCP 调用失败] 服务已重启但仍不可用：${it.message}" }
+                    .getOrElse { "[MCP 调用失败] 服务已重启但仍不可用：${it.message}" + authOwnershipHint(it.message, name) }
             }
         }
+    }
+
+    /**
+     * 授权类报错必须标明「归属」。
+     *
+     * 以前这类报错原样抛给模型，模型就顺手把 TapTap 开放平台的 OAuth 授权链接塞给用户 ——
+     * 而用户问的往往是 Maker（本地生图），两边一混就被骂「乱搞」。这里明确说清：
+     * 这条属于 H5 开放平台，Maker 的凭证在设置 → Maker 面板（PAT），两码事。
+     */
+    private fun authOwnershipHint(msg: String?, tool: String): String {
+        val m = (msg ?: "") + tool
+        val authLike = listOf("授权", "认证", "oauth", "OAuth", "-32603", "unauthorized", "401", "token")
+            .any { m.contains(it) }
+        if (!authLike) return ""
+        return "\n注：这条报错来自 TapTap 小游戏开放平台（H5 上架 / 开发者数据）的 OAuth 授权链路，" +
+            "跟 TapTap Maker 是两套东西。要查/用 Maker（素材生成、Maker 项目列表）请用 maker_ 开头的工具" +
+            "（maker_list_apps / maker_ensure_project），Maker 凭证在设置 → Maker 面板。" +
+            "不要把这条授权链接当成 Maker 的授权发给用户。"
     }
 
     private fun direct(name: String, argsJson: String): String {

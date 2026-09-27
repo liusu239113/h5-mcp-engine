@@ -84,15 +84,22 @@ class EngineTools(private val ui: GameUi, private val root: File) {
          */
         val MCP_WRITE_TOOLS = setOf(
             // H5 上传 / 发布链路
-            "mcp_upload_h5_game", "mcp_update_app_info", "mcp_create_app", "mcp_create_developer",
-            "mcp_clear_auth_data", "mcp_upload_image",
+            "upload_h5_game", "update_app_info", "create_app", "create_developer",
+            "clear_auth_data", "upload_image",
             // 排行榜写操作
-            "mcp_create_leaderboard", "mcp_publish_leaderboard",
+            "create_leaderboard", "publish_leaderboard",
             // 社区写操作
-            "mcp_like_current_app_review", "mcp_reply_current_app_review",
+            "like_current_app_review", "reply_current_app_review",
             // Maker 侧写操作
-            "mcp_maker_build_current_directory", "mcp_add_test_whitelist", "mcp_confirm_character_voice"
+            "maker_build_current_directory", "add_test_whitelist", "confirm_character_voice"
         )
+
+        /** 门禁按「去掉前缀后的真名」判：现在 Maker 通道暴露成 maker_xxx、H5 通道是 mcp_xxx */
+        private fun isWriteTool(name: String): Boolean {
+            var s = name
+            for (p in listOf("mcp_", "maker_")) if (s.startsWith(p)) s = s.substring(p.length)
+            return MCP_WRITE_TOOLS.contains(s)
+        }
 
         /**
          * App 上下文（MainActivity 注入）。
@@ -209,7 +216,7 @@ class EngineTools(private val ui: GameUi, private val root: File) {
         else allSpecs.filter { allow.contains(it.getJSONObject("function").getString("name")) }
         val extra = mcp?.specs()?.filter {
             val n = it.getJSONObject("function").getString("name")
-            mcpAllowed || !MCP_WRITE_TOOLS.contains(n)
+            mcpAllowed || !isWriteTool(n)
         } ?: emptyList()
         return if (extra.isEmpty()) base else base + extra
     }
@@ -224,7 +231,7 @@ class EngineTools(private val ui: GameUi, private val root: File) {
         // 所以这里也要拦，并且把「为什么不能调」直说给它，免得它转头跟用户说「我没有这个能力」。
         mcp?.let { hub ->
             if (hub.handles(name)) {
-                if (mcpAllowed || !MCP_WRITE_TOOLS.contains(name)) {
+                if (mcpAllowed || !isWriteTool(name)) {
                     return ToolResult(hub.call(name, argsJson))
                 }
                 return ToolResult(

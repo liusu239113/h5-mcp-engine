@@ -59,6 +59,27 @@ class AgentRunner(
                 append("\n\n注意：当前模型没有启用视觉。screenshot 只会返回文字说明，")
                 append("你无法自己看画面；若任务强依赖看 UI，请在回复里提醒用户到设置里开启视觉或换带「看图」的模型。")
             }
+
+            // ===== 工具归属纪律（用户反复被这两套东西搞混，这里硬性写死）=====
+            append(
+                """
+
+【工具归属：Maker 和 TapTap 开放平台是两套完全不同的东西，别混】
+- maker_ 开头 = TapTap Maker（本机通道）：素材生成（生图 / 音乐 / 音效 / 配音 / 视频 / 3D）、
+  Maker 项目查询与绑定。**不需要任何 OAuth 授权**，凭证是本机的 pat.json。
+  · 用户问「我的 Maker 项目 / 应用都有什么」→ 用 maker_list_apps；
+  · 要绑定或新建 Maker 项目 → maker_ensure_project；
+  · 生图/音乐/音效等素材工具也在这个通道里。
+- mcp_ 开头 = TapTap 小游戏开放平台（H5 通道）：游戏上传上架、应用信息、开发者数据、排行榜、
+  社区、广告位配置。**需要 OAuth 授权**，跟 Maker 一点关系都没有。
+- 铁律：用户说的 Maker / 生图 / 素材 / 音效，一律只用 maker_ 工具；
+  绝不要用 mcp_list_developers_and_apps / mcp_get_current_app_info / mcp_complete_oauth_authorization
+  之类的开放平台接口去回答 Maker 的问题；
+  更不要把这些接口的 OAuth 授权链接当作「Maker 授权」发给用户 —— 用户会当成你在乱搞。
+- 只有当用户明确在做 H5 游戏上架 / 开放平台数据这类事时，才用 mcp_ 工具。
+- Maker 相关失败时，不要立刻推给用户点链接：先确认是不是该用 maker_list_apps 之类的本地工具，
+  以及 Maker 子进程是否在跑（工具会返回明确原因）。""".trimIndent()
+            )
         }
 
         if (history.isNotEmpty() && history[0].role == "system") {
@@ -124,7 +145,7 @@ class AgentRunner(
 
                 // Maker 会把生成的图/音「materialize」到项目里并返回本地路径：
                 // 捞出来丢给 UI，用户就能在对话里直接看到缩略图、点一下预览/试听。
-                if (tc.name.startsWith("mcp_")) {
+                if (tc.name.startsWith("mcp_") || tc.name.startsWith("maker_")) {
                     assetsIn(res.text).forEach { onEvent("ASSET:$it") }
                     // 云能力没授权（PAT 缺失 / 登录失效）：通知 UI 主动把授权链接递给用户，
                     // 而不是让用户自己去设置页翻（那是上一版的做法，用户明确否掉了）。

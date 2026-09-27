@@ -88,6 +88,75 @@ const LOCAL_TOOL = {
   },
 };
 
+/**
+ * 本地工具 2：列 Maker 项目。
+ *
+ * 为什么必须有它：用户问「我的 Maker 项目都有什么」时，模型以前只能去抓旁边那套
+ * TapTap 开放平台 MCP 的 list_developers_and_apps —— 那条要 OAuth 授权，于是回答永远变成
+ * 「授权失败 / 请点这条授权链接」。而这个列表本身就是 GET {apiBase}/apps + PAT：
+ * 设置页「查看我的应用」用的就是它，一次授权都不需要，跟 MCP 那套毫无关系。
+ */
+const LOCAL_LIST_TOOL = {
+  name: 'maker_list_apps',
+  description:
+    '列出当前 PAT 名下全部 TapTap Maker 项目（就是设置页的「我的应用」），并标注当前工程已绑定哪一个。' +
+    '这是查询 Maker 项目的唯一正确方式：走 Maker PAT，不需要 OAuth 授权、不需要 git、也不依赖 Maker 子进程。' +
+    '用户问「我的 Maker 项目/应用都有什么」时用它，不要改用 TapTap 开放平台的开发者接口。',
+  inputSchema: { type: 'object', properties: {}, required: [] },
+};
+
+/** 桥自带的本地工具全集（tools/list 时追加给 AI） */
+const LOCAL_TOOLS = [LOCAL_TOOL, LOCAL_LIST_TOOL];
+
+function localTool(name) {
+  return LOCAL_TOOLS.find((t) => t.name === name) || null;
+}
+
+/** 真正干活：读 PAT → GET /apps → 与当前绑定做对照 */
+async function listMakerApps() {
+  const token = readPatToken();
+  if (!token) {
+    return {
+      ok: false,
+      reason:
+        '没有找到 Maker 凭证（pat.json）。到设置 → Maker 面板粘贴 PAT 或扫码登录授权一次即可 —— ' +
+        '这一步与 TapTap 开放平台的 OAuth 授权完全是两回事，不要去点那类授权链接。',
+    };
+  }
+  const base = apiBase();
+  const listed = normalizeProjects(await httpsJson('GET', base + '/apps', token));
+  const curDir = projectDir || cwd;
+  const cur = (curDir && readBinding(curDir)) || null;
+  const boundId = (binding && binding.project_id) || (cur && cur.project_id) || '';
+  const apps = listed.map((p) => ({
+    id: p.id,
+    name: p.name,
+    bound: !!(boundId && p.id === boundId),
+    lastAccessedAt: p.lastAccessedAt || '',
+    createdAt: p.createdAt || '',
+  }));
+  return {
+    ok: true,
+    count: apps.length,
+    api_base: base,
+    bound_project_id: boundId,
+    current_dir: curDir,
+    apps,
+    note: '这是 Maker 项目列表（走 PAT，无需任何授权）。要绑定/新建请用 maker_ensure_project；素材生成类工具会自动完成绑定。',
+  };
+}
+
+/** tools/call 落到本地工具时的统一分发（不进 Maker 子进程） */
+function handleLocalTool(res, msg, tname, tdir) {
+  const args = (msg.params && msg.params.arguments) || {};
+  const fail = (e) => reply(res, msg.id, { ok: false, reason: (e && e.message) || String(e) });
+  if (tname === LOCAL_LIST_TOOL.name) {
+    listMakerApps().then((r) => reply(res, msg.id, r)).catch(fail);
+    return;
+  }
+  ensureBinding(args.dir || tdir, { forceNew: !!args.create }).then((r) => reply(res, msg.id, r)).catch(fail);
+}
+
 function makerHomeDir() {
   return process.env.TAPTAP_MAKER_HOME || path.join(os.homedir(), '.taptap-maker');
 }
@@ -589,6 +658,17 @@ const server = http.createServer((req, res) => {
     // 结果 tname 永远是空串，整个「自动绑定」预检都不会触发。
     const tname = (msg.params && (msg.params.name || (msg.params.tool && msg.params.tool.name))) || '';
 
+    // 桥自带的本地工具：直接自己答，不进子进程。
+    // 特意放在「子进程存活」检查**之前** —— 列 Maker 项目 / 绑定只走 Maker HTTP API（PAT），
+    // 子进程死了它们照样能用。以前放在检查之后，于是 Maker 子进程一挂，连「我的项目有哪些」
+    // 都答不出来，用户看到的就是「明明设置里能查、对话里查不出来」。
+    const tdir0 =
+      (msg.params && msg.params.arguments && msg.params.arguments[targetArg]) || projectDir || cwd;
+    if (msg.method === 'tools/call' && localTool(tname)) {
+      handleLocalTool(res, msg, tname, tdir0);
+      return;
+    }
+
     if (!childAlive) {
       send(res, 503, {
         jsonrpc: '2.0',
@@ -618,13 +698,8 @@ const server = http.createServer((req, res) => {
       return;
     }
 
-    // 桥自带的本地工具：直接自己答，不进子进程
-    if (msg.method === 'tools/call' && tname === LOCAL_TOOL.name) {
-      const forceNew = !!(msg.params.arguments && msg.params.arguments.create);
-      const wantDir = (msg.params.arguments && msg.params.arguments.dir) || tdir;
-      ensureBinding(wantDir, { forceNew }).then((r) => reply(res, msg.id, r));
-      return;
-    }
+    // 本地工具（maker_ensure_project / maker_list_apps）已经在上面、子进程存活检查之前处理完了：
+    // 它们只走 Maker HTTP API，Maker 子进程死着也能答。
 
     forward(msg, res);
   });
@@ -672,11 +747,15 @@ function forward(msg, res) {
 
   pending.set(msg.id, (reply) => {
     clearTimeout(timer);
-    if (method === 'tools/list' && reply && reply.result && Array.isArray(reply.result.tools)) {
-      if (!reply.result.tools.some((t) => t && t.name === LOCAL_TOOL.name)) {
-        reply.result.tools.push(LOCAL_TOOL);
+      if (method === 'tools/list' && reply && reply.result && Array.isArray(reply.result.tools)) {
+        // 桥自带的本地工具（maker_ensure_project / maker_list_apps）追加给 AI。
+        // 注意名字必须以 maker_ 开头：App 侧按前缀判归属，mcp_ 开头会被当成开放平台那套。
+        for (const lt of LOCAL_TOOLS) {
+          if (!reply.result.tools.some((t) => t && t.name === lt.name)) {
+            reply.result.tools.push(lt);
+          }
+        }
       }
-    }
     send(res, 200, reply);
   });
   try {
