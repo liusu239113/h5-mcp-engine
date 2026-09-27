@@ -414,28 +414,36 @@ function setupNodeShim() {
     node = prefix[li + 2] || '';
   }
   if (!node) node = prefix[prefix.length - 1];
-  let dnsfix = '';
-  const ri = childExtra.indexOf('-r');
-  if (ri >= 0 && childExtra[ri + 1]) dnsfix = childExtra[ri + 1];
   if (!ld || !node) return;
-  const sh = fs.existsSync('/system/bin/sh') ? '/system/bin/sh' : '/bin/sh';
+
   const rt = libPath || path.dirname(node);
-  const shimPath = path.join(rt, 'maker-node');
-  const line =
-    'exec "' + ld + '"' +
-    (libPath ? ' --library-path "' + libPath + '"' : '') +
-    ' "' + node + '"' +
-    (childExtra.length ? ' ' + childExtra.join(' ') : '') +
-    ' "$@"\n';
-  const body = '#' + '!' + sh + '\n# Hexora 生成：让子进程也能跑起 musl node（勿手改）\n' + line;
+
+  // ★ 这里曾经写过一个 maker-node 包装脚本，结果是 spawn EACCES：
+  //   安卓只允许从 lib/ 目录（APK 原生库目录，只读）执行文件，
+  //   app 私有数据目录（filesDir）里的脚本**一律 execve 失败**，chmod 755 也没用
+  //   （在 /sdcard 上更彻底：fuse 连权限位都不存，chmod 直接无效）。
+  // 所以现在不落任何脚本，改用「加载器直启」：
+  //   command  = libmuslrt.so（它在 lib/ 里，可执行 ✓）
+  //   args头部 = --library-path <rt> <rt>/node --use-bundled-ca -r <rt>/dnsfix.js
+  // 拼出来就是 App 自己启动 node 时那条命令，子进程/孙进程因此都能跑起来。
+  const pre = [];
+  if (libPath) pre.push('--library-path', libPath);
+  pre.push(node);
+  for (let i = 0; i < childExtra.length; i++) pre.push(childExtra[i]);
+
+  process.env.MAKER_PROXY_EXE = ld;        // 精确补丁用：command 指向加载器
+  process.env.MAKER_PROXY_PRE = pre.join(' '); // 精确补丁用：node + 参数前缀
+  process.env.MAKER_NODE_BIN = ld;         // 兜底补丁用：其它 process.execPath 也走加载器
+  process.env.MAKER_RT_DIR = rt;
+
+  // 清掉 1.9m 留下的那个包装脚本（它跑不起来，留着只会让人误以为在用）
   try {
-    fs.writeFileSync(shimPath, body, 'utf8');
-    fs.chmodSync(shimPath, 0o755);
-    process.env.MAKER_NODE_BIN = shimPath;
-    console.log('[bridge] node 包装就绪: ' + shimPath);
-  } catch (e) {
-    console.error('[bridge] node 包装写入失败: ' + (e && e.message));
-  }
+    const old = path.join(rt, 'maker-node');
+    if (fs.existsSync(old)) fs.unlinkSync(old);
+  } catch (e) { /* 忽略 */ }
+
+  console.log('[bridge] node 加载器就绪（libmuslrt 直启、不落脚本）: ' + ld);
+  console.log('[bridge] 子进程参数前缀: ' + process.env.MAKER_PROXY_PRE);
 }
 
 /**
@@ -445,16 +453,41 @@ function setupNodeShim() {
 function patchMakerScript(script) {
   try {
     if (!script || !fs.existsSync(script)) return 'no script';
-    const src = fs.readFileSync(script, 'utf8');
-    if (src.indexOf('MAKER_NODE_BIN') >= 0) return 'already';
-    const hits = src.match(/process\.execPath/g);
-    if (!hits || !hits.length) return 'no match';
+    let src = fs.readFileSync(script, 'utf8');
     const bak = script + '.hexbak';
     if (!fs.existsSync(bak)) fs.writeFileSync(bak, src, 'utf8');
-    const out = src.split('process.execPath').join('(process.env.MAKER_NODE_BIN||process.execPath)');
-    fs.writeFileSync(script, out, 'utf8');
-    console.log('[bridge] maker.js 已打补丁：process.execPath ×' + hits.length);
-    return 'patched ' + hits.length;
+    const done = [];
+
+    // ① 兜底：把所有 process.execPath 指向 MAKER_NODE_BIN（= libmuslrt 加载器）。
+    //    这一步只改 command，不够 —— 加载器还需要 node 路径，所以下面 ② 才是关键。
+    if (src.indexOf('(process.env.MAKER_NODE_BIN||process.execPath)') < 0) {
+      const hits = (src.match(/process\.execPath/g) || []).length;
+      src = src.split('process.execPath').join('(process.env.MAKER_NODE_BIN||process.execPath)');
+      if (hits) done.push('execPath x' + hits);
+    }
+
+    // ② 关键：embedded MCP proxy（生图/音效/音乐走的就是它）的启动命令。
+    //    原样是  command: process.execPath, args: [makerEntry, "__maker-proxy"]
+    //    我们要变成  command: 加载器, args: [--library-path, rt, node, --CA, -r, dnsfix, makerEntry, __maker-proxy]
+    //    —— 否则只换 command 会让加载器去加载一个 .js，照样秒挂。
+    if (src.indexOf('MAKER_PROXY_EXE') < 0) {
+      const before = src;
+      src = src.replace(
+        /command:\s*(?:\(process\.env\.MAKER_NODE_BIN\s*\|\|\s*)?process\.execPath\)?,/,
+        'command: (process.env.MAKER_PROXY_EXE||process.env.MAKER_NODE_BIN||process.execPath),'
+      );
+      src = src.replace(
+        /args:\s*\[\s*path(\d+)\.resolve\(makerEntry\),\s*"__maker-proxy"\s*\]/,
+        'args: [...((process.env.MAKER_PROXY_PRE||"").split(" ").filter(Boolean)), ' +
+          'path$1.resolve(makerEntry), "__maker-proxy"]'
+      );
+      if (src !== before) done.push('proxy-command');
+    }
+
+    if (!done.length) return 'already';
+    fs.writeFileSync(script, src, 'utf8');
+    console.log('[bridge] maker.js 已打补丁：' + done.join('、'));
+    return 'patched: ' + done.join('、');
   } catch (e) {
     console.error('[bridge] maker.js 打补丁失败: ' + (e && e.message));
     return 'error: ' + (e && e.message);
