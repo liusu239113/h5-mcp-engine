@@ -3716,6 +3716,44 @@ class MainActivity : AppCompatActivity(), GameUi {
     }
 
     /** 图片预览用内置全屏；音频 / 视频交给系统播放器 */
+    /**
+     * 视频：App 内全屏直接播，不再依赖系统里有没有播放器。
+     * 点任意处 / 播完 = 关闭。
+     */
+    private fun playVideoDialog(f: File) {
+        val vv = android.widget.VideoView(this)
+        val d = Dialog(this, android.R.style.Theme_Black_NoTitleBar_Fullscreen)
+        val wrap = FrameLayout(this).apply { setBackgroundColor(0xFF000000.toInt()) }
+        runCatching {
+            vv.setVideoPath(f.absolutePath)
+            vv.setOnPreparedListener {
+                it.isLooping = false
+                runCatching { vv.start() }
+            }
+            vv.setOnCompletionListener { runCatching { d.dismiss() } }
+            vv.setOnErrorListener { _, _, _ ->
+                toast("这个视频播不了（编码不支持？）")
+                runCatching { d.dismiss() }
+                true
+            }
+        }.onFailure { toast("播放失败：${it.message}") }
+        wrap.addView(vv, FrameLayout.LayoutParams(-1, -1))
+        wrap.addView(
+            TextView(this).apply {
+                text = "点任意处关闭"
+                textSize = 12f
+                setTextColor(0x99FFFFFF.toInt())
+                gravity = Gravity.CENTER
+                setPadding(0, 0, 0, dp(24))
+            },
+            FrameLayout.LayoutParams(-1, -2, Gravity.BOTTOM)
+        )
+        wrap.setOnClickListener { runCatching { d.dismiss() } }
+        d.setContentView(wrap)
+        d.show()
+        d.window?.setLayout(-1, -1)
+    }
+
     private fun previewFile(f: File, kind: String) {
         if (kind == "image") {
             val bmp = runCatching { BitmapFactory.decodeFile(f.absolutePath) }.getOrNull()
@@ -3738,6 +3776,11 @@ class MainActivity : AppCompatActivity(), GameUi {
             d.setContentView(wrap)
             d.show()
             d.window?.setLayout(-1, -1)
+        } else if (kind == "audio") {
+            // App 内直接放（以前交给系统外部应用，没有能接 mime 的机器点了就是没反应）
+            playAudio(f)
+        } else if (kind == "video") {
+            playVideoDialog(f)
         } else {
             val uri = runCatching {
                 FileProvider.getUriForFile(this, "$packageName.files", f)
