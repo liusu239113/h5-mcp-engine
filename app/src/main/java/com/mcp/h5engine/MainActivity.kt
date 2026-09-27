@@ -180,7 +180,7 @@ class MainActivity : AppCompatActivity(), GameUi {
         }
 
         titleTv = TextView(this).apply {
-            text = "H5 游戏工作台"
+            text = "Hexora"
             setTextColor(pal.text)
             textSize = 17f
             typeface = Typeface.DEFAULT_BOLD
@@ -1061,7 +1061,7 @@ class MainActivity : AppCompatActivity(), GameUi {
     private fun refreshHeader() {
         val cfg = cfgStore.active()
         val skill = SkillPresets.byId(cfgStore.skillId)
-        titleTv.text = "H5 游戏工作台"
+        titleTv.text = "Hexora"
         subTv.text = buildString {
             append("当前游戏 $currentGame")
             append("  ·  ${cfg.provider.label} / ${cfg.modelLabel}")
