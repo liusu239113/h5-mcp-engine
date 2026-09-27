@@ -86,6 +86,36 @@ class AiConfigStore(ctx: Context) {
             sp.edit().putString("skill", v).apply()
         }
 
+    // ==================== 请求体积自适应（适配各家的 TPM / 上下文上限） ====================
+
+    /** 输出上限 max_tokens；0 = 不发送（交服务商决定）。免费档/TPM 小的模型要调小 */
+    var maxOutTokens: Int
+        get() = sp.getInt("max_out", 0)
+        set(v) {
+            sp.edit().putInt("max_out", v.coerceIn(0, 65536)).apply()
+        }
+
+    /** 历史最多保留多少条消息（system 除外）。工具往返很占 token，默认 40 */
+    var historyLimit: Int
+        get() = sp.getInt("hist_limit", 40)
+        set(v) {
+            sp.edit().putInt("hist_limit", v.coerceIn(4, 500)).apply()
+        }
+
+    /** 是否把工具定义发给模型（50+ 个工具 JSON 是 token 大头） */
+    var sendTools: Boolean
+        get() = sp.getBoolean("send_tools", true)
+        set(v) {
+            sp.edit().putBoolean("send_tools", v).apply()
+        }
+
+    /** 遇到 413 / TPM / 上下文超限时自动精简重试 */
+    var autoSlim: Boolean
+        get() = sp.getBoolean("auto_slim", true)
+        set(v) {
+            sp.edit().putBoolean("auto_slim", v).apply()
+        }
+
     // ==================== 各家独立配置 ====================
 
     fun keyOf(id: String): String = sp.getString("key_$id", "") ?: ""
@@ -138,7 +168,11 @@ class AiConfigStore(ctx: Context) {
             modelLabel = AiProviders.modelLabel(p, m),
             temperature = temperature,
             maxSteps = maxSteps,
-            vision = visionFor(p, m)
+            vision = visionFor(p, m),
+            maxOutTokens = maxOutTokens,
+            historyLimit = historyLimit,
+            sendTools = sendTools,
+            autoSlim = autoSlim
         )
     }
 
@@ -152,7 +186,11 @@ class AiConfigStore(ctx: Context) {
             modelLabel = AiProviders.modelLabel(p, model),
             temperature = temperature,
             maxSteps = maxSteps,
-            vision = visionFor(p, model)
+            vision = visionFor(p, model),
+            maxOutTokens = maxOutTokens,
+            historyLimit = historyLimit,
+            sendTools = sendTools,
+            autoSlim = autoSlim
         )
 
     companion object {

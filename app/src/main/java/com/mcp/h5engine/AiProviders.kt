@@ -33,7 +33,19 @@ data class ProviderConfig(
     val temperature: Double,
     val maxSteps: Int,
     /** 当前模型是否走多模态：截图直接作为图片喂给模型 */
-    val vision: Boolean
+    val vision: Boolean,
+    /**
+     * 输出上限（max_tokens）。0 = 不发送，由服务商按其模型上限预扣。
+     * 免费档 / TPM 小的厂商（Groq 免费 8000 TPM、智谱、部分中转）必须调小，
+     * 否则一条「工具定义 + 历史」就能把单次请求顶过限额（413 / 429）。
+     */
+    val maxOutTokens: Int = 0,
+    /** 历史上限：首条 system + 最近 N 条消息。越小请求越轻 */
+    val historyLimit: Int = 40,
+    /** 是否携带工具定义。50+ 个工具的 JSON 是 token 大头，关掉最省（AI 就不能调工具） */
+    val sendTools: Boolean = true,
+    /** 遇 413 / TPM / 上下文超限时，自动精简请求并重试 */
+    val autoSlim: Boolean = true
 )
 
 /**

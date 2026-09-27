@@ -1886,10 +1886,13 @@ class MainActivity : AppCompatActivity(), GameUi {
     // ==================== 拉取厂商真实模型列表 ====================
 
     /** 预设永远追不上厂商改名，这里直接问厂商「你现在有哪些模型」 */
-    private fun fetchModels(p: Provider, onPicked: ((String) -> Unit)? = null) {
-        val key = cfgStore.keyOf(p.id)
+    private fun fetchModels(p: Provider, keyOverride: String? = null, onPicked: ((String) -> Unit)? = null) {
+        // 优先用「输入框里当下填的 Key」，其次才回退到已保存的。
+        // 老代码只读已保存值 → 用户刚粘贴完、还没点「保存」就点「拉取」，
+        // 会被判成「没填 Key」，于是出现「明明填了却提示先去设置里填」的鬼打墙。
+        val key = keyOverride?.trim()?.takeIf { it.isNotBlank() } ?: cfgStore.keyOf(p.id)
         if (key.isBlank() && !p.baseUrl.contains("127.0.0.1")) {
-            toast("先在设置里填好 ${p.label} 的 Key")
+            toast("请先在下面输入框填好 ${p.label} 的 Key（没保存也行，拉取会直接用它）")
             return
         }
         toast("正在拉取 ${p.label} 的模型列表…")
@@ -3428,7 +3431,8 @@ makerRow1.addView(ghostBtnOf(ctx, pal, "扫码登录").apply {
             })
         }
         pickRow.setOnClickListener {
-            fetchModels(curProvider) { picked ->
+            // 把输入框里的 Key 直接传进去：用户刚粘贴、还没点保存时也能拉取
+            fetchModels(curProvider, keyEt.text?.toString().orEmpty()) { picked ->
                 modelEt.setText(picked)
                 pickText.text = "已选 · $picked"
                 pickText.setTextColor(pal.accent)
@@ -3490,6 +3494,51 @@ makerRow1.addView(ghostBtnOf(ctx, pal, "扫码登录").apply {
             isChecked = cfgStore.visionFallback
         }
         col.addView(fbCb, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(8) })
+
+        // ---------- 请求体积（适配免费档 / 小配额模型） ----------
+        section("请求体积（免费档 / 小配额模型必调）")
+        col.addView(TextView(ctx).apply {
+            text = "很多模型有「每分钟 token 上限」（如 Groq 免费档 8000 TPM）。" +
+                "工具清单 + 历史一多，请求就会被判超限（413/429/余额不足）。" +
+                "下面几项越小越省 token。"
+            textSize = 11.5f
+            setTextColor(pal.faint)
+        }, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(4) })
+
+        val maxOutEt = input(
+            "输出上限 max_tokens（0 = 交给服务商决定）",
+            cfgStore.maxOutTokens.toString(), true
+        )
+        col.addView(maxOutEt, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(6) })
+
+        val histEt = input("历史条数上限（只带最近 N 条消息）", cfgStore.historyLimit.toString(), true)
+        col.addView(histEt, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(6) })
+
+        val sendToolsCb = CheckBox(ctx).apply {
+            text = "把工具清单发给模型（关掉最省 token，但 AI 不能调用工具/生图）"
+            textSize = 12.5f
+            setTextColor(pal.text)
+            isChecked = cfgStore.sendTools
+        }
+        col.addView(sendToolsCb, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(8) })
+
+        val autoSlimCb = CheckBox(ctx).apply {
+            text = "遇 413/超限时自动精简并重试（推荐开）"
+            textSize = 12.5f
+            setTextColor(pal.text)
+            isChecked = cfgStore.autoSlim
+        }
+        col.addView(autoSlimCb, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(4) })
+
+        col.addView(ghostBtnOf(ctx, pal, "按当前厂商一键省 token（输出 512 / 历史 12 / 关工具）").apply {
+            setOnClickListener {
+                maxOutEt.setText("512")
+                histEt.setText("12")
+                sendToolsCb.isChecked = false
+                autoSlimCb.isChecked = true
+                toast("已填入省 token 参数，点「保存」生效")
+            }
+        }, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(6) })
 
 
         provSp.onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {
@@ -3641,6 +3690,10 @@ makerRow1.addView(ghostBtnOf(ctx, pal, "扫码登录").apply {
                 cfgStore.maxSteps = stepsEt.text.toString().toIntOrNull() ?: 400
                 cfgStore.visionFallback = fbCb.isChecked
                 cfgStore.visionMode = visIds[visSel]
+                cfgStore.maxOutTokens = maxOutEt.text.toString().toIntOrNull() ?: 0
+                cfgStore.historyLimit = histEt.text.toString().toIntOrNull() ?: 40
+                cfgStore.sendTools = sendToolsCb.isChecked
+                cfgStore.autoSlim = autoSlimCb.isChecked
                 val oldTheme = cfgStore.themeMode
                 cfgStore.themeMode = themeIds[themeSel]
                 // 保存设置绝对不能顺手清空对话——用户只是来调个参数

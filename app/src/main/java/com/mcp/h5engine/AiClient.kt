@@ -139,34 +139,52 @@ class AiClient(private val cfg: ProviderConfig) {
 
     fun chat(rawHistory: List<ChatMsg>, tools: List<JSONObject>): ChatReply {
         aborted = false
-        val history = sanitizeHistory(rawHistory)
+        val history = limitHistory(sanitizeHistory(rawHistory))
+        // 设置里可以直接关掉工具定义：50+ 个工具的 JSON 是 token 大头，
+        // 免费档模型（Groq 8000 TPM 这类）关掉立刻就能用。
+        val toolsUse = if (cfg.sendTools) tools else emptyList()
         val base = when (cfg.provider.protocol) {
-            Protocol.OPENAI -> bodyOpenAi(history, tools)
-            Protocol.ANTHROPIC -> bodyAnthropic(history, tools)
-            Protocol.GEMINI -> bodyGemini(history, tools)
+            Protocol.OPENAI -> bodyOpenAi(history, toolsUse)
+            Protocol.ANTHROPIC -> bodyAnthropic(history, toolsUse)
+            Protocol.GEMINI -> bodyGemini(history, toolsUse)
         }
-        // 「余额/额度」类错误原样重试没有意义（余额、请求体量都没变），
-        // 必须换一种形状再试：去掉工具定义、把输出 token 压小。
-        // 这能救回「账户其实有钱、只是这条请求被服务商判超额」的情况。
+        // 出错后「原样重试」几乎没用（余额、请求体量都没变），必须换一种形状再试：
+        //   ① 换出口：绕过系统代理直连
+        //   ② 变小：去掉工具定义 + 压小输出上限
+        //   ③ 再小：连历史一起砍到最近几条
         var body = base
         var lightTried = false
+        var ultraTried = false
         var directTried = false
         var direct = false
 
         var last: ChatReply = ChatReply(null, emptyList(), "未发起请求")
-        for (attempt in 1..3) {
+        for (attempt in 1..4) {
             val r = once(body, direct)
             last = r
             val err = r.error
             if (err == null) return r          // 成功
             if (aborted) return ChatReply(null, emptyList(), "已取消")   // 用户点了停止
-            // 头号嫌疑：手机开着 VPN / 代理类 App，Android 系统代理被 OkHttp 继承，
-            // 请求根本没到服务商，是代理层回的 402 —— 和「余额不足」长得一样。
-            // 先绕过代理解析直连再试一次（同样的 key、同样的请求体，只换出口）。
+            // ① 手机开着 VPN / 代理类 App 时，OkHttp 会继承 Android 系统代理，
+            // 请求可能根本没到服务商，是代理层回的错误（402/413 都见过）。
             if (!direct && !directTried && systemProxyInUse()) {
                 directTried = true
                 direct = true
                 continue
+            }
+            // ②③ 请求体积超限（413 / TPM / 上下文超长）：越试越小。
+            // 这是免费档/小模型最常见的失败，重试同一个请求永远是同一个错。
+            if (cfg.autoSlim && isTooLargeError(err)) {
+                if (!lightTried) {
+                    lightTried = true
+                    body = lightweight(base)
+                    continue
+                }
+                if (!ultraTried) {
+                    ultraTried = true
+                    body = ultraLight(lightweight(base))
+                    continue
+                }
             }
             if (isBalanceError(err) && !lightTried) {
                 lightTried = true
@@ -174,11 +192,30 @@ class AiClient(private val cfg: ProviderConfig) {
                 continue                        // 立刻换轻量请求再试，不 sleep
             }
             if (!isTransient(err)) return r    // 硬错误（鉴权/模型名）不重试
-            if (attempt < 3) {
+            if (attempt < 4) {
                 runCatching { Thread.sleep(if (attempt == 1) 500L else 1500L) }
             }
         }
         return last
+    }
+
+    /** 历史裁剪：保留首条 system + 最近 historyLimit 条。上下文超长时的第一道闸 */
+    private fun limitHistory(src: List<ChatMsg>): List<ChatMsg> {
+        val limit = cfg.historyLimit.coerceAtLeast(4)
+        if (src.size <= limit + 1) return src
+        val head = src.firstOrNull()?.takeIf { it.role == "system" }
+        return if (head != null) listOf(head) + src.drop(1).takeLast(limit)
+        else src.takeLast(limit)
+    }
+
+    /** 请求体积超限：413 / TPM 限流 / 上下文超长。这类错误必须换小请求，重试同一条没意义 */
+    private fun isTooLargeError(err: String): Boolean {
+        val e = err.lowercase()
+        return e.contains("http 413") || e.contains("http413") ||
+            e.contains("request too large") || e.contains("tokens per minute") ||
+            e.contains("rate_limit_exceeded") || e.contains("context length") ||
+            e.contains("maximum context") || e.contains("too many tokens") ||
+            e.contains("reduce your message size") || e.contains("tpm")
     }
 
     /** 余额 / 额度类错误（只有这类才值得降级重试） */
@@ -198,6 +235,30 @@ class AiClient(private val cfg: ProviderConfig) {
         o.remove("tool_choice")
         when (cfg.provider.protocol) {
             Protocol.OPENAI, Protocol.ANTHROPIC -> o.put("max_tokens", 512)
+            Protocol.GEMINI -> {}
+        }
+        return o
+    }
+
+    /**
+     * 最狠的一档：只剩「系统提示 + 最近 6 条消息 + 256 输出」。
+     * 专治 413 / TPM 超限（Groq 免费档 8000 TPM、部分中转 4k 上下文之类）。
+     * 代价是 AI 会「忘掉」细节，所以只在自动降级链的最后一步用。
+     */
+    private fun ultraLight(body: JSONObject): JSONObject {
+        val o = JSONObject(body.toString())
+        o.remove("tools")
+        o.remove("tool_choice")
+        val msgs = o.optJSONArray("messages")
+        if (msgs != null && msgs.length() > 6) {
+            val arr = JSONArray()
+            val first = msgs.optJSONObject(0)
+            if (first != null && first.optString("role") == "system") arr.put(first)
+            for (i in (msgs.length() - 6).coerceAtLeast(0) until msgs.length()) arr.put(msgs.get(i))
+            o.put("messages", arr)
+        }
+        when (cfg.provider.protocol) {
+            Protocol.OPENAI, Protocol.ANTHROPIC -> o.put("max_tokens", 256)
             Protocol.GEMINI -> {}
         }
         return o
@@ -351,8 +412,25 @@ class AiClient(private val cfg: ProviderConfig) {
                 e.contains("http 404") ->
                     "找不到接口或模型（404）。\n→ 多半是 Base URL 或模型名写错了，用「测试连通」验证。"
 
-                e.contains("http 429") ->
-                    "请求太频繁或超出配额（429）。\n→ 等一会儿再试，或换一家模型。"
+                e.contains("http 413") || e.contains("http413") ||
+                    e.contains("request too large") || e.contains("tokens per minute") ->
+                    "这条请求超过了该模型能收的大小（413 / TPM 限流 / 上下文超长）。\n" +
+                        "→ App 已自动精简并重试（先去工具定义，再砍历史，最后压小输出）。\n" +
+                        "→ 想彻底避免：设置里把「输出上限」「历史条数」调小，或关掉「发送工具定义」" +
+                        "（50+ 个工具的清单本身就是几万 token，关掉最省）。\n原文：" + err.take(300)
+
+                e.contains("http 429") -> {
+                    // 429 有两层意思：「太频繁」和「这个账号没额度了」。
+                    // 智谱/部分中转在余额为 0 时也用 429 表达（code 1113「账户已欠费」），
+                    // 一律翻译成「请求太频繁」会让人完全找不到北。
+                    val quota = e.contains("欠费") || e.contains("余额") || e.contains("充值") ||
+                        e.contains("insufficient") || e.contains("balance") || e.contains("1113")
+                    if (quota)
+                        "额度已用尽（429，服务商原文见下）。\n" +
+                            "→ 到服务商后台看「余额 / 用量 / 免费额度是否过期」。\n原文：" + err.take(240)
+                    else
+                        "请求太频繁或超出限流（429）。\n→ 等一会儿再试，或换一家模型。\n原文：" + err.take(240)
+                }
 
                 e.matches(Regex(".*http 5\\d\\d.*")) ->
                     "服务端故障（5xx），不是你的问题。\n→ 换一家或过会儿再试。"
@@ -423,6 +501,10 @@ class AiClient(private val cfg: ProviderConfig) {
             .put("messages", msgs)
             .put("temperature", cfg.temperature)
 
+        // 输出上限：设置里调（0 = 不发送，交服务商决定）。
+        // 注意很多厂商会按 max_tokens 预扣额度，调小它同时能救「余额不足」与「TPM 超限」。
+        if (cfg.maxOutTokens > 0) out.put("max_tokens", cfg.maxOutTokens)
+
         if (tools.isNotEmpty()) {
             out.put("tools", JSONArray(tools.toTypedArray()))
             out.put("tool_choice", "auto")
@@ -452,7 +534,8 @@ class AiClient(private val cfg: ProviderConfig) {
         val out = JSONObject()
             .put("model", cfg.model)
             .put("messages", msgs)
-            .put("max_tokens", 8192)
+            // 输出上限：设置里可调；默认 4096（原来硬编码 8192，免费档/小配额模型容易被判超额）
+            .put("max_tokens", if (cfg.maxOutTokens > 0) cfg.maxOutTokens else 4096)
             .put("temperature", cfg.temperature)
 
         if (system.isNotBlank()) out.put("system", system)
@@ -573,7 +656,8 @@ class AiClient(private val cfg: ProviderConfig) {
             .put("contents", contents)
             .put(
                 "generationConfig",
-                JSONObject().put("temperature", cfg.temperature).put("maxOutputTokens", 8192)
+                JSONObject().put("temperature", cfg.temperature)
+                    .put("maxOutputTokens", if (cfg.maxOutTokens > 0) cfg.maxOutTokens else 4096)
             )
 
         if (system.isNotBlank()) {
