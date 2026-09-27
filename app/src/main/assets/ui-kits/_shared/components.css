@@ -1,0 +1,161 @@
+/* ==========================================================================
+   Hexora 游戏 UI 组件层（所有风格包共用）
+
+   铁律：本文件**不允许出现任何字面色值**，一切颜色 / 圆角 / 字体 / 阴影
+   都来自 theme.css 里的 var(--hx-*)。换肤 = 换一个 theme.css，界面结构一行不改。
+   ========================================================================== */
+
+.hx-root {
+  min-height: 100%;
+  background: var(--hx-bg);
+  background-image: var(--hx-bg-image);
+  background-attachment: fixed;
+  color: var(--hx-text);
+  font-family: var(--hx-font);
+  font-size: 15px;
+  line-height: 1.55;
+  -webkit-user-select: none;
+  user-select: none;
+  padding: calc(12px + env(safe-area-inset-top)) calc(12px + env(safe-area-inset-right))
+           calc(12px + env(safe-area-inset-bottom)) calc(12px + env(safe-area-inset-left));
+}
+.hx-root *{ box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+.hx-root img, .hx-root canvas { image-rendering: var(--hx-img-render); }
+
+/* ---------- 布局小工具（够用就行，别自己再造一套） ---------- */
+.hx-col { display: flex; flex-direction: column; gap: var(--hx-gap); }
+.hx-row { display: flex; align-items: center; gap: var(--hx-gap); }
+.hx-row--between { justify-content: space-between; }
+.hx-grow { flex: 1; }
+.hx-center { display: grid; place-items: center; }
+.hx-hide { display: none !important; }
+
+/* ---------- 面板：四角装饰由风格包决定（水墨给卷草角，像素/卡通给 none） ---------- */
+.hx-panel {
+  position: relative;
+  background: var(--hx-panel);
+  border: var(--hx-border-w) solid var(--hx-border);
+  border-radius: var(--hx-radius);
+  box-shadow: var(--hx-shadow);
+  padding: var(--hx-pad);
+  backdrop-filter: var(--hx-blur, none);
+  -webkit-backdrop-filter: var(--hx-blur, none);
+}
+.hx-panel--flat { box-shadow: none; background: var(--hx-panel-2); }
+.hx-panel::before, .hx-panel::after {
+  content: "";
+  position: absolute;
+  width: 15px; height: 15px;
+  background: var(--hx-corner) no-repeat center / contain;
+  pointer-events: none;
+}
+.hx-panel::before { left: -3px; top: -3px; }
+.hx-panel::after { right: -3px; bottom: -3px; transform: rotate(180deg); }
+
+/* ---------- 标题 ---------- */
+.hx-title {
+  font-family: var(--hx-font-title);
+  font-weight: var(--hx-title-w);
+  letter-spacing: var(--hx-title-ls);
+  font-size: 22px;
+  margin: 0 0 10px;
+  color: var(--hx-text);
+}
+.hx-title--accent { color: var(--hx-accent); }
+.hx-sub { color: var(--hx-text-dim); font-size: 13px; }
+.hx-hr { height: var(--hx-border-w); background: var(--hx-border); opacity: .35; margin: 10px 0; border: 0; }
+
+/* ---------- 按钮 ---------- */
+.hx-btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+  min-height: 44px; min-width: 96px; padding: 0 18px;
+  background: var(--hx-btn-bg);
+  color: var(--hx-btn-text);
+  border: var(--hx-border-w) solid var(--hx-btn-border);
+  border-radius: var(--hx-radius);
+  box-shadow: var(--hx-shadow-btn);
+  font-family: var(--hx-font); font-size: 16px; letter-spacing: var(--hx-btn-ls);
+  cursor: pointer; touch-action: manipulation; user-select: none;
+  transition: var(--hx-transition);
+}
+.hx-btn:active { transform: translateY(2px); box-shadow: none; filter: brightness(.95); }
+.hx-btn--primary { background: var(--hx-accent); color: var(--hx-on-accent); border-color: var(--hx-accent-2); }
+.hx-btn--ghost { background: transparent; color: var(--hx-text-dim); box-shadow: none; }
+.hx-btn--danger { background: var(--hx-danger); color: var(--hx-on-accent); }
+.hx-btn[disabled] { opacity: .45; pointer-events: none; }
+.hx-btn--wide { width: 100%; }
+
+/* ---------- 数值条（血 / 气 / 经验 / 进度） ---------- */
+.hx-bar {
+  height: 14px; overflow: hidden;
+  background: var(--hx-panel-2);
+  border: var(--hx-border-w) solid var(--hx-border);
+  border-radius: var(--hx-radius-sm);
+}
+.hx-bar > i {
+  display: block; height: 100%; width: 0;
+  background: linear-gradient(90deg, var(--hx-danger), var(--hx-accent));
+  transition: width .18s ease-out;
+}
+.hx-bar--exp > i { background: linear-gradient(90deg, var(--hx-accent), var(--hx-accent-2)); }
+
+/* ---------- 背包格 / 列表项 ---------- */
+.hx-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(58px, 1fr)); gap: 8px; }
+.hx-slot {
+  aspect-ratio: 1 / 1; display: grid; place-items: center; position: relative;
+  background: var(--hx-panel-2);
+  border: var(--hx-border-w) solid var(--hx-border);
+  border-radius: var(--hx-radius-sm);
+}
+.hx-slot--on { outline: 2px solid var(--hx-accent); outline-offset: 2px; }
+.hx-slot__count {
+  position: absolute; right: 2px; bottom: 1px;
+  font-size: 11px; color: var(--hx-text); text-shadow: none;
+  padding: 0 3px; background: var(--hx-panel);
+  border-radius: var(--hx-radius-sm);
+}
+
+/* ---------- 徽章 / 页签 / 提示 ---------- */
+.hx-badge {
+  display: inline-block; padding: 2px 8px; font-size: 12px;
+  background: var(--hx-accent); color: var(--hx-on-accent);
+  border-radius: var(--hx-radius-sm); letter-spacing: var(--hx-btn-ls);
+}
+.hx-badge--dim { background: var(--hx-panel-2); color: var(--hx-text-dim); }
+.hx-tabs { display: flex; gap: var(--hx-gap); border-bottom: var(--hx-border-w) solid var(--hx-border); }
+.hx-tab { flex: 1; text-align: center; padding: 9px 0; color: var(--hx-text-dim); border-bottom: 2px solid transparent; }
+.hx-tab--on { color: var(--hx-accent); border-bottom-color: var(--hx-accent); }
+.hx-toast {
+  position: fixed; left: 50%; bottom: 16%; transform: translateX(-50%);
+  padding: 8px 16px; z-index: 60;
+  background: var(--hx-panel); color: var(--hx-text);
+  border: var(--hx-border-w) solid var(--hx-border);
+  border-radius: var(--hx-radius-sm);
+  box-shadow: var(--hx-shadow);
+  animation: hx-in .18s ease-out;
+}
+@keyframes hx-in { from { opacity: 0; transform: translate(-50%, 6px); } to { opacity: 1; transform: translate(-50%, 0); } }
+
+/* ---------- 弹窗（禁止用 alert 当弹窗） ---------- */
+.hx-mask {
+  position: fixed; inset: 0; z-index: 50;
+  background: var(--hx-mask);
+  display: grid; place-items: center;
+}
+.hx-dialog { width: min(86vw, 420px); animation: hx-in .18s ease-out; }
+.hx-dialog__foot { display: flex; gap: var(--hx-gap); margin-top: var(--hx-pad); }
+.hx-dialog__foot .hx-btn { flex: 1; }
+
+/* ---------- 摇杆（虚拟方向键，游戏世界才用 canvas，UI 用 DOM） ---------- */
+.hx-joystick {
+  position: fixed; left: calc(16px + env(safe-area-inset-left)); bottom: calc(20px + env(safe-area-inset-bottom));
+  width: 118px; height: 118px; border-radius: 50%;
+  background: var(--hx-panel-2);
+  border: var(--hx-border-w) solid var(--hx-border);
+  box-shadow: var(--hx-shadow);
+  touch-action: none;
+}
+.hx-joystick__knob {
+  position: absolute; left: 50%; top: 50%; width: 46px; height: 46px; margin: -23px 0 0 -23px;
+  border-radius: 50%; background: var(--hx-accent); opacity: .9;
+}

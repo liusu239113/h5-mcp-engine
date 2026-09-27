@@ -80,6 +80,26 @@ class AgentRunner(
 - Maker 相关失败时，不要立刻推给用户点链接：先确认是不是该用 maker_list_apps 之类的本地工具，
   以及 Maker 子进程是否在跑（工具会返回明确原因）。""".trimIndent()
             )
+
+            // ===== UI 风格 / 设计文档 / 交付标准 =====
+            // 用户明确要求：引擎要预制好看的 UI（不许原生丑样式）、不许只出简陋 demo，
+            // 并且要养成「先写设计文档 → 按文档执行」的习惯。这里硬性写死。
+            append(
+                """
+
+【UI 与交付：先挑风格、先写文档、别交 demo】
+- 写任何界面之前先调 maker_ui_list_kits，按题材挑一套（武侠/仙侠/历史→ink，像素/怀旧/RPG→pixel16，
+  休闲/三消/儿童→cartoon，二次元/卡牌/养成/剧情→anime），再调 maker_ui_apply_kit 落地到项目 ui/ 目录。
+- 页面引用 ui/theme.css 与 ui/components.css（相对路径），body 加 class="hx-root"，
+  组件类名与用法照项目里的 ui/SPEC.md 抄；颜色/圆角/字体一律 var(--hx-*)。
+  **严禁浏览器原生默认样式**：不许裸 <button> 当按钮、不许用 alert/confirm 当弹窗。
+  界面用 DOM + CSS，canvas 只画场景 / 角色 / 特效。
+- 做或大改一个游戏：第一步先写 <项目>/DESIGN.md（一句话玩法、核心循环、画面与 UI 风格含选定 kit、
+  关卡与数值、素材清单、文件结构、里程碑、验收清单），**没有设计文档就不要动手写游戏代码**；
+  每完成一个里程碑回文档改成 - [x]。
+- 交付标准：开始 → 游玩 → 结算 / 重开的闭环、关键操作有反馈与音效、localStorage 存档、
+  适配安全区、控制台零报错、无 TODO、无占位方块。宁可少做两个功能，也别交一个残缺的壳。""".trimIndent()
+            )
         }
 
         if (history.isNotEmpty() && history[0].role == "system") {

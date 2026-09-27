@@ -1,0 +1,35 @@
+:root {
+  /* 动漫玻璃：深色渐变 + 毛玻璃 + 冷光描边。适配二次元 / 卡牌 / 养成 / 剧情题材。 */
+  --hx-bg: #151a2e;
+  --hx-bg-image: linear-gradient(160deg, #1d2545 0%, #2b2350 45%, #40255c 100%);
+  --hx-panel: rgba(255, 255, 255, .09);
+  --hx-panel-2: rgba(255, 255, 255, .05);
+  --hx-border: rgba(255, 255, 255, .28);
+  --hx-border-w: 1px;
+  --hx-radius: 16px;
+  --hx-radius-sm: 10px;
+  --hx-corner: none;
+  --hx-text: #f4f6ff;
+  --hx-text-dim: #b7bfe0;
+  --hx-accent: #7ad0ff;
+  --hx-accent-2: #5aa8ff;
+  --hx-on-accent: #0d1226;
+  --hx-danger: #ff6b8b;
+  --hx-ok: #6be0b0;
+  --hx-font: "PingFang SC", "HarmonyOS Sans", "Noto Sans CJK SC", system-ui, sans-serif;
+  --hx-font-title: var(--hx-font);
+  --hx-title-w: 600;
+  --hx-title-ls: .06em;
+  --hx-btn-ls: .04em;
+  --hx-btn-bg: rgba(255, 255, 255, .14);
+  --hx-btn-border: rgba(255, 255, 255, .3);
+  --hx-btn-text: #f4f6ff;
+  --hx-shadow: 0 8px 28px rgba(0, 0, 0, .4);
+  --hx-shadow-btn: 0 4px 14px rgba(0, 0, 0, .35);
+  --hx-blur: blur(14px);
+  --hx-mask: rgba(10, 14, 30, .6);
+  --hx-pad: 16px;
+  --hx-gap: 12px;
+  --hx-img-render: auto;
+  --hx-transition: all .2s ease-out;
+}

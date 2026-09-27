@@ -1,0 +1,12 @@
+{
+  "id": "pixel16",
+  "name": "像素复古",
+  "scenes": ["像素", "复古", "怀旧", "红白机", "闯关", "rpg", "地牢", "街机"],
+  "mood": "硬边零圆角 · 无抗锯齿 · 低饱和配色",
+  "rules": [
+    "圆角必须为 0；任何 border-radius 都不许出现",
+    "canvas 里要关平滑：ctx.imageSmoothingEnabled = false",
+    "图片走 image-rendering: pixelated（已在 --hx-img-render 里设好）",
+    "字号用等宽字体，别用系统圆体"
+  ]
+}

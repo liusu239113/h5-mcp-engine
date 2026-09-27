@@ -1,0 +1,35 @@
+:root {
+  /* 水墨国风：宣纸底 + 墨笔描边 + 朱红点睛。适配武侠 / 仙侠 / 历史题材。 */
+  --hx-bg: #ece3d0;
+  --hx-bg-image: radial-gradient(120% 90% at 18% 0%, #f8f2e4 0%, #e8ddc6 55%, #d8cbb0 100%);
+  --hx-panel: rgba(252, 248, 238, .88);
+  --hx-panel-2: rgba(232, 222, 203, .78);
+  --hx-border: #4a3f34;
+  --hx-border-w: 2px;
+  --hx-radius: 4px;
+  --hx-radius-sm: 2px;
+  --hx-corner: url("assets/corner.svg");
+  --hx-text: #2b241d;
+  --hx-text-dim: #7a6c5c;
+  --hx-accent: #a8322a;
+  --hx-accent-2: #8c241d;
+  --hx-on-accent: #fbf6ec;
+  --hx-danger: #8f2f26;
+  --hx-ok: #5d7a4a;
+  --hx-font: "Kaiti SC", "STKaiti", "KaiTi", "Songti SC", "Noto Serif CJK SC", serif;
+  --hx-font-title: var(--hx-font);
+  --hx-title-w: 600;
+  --hx-title-ls: .16em;
+  --hx-btn-ls: .12em;
+  --hx-btn-bg: rgba(255, 252, 245, .94);
+  --hx-btn-border: #5a4c3e;
+  --hx-btn-text: #33291f;
+  --hx-shadow: 0 2px 0 rgba(74, 63, 52, .32), 0 6px 16px rgba(90, 76, 62, .14);
+  --hx-shadow-btn: 0 2px 0 rgba(74, 63, 52, .38);
+  --hx-blur: none;
+  --hx-mask: rgba(43, 36, 29, .45);
+  --hx-pad: 14px;
+  --hx-gap: 10px;
+  --hx-img-render: auto;
+  --hx-transition: all .16s ease-out;
+}

@@ -1,0 +1,36 @@
+:root {
+  /* 卡通圆润：大圆角 + 粗描边 + 高饱和。适配休闲 / 三消 / 儿童 / 解压题材。 */
+  --hx-bg: #fff6e5;
+  --hx-bg-image: radial-gradient(circle at 12% 8%, #ffe9b0 0 18%, transparent 19%),
+                 radial-gradient(circle at 88% 22%, #cdefff 0 14%, transparent 15%);
+  --hx-panel: #ffffff;
+  --hx-panel-2: #fff1cf;
+  --hx-border: #3b3b3b;
+  --hx-border-w: 3px;
+  --hx-radius: 22px;
+  --hx-radius-sm: 14px;
+  --hx-corner: none;
+  --hx-text: #3b3b3b;
+  --hx-text-dim: #8b8b8b;
+  --hx-accent: #ff8a3d;
+  --hx-accent-2: #e96f1f;
+  --hx-on-accent: #ffffff;
+  --hx-danger: #ff5f6d;
+  --hx-ok: #43c463;
+  --hx-font: "Nunito", "PingFang SC", "HarmonyOS Sans", "Microsoft YaHei", system-ui, sans-serif;
+  --hx-font-title: var(--hx-font);
+  --hx-title-w: 800;
+  --hx-title-ls: 0;
+  --hx-btn-ls: 0;
+  --hx-btn-bg: #ffffff;
+  --hx-btn-border: #3b3b3b;
+  --hx-btn-text: #3b3b3b;
+  --hx-shadow: 0 4px 0 #d9d2c4;
+  --hx-shadow-btn: 0 4px 0 #d9d2c4;
+  --hx-blur: none;
+  --hx-mask: rgba(59, 59, 59, .4);
+  --hx-pad: 16px;
+  --hx-gap: 12px;
+  --hx-img-render: auto;
+  --hx-transition: all .12s cubic-bezier(.34, 1.56, .64, 1);
+}

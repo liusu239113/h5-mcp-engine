@@ -1,0 +1,36 @@
+:root {
+  /* 像素复古：硬边零圆角 + 无抗锯齿。适配 RPG / 闯关 / 地牢 / 怀旧题材。
+     注意：这套风格要求 canvas 也关掉平滑（ctx.imageSmoothingEnabled = false）。 */
+  --hx-bg: #221c2b;
+  --hx-bg-image: repeating-linear-gradient(0deg, rgba(255, 255, 255, .035) 0 1px, transparent 1px 3px);
+  --hx-panel: #2e2740;
+  --hx-panel-2: #3a3152;
+  --hx-border: #f2e6c8;
+  --hx-border-w: 3px;
+  --hx-radius: 0px;
+  --hx-radius-sm: 0px;
+  --hx-corner: none;
+  --hx-text: #f2e6c8;
+  --hx-text-dim: #a99fc4;
+  --hx-accent: #ffcc33;
+  --hx-accent-2: #e0a800;
+  --hx-on-accent: #2b1f08;
+  --hx-danger: #e04b4b;
+  --hx-ok: #6fcf5a;
+  --hx-font: "Courier New", "Noto Sans Mono CJK SC", monospace;
+  --hx-font-title: var(--hx-font);
+  --hx-title-w: 700;
+  --hx-title-ls: .02em;
+  --hx-btn-ls: .02em;
+  --hx-btn-bg: #3f3560;
+  --hx-btn-border: #f2e6c8;
+  --hx-btn-text: #f2e6c8;
+  --hx-shadow: 4px 4px 0 #14101d;
+  --hx-shadow-btn: 4px 4px 0 #14101d;
+  --hx-blur: none;
+  --hx-mask: rgba(20, 16, 29, .68);
+  --hx-pad: 10px;
+  --hx-gap: 8px;
+  --hx-img-render: pixelated;
+  --hx-transition: none;
+}

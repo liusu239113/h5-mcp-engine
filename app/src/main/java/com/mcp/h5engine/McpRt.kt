@@ -210,6 +210,31 @@ object McpRt {
         false
     }
 
+    /**
+     * 把 assets/ui-kits（预制 UI 风格包）同步到 rt 目录，返回目录本身。
+     * 每次启动桥都覆盖一遍：主题内容改了，已装设备不用重新解包运行时就能生效。
+     */
+    private fun syncUiKits(ctx: Context, dir: File): File {
+        val dst = File(dir, "ui-kits")
+        runCatching { copyAssetDir(ctx, "ui-kits", dst) }
+        return dst
+    }
+
+    /** 递归把 assets 下的一个目录（或文件）复制到 dst */
+    private fun copyAssetDir(ctx: Context, assetPath: String, dst: File) {
+        val children = ctx.assets.list(assetPath) ?: return
+        if (children.isEmpty()) {
+            // assets.list 对「文件」返回空数组、对「不存在」返回 null，所以这里就是文件
+            dst.parentFile?.mkdirs()
+            runCatching {
+                ctx.assets.open(assetPath).use { ins -> FileOutputStream(dst).use { ins.copyTo(it) } }
+            }
+            return
+        }
+        dst.mkdirs()
+        for (c in children) copyAssetDir(ctx, "$assetPath/$c", File(dst, c))
+    }
+
     /** 桥是否已在为「这个项目」服务（换项目就得重启，路径写在启动参数里） */
     fun makerReady(projectDir: String): Boolean =
         makerProcess?.isAlive == true && makerHealth() && makerProject == projectDir
@@ -260,6 +285,9 @@ object McpRt {
             env["PATH"] = dir.absolutePath
             // Maker 自己的家目录也塞私有目录，免得它往沙箱外写
             env["TAPTAP_MAKER_HOME"] = File(home, "maker").apply { mkdirs() }.absolutePath
+            // UI 风格包（预制主题）：每次启动从 assets 同步一份到 rt 目录 —— 主题改了，
+            // 已装设备不用重新解包 65MB 运行时就能生效。桥按这个路径列主题 / 落地主题。
+            env["HEXORA_UI_KITS"] = syncUiKits(ctx, dir).absolutePath
             // 关键：Maker 本体是桥 spawn 出来的**另一个** node 进程，它不继承我们给桥的启动参数。
             // 不给它带上 CA / DNS 修正，它自己发起的网络请求（生图、音乐、配音都要联网）
             // 会因为 musl 读不到 Android DNS、找不到 CA 而全部失败。

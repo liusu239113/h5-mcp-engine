@@ -61,7 +61,7 @@ if (!target) {
 //   · init 的顺序是「选项目 → 先写 config → 再 git clone」，git 只有 clone 才需要
 // 所以绑定完全可以由桥自己完成：查项目 → 没有就建 → 写 config。用户零操作。
 const CFG_DIR = '.maker-mcp';
-const PROJECT_SUBDIRS = ['assets', 'assets/image', 'assets/sprites', 'assets/video', 'assets/audio', 'scripts'];
+const PROJECT_SUBDIRS = ['assets', 'assets/image', 'assets/sprites', 'assets/video', 'assets/audio', 'scripts', 'ui'];
 // 素材/环境相关工具：调它们之前必须先确保工程已绑定，否则必报未绑定
 const GEN_TOOLS = new Set([
   'generate_image', 'batch_generate_images', 'edit_image',
@@ -105,8 +105,44 @@ const LOCAL_LIST_TOOL = {
   inputSchema: { type: 'object', properties: {}, required: [] },
 };
 
+/**
+ * 本地工具 3：列 UI 风格包。
+ *
+ * 为什么放在桥里：它跟素材生成、授权、git 都无关，纯粹是读一批 CSS 模板 —— 放在本地
+ * 就意味着 Maker 子进程挂掉时，AI 照样能挑风格、照样能建界面。
+ */
+const UI_LIST_TOOL = {
+  name: 'maker_ui_list_kits',
+  description:
+    '列出引擎预制的 UI 风格包（水墨国风 / 像素复古 / 卡通圆润 / 动漫玻璃），并标出当前项目用的是哪一套。' +
+    '做任何界面之前**先**调它，按游戏题材挑一套：武侠/仙侠→ink，像素/怀旧→pixel16，休闲/卡通→cartoon，二次元/卡牌→anime。' +
+    '绝不允许使用浏览器原生默认样式（灰按钮、裸 sans-serif、alert 当弹窗）。' +
+    '本地工具：不需要授权、不依赖 Maker 子进程。',
+  inputSchema: { type: 'object', properties: {}, required: [] },
+};
+
+const UI_APPLY_TOOL = {
+  name: 'maker_ui_apply_kit',
+  description:
+    '把指定的 UI 风格包落地到当前项目的 ui/ 目录（theme.css + components.css + components.js + assets）。' +
+    '落地后页面里用相对路径引用 ui/theme.css 与 ui/components.css，组件类名与用法照 ui/SPEC.md 抄；' +
+    '所有颜色/圆角/字体必须写 var(--hx-*)，禁止硬编码色值。' +
+    '换风格只要再调一次本工具，界面结构一行都不用改。',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      kit: {
+        type: 'string',
+        description: '风格 id：ink（水墨国风）/ pixel16（像素复古）/ cartoon（卡通圆润）/ anime（动漫玻璃）',
+      },
+      dir: { type: 'string', description: '目标工程目录，默认就是当前工程' },
+    },
+    required: ['kit'],
+  },
+};
+
 /** 桥自带的本地工具全集（tools/list 时追加给 AI） */
-const LOCAL_TOOLS = [LOCAL_TOOL, LOCAL_LIST_TOOL];
+const LOCAL_TOOLS = [LOCAL_TOOL, LOCAL_LIST_TOOL, UI_LIST_TOOL, UI_APPLY_TOOL];
 
 function localTool(name) {
   return LOCAL_TOOLS.find((t) => t.name === name) || null;
@@ -146,12 +182,119 @@ async function listMakerApps() {
   };
 }
 
+// ==================== UI 风格包（预制主题） ====================
+// 目录来源：App 启动桥时把 assets/ui-kits 解包到 rt 目录并写进 HEXORA_UI_KITS；
+// 没有就用 <工程根>/_ui-kits 兜底（方便用户自己往工程里丢主题）。
+function kitsDir(tdir) {
+  return process.env.HEXORA_UI_KITS || path.join(tdir || projectDir || cwd, '_ui-kits');
+}
+
+function readKitIndex(tdir) {
+  try {
+    return JSON.parse(fs.readFileSync(path.join(kitsDir(tdir), 'kit.json'), 'utf8'));
+  } catch (e) {
+    return null;
+  }
+}
+
+/** 把 src 目录（递归）复制进 dst，只覆盖内容真的不同的文件；返回复制的文件数 */
+function copyTree(src, dst) {
+  let n = 0;
+  fs.mkdirSync(dst, { recursive: true });
+  for (const name of fs.readdirSync(src)) {
+    const s = path.join(src, name);
+    const d = path.join(dst, name);
+    const st = fs.statSync(s);
+    if (st.isDirectory()) {
+      n += copyTree(s, d);
+      continue;
+    }
+    let same = false;
+    try {
+      same = fs.statSync(d).size === st.size && fs.readFileSync(d).equals(fs.readFileSync(s));
+    } catch {}
+    if (!same) {
+      fs.copyFileSync(s, d);
+      n++;
+    }
+  }
+  return n;
+}
+
+function uiListKits(tdir) {
+  const idx = readKitIndex(tdir);
+  if (!idx) {
+    return {
+      ok: false,
+      reason: '没有找到 UI 风格包目录（' + kitsDir(tdir) + '）。请更新到带 ui-kits 的版本，' +
+        '或者直接把主题目录放到工程根的 _ui-kits/ 下。',
+    };
+  }
+  let current = null;
+  try {
+    current = JSON.parse(fs.readFileSync(path.join(tdir || projectDir || cwd, 'ui', '.kit.json'), 'utf8')).id;
+  } catch {}
+  return {
+    ok: true,
+    count: idx.kits.length,
+    current,
+    kits: idx.kits.map((k) => ({ id: k.id, name: k.name, scenes: k.scenes, mood: k.mood, in_use: k.id === current })),
+    usage:
+      '挑好之后调 maker_ui_apply_kit 落地。页面里用 <link rel="stylesheet" href="ui/theme.css"> + ui/components.css，' +
+      '组件类名照 ui/SPEC.md 抄，颜色一律 var(--hx-*)，不要自己写死颜色。',
+  };
+}
+
+function uiApplyKit(tdir, kit) {
+  const idx = readKitIndex(tdir);
+  if (!idx) return { ok: false, reason: '没有找到 UI 风格包目录（' + kitsDir(tdir) + '）' };
+  const meta = idx.kits.find((k) => k.id === kit);
+  if (!meta) {
+    return { ok: false, reason: '没有这套风格：' + kit, available: idx.kits.map((k) => k.id) };
+  }
+  const root = tdir || projectDir || cwd;
+  const dir = kitsDir(tdir);
+  const dst = path.join(root, 'ui');
+  const n = copyTree(path.join(dir, kit), dst) + copyTree(path.join(dir, '_shared'), dst);
+  fs.writeFileSync(
+    path.join(dst, '.kit.json'),
+    JSON.stringify({ id: kit, name: meta.name, mood: meta.mood, at: Date.now() }, null, 2),
+    'utf8'
+  );
+  return {
+    ok: true,
+    id: kit,
+    name: meta.name,
+    files: n,
+    where: path.relative(root, dst) || dst,
+    usage:
+      '页面按顺序引 ui/theme.css 与 ui/components.css（组件用法见 ui/SPEC.md），颜色/圆角/字体一律 var(--hx-*)。' +
+      '换风格再调一次本工具即可，界面结构不用改。',
+  };
+}
+
 /** tools/call 落到本地工具时的统一分发（不进 Maker 子进程） */
 function handleLocalTool(res, msg, tname, tdir) {
   const args = (msg.params && msg.params.arguments) || {};
   const fail = (e) => reply(res, msg.id, { ok: false, reason: (e && e.message) || String(e) });
   if (tname === LOCAL_LIST_TOOL.name) {
     listMakerApps().then((r) => reply(res, msg.id, r)).catch(fail);
+    return;
+  }
+  if (tname === UI_LIST_TOOL.name) {
+    try {
+      reply(res, msg.id, uiListKits(tdir));
+    } catch (e) {
+      fail(e);
+    }
+    return;
+  }
+  if (tname === UI_APPLY_TOOL.name) {
+    try {
+      reply(res, msg.id, uiApplyKit(tdir, args.kit || ''));
+    } catch (e) {
+      fail(e);
+    }
     return;
   }
   ensureBinding(args.dir || tdir, { forceNew: !!args.create }).then((r) => reply(res, msg.id, r)).catch(fail);

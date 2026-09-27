@@ -92,7 +92,36 @@ object SkillPresets {
     · 未授权时**不允许**编造素材或占位图顶上充数；授权完成后直接调
       generate_image / text_to_music 就行（凭据与桥服务共用同一个目录，无需重启）。
     · 批量生成（多张图 / 多段音）之前先报一下数量，让用户心里有数（可能消耗他的额度）。
-""".trimIndent()
+    11. UI 风格（硬指标，不是建议）：
+       · 引擎预制了 UI 风格包。**动手写任何界面之前，先调 maker_ui_list_kits** —— 它会列出
+         ink（水墨国风）/ pixel16（像素复古）/ cartoon（卡通圆润）/ anime（动漫玻璃），
+         并标出当前项目已经用的是哪套。
+       · 题材对应：武侠 / 仙侠 / 历史 / 国风 → ink；像素 / 怀旧 / 街机 / RPG → pixel16；
+         休闲 / 三消 / 儿童 / 解压 → cartoon；二次元 / 卡牌 / 养成 / 剧情 → anime。
+         挑好之后调 maker_ui_apply_kit(kit=...) 落地到项目的 ui/ 目录，再开始写页面。
+       · 页面引用（相对路径，文件都在项目内）：
+         `<link rel="stylesheet" href="ui/theme.css">` 然后 `<link rel="stylesheet" href="ui/components.css">`；
+         body 加 `class="hx-root"`；组件类名与用法照项目里的 `ui/SPEC.md` 抄
+         （hx-panel / hx-btn / hx-bar / hx-slot / hx-mask+hx-dialog / hx-tabs / hx-badge / hx-toast …），
+         选中态用 `hx-xxx--on`，**不要另起一套命名**。
+       · **严禁浏览器原生默认样式**：不许拿裸 `<button>` 当按钮（那个灰方块）、
+         不许用 alert / confirm 当弹窗、不许不设字号字体。用户管这个叫「很原生那种很丑的」。
+       · **UI 用 DOM + CSS，canvas 只画场景 / 角色 / 特效**：canvas 里画的界面换不了肤，不算数。
+       · **禁止在游戏代码里硬编码颜色 / 圆角 / 字体**，一律 `var(--hx-*)`；
+         确实缺一个语义色，就往项目的 ui/theme.css 追加一个变量（或加一个 .hx-* 语义类），
+         也不要写 `#ff0000` 这种字面色值。
+    12. 交付标准：先写设计文档，再按文档执行，不做简陋 demo
+       · 接到「做一个 / 大改一个游戏」这类活儿，**第一步是把 `<项目>/DESIGN.md` 写出来**
+         （game_write），包含：一句话玩法 / 核心循环 / 画面与 UI 风格（写明用哪套 kit 以及为什么）/
+         关卡与数值 / 需要哪些素材 / 文件结构 / 里程碑（用 `- [ ]` 列表）/ 验收清单。
+         **没有 DESIGN.md 就不要开始写游戏代码** —— 这是用户的明确要求。
+       · 每完成一个里程碑，回 DESIGN.md 把对应项改成 `- [x]`；文档即进度条，用户会照着它验收。
+       · 质量下限（缺一项就算没做完）：开始界面 → 游玩 → 结算 / 重开的完整流程；
+         关键操作有反馈（动效 / 飘字 / 提示音）；有音效与音乐（text_to_sound_effect / text_to_music，
+         放 `assets/audio/`）；进度用 localStorage 存档；适配横竖屏与安全区；控制台零报错；
+         **不许出现 TODO、不许用占位方块、不许把 demo 当成品交出去**。
+         宁可少做两个功能，也不要交一个残缺的壳。
+ """.trimIndent()
 
     val ALL: List<Skill> = listOf(
 
