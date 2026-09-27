@@ -23,6 +23,10 @@
  */
 const { spawn } = require('child_process');
 const http = require('http');
+const https = require('https');
+const fs = require('fs');
+const path = require('path');
+const os = require('os');
 
 const argv = process.argv.slice(2);
 const target = argv[0];
@@ -39,6 +43,235 @@ if (!target) {
   console.error('usage: bridge.js <target.js> <port> [--cwd dir] [--project dir] [--target-arg name]');
   process.exit(2);
 }
+
+// ==================== Maker 项目自动绑定（v3） ====================
+// 为什么必须有这一段：
+//   generate_image / text_to_music / text_to_sound_effect 这类「素材生成」工具，
+//   进门第一件事是 identifyMakerProject() —— 它只认 <项目根>/.maker-mcp/config.json
+//   里的 project_id。缺这个文件，工具直接报：
+//     "xxx is not bound to a Maker project. .maker-mcp/config.json is missing."
+//   而官方唯一的绑定路径 `taptap-maker init`，第一行就是 ensureGitAvailable()；
+//   安卓沙箱里既没有 git 也没有 python，init 根本走不到「写 config」那一步。
+//   → 死循环：想生图就得绑定；想绑定就得有 git；没有 git 就永远生不了图（只能用户手动去建项目）。
+//
+// 读 dist/maker.js 得到的事实：
+//   · 绑定判定只看 config.json 里的 project_id（loadProjectConfig / parseConfig）
+//   · 列项目 GET  {apiBase}/apps  —— 不需要 git
+//   · 建项目 POST {apiBase}/apps  —— 不需要 git
+//   · init 的顺序是「选项目 → 先写 config → 再 git clone」，git 只有 clone 才需要
+// 所以绑定完全可以由桥自己完成：查项目 → 没有就建 → 写 config。用户零操作。
+const CFG_DIR = '.maker-mcp';
+const PROJECT_SUBDIRS = ['assets', 'assets/image', 'assets/sprites', 'assets/video', 'assets/audio', 'scripts'];
+// 素材/环境相关工具：调它们之前必须先确保工程已绑定，否则必报未绑定
+const GEN_TOOLS = new Set([
+  'generate_image', 'batch_generate_images', 'edit_image',
+  'create_video_task', 'query_video_task', 'create_3d_asset',
+  'text_to_music', 'text_to_sound_effect', 'batch_sound_effects',
+  'text_to_dialogue', 'audition_voices_for_character', 'confirm_character_voice',
+  'generate_test_qrcode', 'add_test_whitelist', 'get_ad_config',
+]);
+
+const LOCAL_TOOL = {
+  name: 'maker_ensure_project',
+  description:
+    '确保当前工程已绑定一个 Maker 项目（没有就自动新建一个），素材生成类工具必须先满足这个条件。' +
+    '桥在调用 generate_image / text_to_music / text_to_sound_effect 等工具前会自动完成绑定，' +
+    '所以通常你不需要手动调用它；只有自动绑定失败、或用户明确要求「新建一个项目」时才用，' +
+    '传 create=true 表示强制新建。',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      create: { type: 'boolean', description: 'true = 强制新建一个 Maker 项目（默认复用同名项目）' },
+      dir: { type: 'string', description: '要绑定的工程目录，默认就是当前工程' },
+    },
+    required: [],
+  },
+};
+
+function makerHomeDir() {
+  return process.env.TAPTAP_MAKER_HOME || path.join(os.homedir(), '.taptap-maker');
+}
+function apiBase() {
+  return (process.env.TAPTAP_MAKER_API_BASE || 'https://maker.taptap.cn/api/v1').replace(/\/+$/, '');
+}
+function readPatToken() {
+  try {
+    const j = JSON.parse(fs.readFileSync(path.join(makerHomeDir(), 'pat.json'), 'utf8'));
+    return j && j.token ? j.token : '';
+  } catch {
+    return '';
+  }
+}
+function readBinding(root) {
+  try {
+    const j = JSON.parse(fs.readFileSync(path.join(root, CFG_DIR, 'config.json'), 'utf8'));
+    return j && j.project_id ? j : null;
+  } catch {
+    return null;
+  }
+}
+function writeBinding(root, project) {
+  const dir = path.join(root, CFG_DIR);
+  fs.mkdirSync(dir, { recursive: true });
+  const now = new Date().toISOString();
+  const cfg = { project_id: String(project.id), created_at: now, updated_at: now };
+  const uid = project.user_id || project.userId;
+  if (uid) cfg.user_id = uid;
+  if (project.sce_endpoint) cfg.sce_endpoint = project.sce_endpoint;
+  fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify(cfg, null, 2), 'utf8');
+  // 与官方 saveProjectConfig 保持一致：凭证目录整体忽略
+  fs.writeFileSync(path.join(dir, '.gitignore'), '*\n', 'utf8');
+  for (const s of PROJECT_SUBDIRS) {
+    try { fs.mkdirSync(path.join(root, s), { recursive: true }); } catch {}
+  }
+  return cfg;
+}
+function normalizeProjects(data) {
+  const body = data || {};
+  const list = Array.isArray(data)
+    ? data
+    : Array.isArray(body.data)
+      ? body.data
+      : Array.isArray(body.apps)
+        ? body.apps
+        : Array.isArray(body.projects)
+          ? body.projects
+          : [];
+  return list
+    .map((it) => ({
+      id: String(it.id || it.app_id || it.project_id || ''),
+      name: it.name || it.title || '',
+      user_id: it.user_id || it.userId,
+      sce_endpoint: it.sce_endpoint || it.sce_mcp_url || '',
+      lastAccessedAt: it.lastAccessedAt || it.last_accessed_at || '',
+      createdAt: it.createdAt || it.created_at || '',
+    }))
+    .filter((p) => p.id);
+}
+
+// 用 node:https 直接请求（不依赖全局 fetch，node 版本兼容性更稳）；
+// CA 用 --use-bundled-ca，DNS 用 dnsfix.js，都是启动桥时已经带上的。
+function httpsJson(method, url, token, body) {
+  return new Promise((resolve, reject) => {
+    const u = new URL(url);
+    const payload = body ? JSON.stringify(body) : null;
+    const headers = { Authorization: 'Bearer ' + token, Accept: 'application/json' };
+    if (payload) {
+      headers['Content-Type'] = 'application/json';
+      headers['Content-Length'] = Buffer.byteLength(payload);
+    }
+    const req = https.request(
+      {
+        method,
+        hostname: u.hostname,
+        port: u.port || 443,
+        path: u.pathname + u.search,
+        headers,
+        timeout: 20000,
+      },
+      (res) => {
+        let data = '';
+        res.setEncoding('utf8');
+        res.on('data', (c) => (data += c));
+        res.on('end', () => {
+          let json;
+          try { json = JSON.parse(data); } catch { json = { raw: data.slice(0, 300) }; }
+          if (res.statusCode >= 200 && res.statusCode < 300) resolve(json);
+          else reject(new Error('HTTP ' + res.statusCode + ' ' + data.slice(0, 240)));
+        });
+      }
+    );
+    req.on('timeout', () => req.destroy(new Error('Maker API 请求超时')));
+    req.on('error', reject);
+    if (payload) req.write(payload);
+    req.end();
+  });
+}
+
+function pickExisting(projects, root) {
+  const base = path.basename(path.resolve(root)).toLowerCase();
+  if (!base) return null;
+  const same = projects.find((p) => (p.name || '').toLowerCase() === base);
+  if (same) return same;
+  // 名字里含目录名（例如工程叫「武侠」、Maker 项目叫「武侠 demo」）也认
+  return (
+    projects.find((p) => {
+      const n = (p.name || '').toLowerCase();
+      return n && (n.includes(base) || base.includes(n));
+    }) || null
+  );
+}
+
+let binding = null;      // 本次绑定结果（进程内缓存 + 给 /health 看）
+let bindingBusy = null;  // 并发合并：同时来多个生成请求，只绑定一次
+let bindingErr = '';     // 最近一次绑定失败的原因（给 /health 排障）
+
+/**
+ * 确保 root 目录已绑定 Maker 项目。
+ * 策略：同名项目复用 → 没有就新建（项目名 = 目录名）→ 建不了就退回复用最近活跃的项目。
+ * 任何失败都不阻塞工具调用（保持原行为，让 Maker 自己报错），只在日志/health 里留原因。
+ */
+async function ensureBinding(root, opts) {
+  const dir = path.resolve(root || projectDir || cwd);
+  if (!dir) return { ok: false, reason: '没有目标目录' };
+  if (!(opts && opts.forceNew)) {
+    const existing = readBinding(dir);
+    if (existing) {
+      binding = { dir, project_id: existing.project_id, name: '(复用已绑定)' };
+      return { ok: true, already: true, dir, project_id: existing.project_id };
+    }
+  }
+  if (bindingBusy) return bindingBusy;
+  bindingBusy = (async () => {
+    const token = readPatToken();
+    if (!token) {
+      throw new Error('未找到 Maker 凭证 pat.json，需要先在 Maker 面板完成授权');
+    }
+    const base = apiBase();
+    const listed = normalizeProjects(await httpsJson('GET', base + '/apps', token));
+    let project = opts && opts.forceNew ? null : pickExisting(listed, dir);
+    let created = false;
+    let note = '';
+    if (!project) {
+      const name = path.basename(dir) || 'hexora';
+      try {
+        const r = await httpsJson('POST', base + '/apps', token, { name, gameType: 'sce' });
+        project = normalizeProjects(r && r.app ? { apps: [r.app] } : r)[0];
+        created = true;
+      } catch (e) {
+        // 建不了（额度/权限/网络）就退回复用最近活跃的项目，至少让生图能用
+        const recent = listed
+          .slice()
+          .sort((a, b) =>
+            String(b.lastAccessedAt || b.createdAt).localeCompare(String(a.lastAccessedAt || a.createdAt))
+          )[0];
+        if (!recent) throw e;
+        project = recent;
+        note = '新建项目失败，已复用最近项目：' + (e && e.message ? e.message : String(e));
+      }
+    }
+    if (!project || !project.id) throw new Error('未能确定 Maker 项目（列表为空且无法新建）');
+    const cfg = writeBinding(dir, project);
+    binding = { dir, project_id: cfg.project_id, name: project.name || '' };
+    bindingErr = '';
+    console.log(
+      '[bridge] 已绑定 Maker 项目 ' + cfg.project_id + ' (' + (project.name || '') + ') → ' + dir +
+        (created ? ' [新建]' : ' [复用]') + (note ? ' · ' + note : '')
+    );
+    return { ok: true, dir, project_id: cfg.project_id, name: project.name || '', created, note };
+  })()
+    .catch((e) => {
+      bindingErr = e && e.message ? e.message : String(e);
+      console.error('[bridge] 自动绑定失败: ' + bindingErr);
+      return { ok: false, reason: bindingErr };
+    })
+    .then((r) => {
+      bindingBusy = null;
+      return r;
+    });
+  return bindingBusy;
+}
+
 
 // 子进程要用的额外 node 参数（App 侧注入，例如 "--use-bundled-ca -r /path/dnsfix.js"）
 const childExtra = (process.env.MAKER_CHILD_ARGS || '')
@@ -158,6 +391,12 @@ function scheduleRestart() {
 
 startChild();
 
+// 启动即尝试绑定一次（App 一开就能生图，不必等第一次工具调用）。
+// 失败不致命：只把原因留在 /health 的 bindingError 里，工具照原样报错，便于排障。
+if (projectDir) {
+  ensureBinding(projectDir).catch(() => {});
+}
+
 // ---------------- HTTP 层 ----------------
 let sid = 'hexora-bridge-' + process.pid;
 
@@ -183,6 +422,10 @@ const server = http.createServer((req, res) => {
       tail: logTail(),
       target: targetArg,
       project: projectDir,
+      // 绑定状态：素材生成工具能不能用，就看这个（AI 排障也能直接看到）
+      bound: !!readBinding(projectDir || cwd),
+      binding: binding,
+      bindingError: bindingErr,
     });
     return;
   }
@@ -191,6 +434,15 @@ const server = http.createServer((req, res) => {
     send(res, 200, { ok: childAlive, lastExit: lastExit, restarts: restarts, tail: logTail() });
     return;
   }
+  // 手动确认/补绑定（设置页「素材项目」按钮用；create=1 强制新建）
+  if (req.url.startsWith('/ensure-project')) {
+    const u = new URL(req.url, 'http://127.0.0.1');
+    const create = u.searchParams.get('create') === '1' || u.searchParams.get('create') === 'true';
+    const dir = u.searchParams.get('dir') || projectDir || cwd;
+    ensureBinding(dir, { forceNew: create }).then((r) => send(res, 200, r));
+    return;
+  }
+
   if (req.method !== 'POST') {
     send(res, 405, { error: 'use POST' });
     return;
@@ -223,6 +475,11 @@ const server = http.createServer((req, res) => {
       msg.params.arguments[targetArg] = projectDir;
     }
 
+    // 本轮调用的工具名：素材生成类工具需要先确保工程已绑定 Maker 项目。
+    // 注意是 params.name（MCP 标准），不是 params.tool.name —— 之前按后者取，
+    // 结果 tname 永远是空串，整个「自动绑定」预检都不会触发。
+    const tname = (msg.params && (msg.params.name || (msg.params.tool && msg.params.tool.name))) || '';
+
     if (!childAlive) {
       send(res, 503, {
         jsonrpc: '2.0',
@@ -240,24 +497,87 @@ const server = http.createServer((req, res) => {
       return;
     }
 
-    const timer = setTimeout(() => {
-      pending.delete(msg.id);
-      send(res, 504, { jsonrpc: '2.0', id: msg.id, error: { code: -32001, message: 'Maker 超时未响应' } });
-    }, 10 * 60 * 1000);
-
-    pending.set(msg.id, (reply) => {
-      clearTimeout(timer);
-      send(res, 200, reply);
-    });
-    try {
-      child.stdin.write(JSON.stringify(msg) + '\n');
-    } catch (e) {
-      clearTimeout(timer);
-      pending.delete(msg.id);
-      send(res, 500, { jsonrpc: '2.0', id: msg.id, error: { code: -32002, message: '写入子进程失败: ' + e.message } });
+    // 素材生成类工具：先确保「当前工程已绑定 Maker 项目」（没有就自动建一个），再转发。
+    // 这就是「用户不该被要求先手动建项目」这句话的落地处 —— 绑定由桥自己完成，
+    // 用户（和 AI）都不需要知道 .maker-mcp/config.json 这回事。
+    // 注意绑的是本次调用真正用的 target_dir（AI 显式传了别的目录时以它为准）。
+    const tdir = (msg.params && msg.params.arguments && msg.params.arguments[targetArg]) || projectDir || cwd;
+    if (msg.method === 'tools/call' && GEN_TOOLS.has(tname)) {
+      ensureBinding(tdir)
+        .catch(() => {})
+        .then(() => forward(msg, res));
+      return;
     }
+
+    // 桥自带的本地工具：直接自己答，不进子进程
+    if (msg.method === 'tools/call' && tname === LOCAL_TOOL.name) {
+      const forceNew = !!(msg.params.arguments && msg.params.arguments.create);
+      const wantDir = (msg.params.arguments && msg.params.arguments.dir) || tdir;
+      ensureBinding(wantDir, { forceNew }).then((r) => reply(res, msg.id, r));
+      return;
+    }
+
+    forward(msg, res);
   });
 });
+
+/** 把一段 JSON 包成 MCP 工具结果回给调用方 */
+function reply(res, id, obj) {
+  send(res, 200, {
+    jsonrpc: '2.0',
+    id: id,
+    result: {
+      content: [{ type: 'text', text: JSON.stringify(obj, null, 2) }],
+      isError: !obj.ok,
+    },
+  });
+}
+
+/**
+ * 转发给 Maker 子进程。tools/list 时顺手把自己实现的本地工具（maker_ensure_project）
+ * 追加进去，这样 AI 也能主动触发绑定/新建项目。
+ */
+function forward(msg, res) {
+  if (!childAlive) {
+    send(res, 503, {
+      jsonrpc: '2.0',
+      error: { code: -32000, message: 'Maker 子进程未运行（bridge 正在自动重启，请稍后重试）' },
+    });
+    return;
+  }
+
+  const isNotify = msg.id === undefined || msg.id === null;
+  if (isNotify) {
+    try {
+      child.stdin.write(JSON.stringify(msg) + '\n');
+    } catch {}
+    send(res, 202, { ok: true });
+    return;
+  }
+
+  const method = msg.method;
+  const timer = setTimeout(() => {
+    pending.delete(msg.id);
+    send(res, 504, { jsonrpc: '2.0', id: msg.id, error: { code: -32001, message: 'Maker 超时未响应' } });
+  }, 10 * 60 * 1000);
+
+  pending.set(msg.id, (reply) => {
+    clearTimeout(timer);
+    if (method === 'tools/list' && reply && reply.result && Array.isArray(reply.result.tools)) {
+      if (!reply.result.tools.some((t) => t && t.name === LOCAL_TOOL.name)) {
+        reply.result.tools.push(LOCAL_TOOL);
+      }
+    }
+    send(res, 200, reply);
+  });
+  try {
+    child.stdin.write(JSON.stringify(msg) + '\n');
+  } catch (e) {
+    clearTimeout(timer);
+    pending.delete(msg.id);
+    send(res, 500, { jsonrpc: '2.0', id: msg.id, error: { code: -32002, message: '写入子进程失败: ' + e.message } });
+  }
+}
 
 server.listen(port, '127.0.0.1', () => {
   console.log('[bridge] maker 已就绪 http://127.0.0.1:' + port + ' (child pid ' + (child && child.pid) + ')');

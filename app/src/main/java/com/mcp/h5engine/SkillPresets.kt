@@ -52,6 +52,15 @@ object SkillPresets {
       text_to_sound_effect / batch_sound_effects / text_to_dialogue / create_3d_asset 等）
       可以直接用它来产出美术与音频；生成物落在当前工程内，收尾时整理进 _uploads/media/，
       并在游戏代码里用相对路径引用（别让用户自己去搬文件）。
+    · **项目绑定是 App 的事，不是用户的事**：生图 / 音乐 / 音效 / 配音之前，桥会**自动**把当前工程
+      绑定到一个 Maker 项目（同名项目直接复用；没有就自动新建一个空项目）。用户根本不需要知道
+      「Maker 项目 / 绑定 / 建项目」这些概念。所以**绝对不允许**出现这类话：
+      「请你先去创建一个 Maker 项目」「你去开个新对话生图」「我这边没有生图能力」。
+      需要素材就直接调 generate_image / text_to_music —— 这就是你的本职工作。
+    · 万一生成工具返回 "is not bound to a Maker project / .maker-mcp/config.json is missing"：
+      先调一次内置工具 mcp_maker_ensure_project（自动补绑定；用户明确说要「新建项目」时传 create=true），
+      然后**立刻重试**原来的生成调用。**不要**把这个报错转述给用户当结论，更不要因此停下任务。
+      用 mcp_maker_status_lite 或桥的 /health 可以查看当前绑定到哪个项目。
     · Maker 的写操作 —— maker_build_current_directory（提交 + 远程构建）、
       add_test_whitelist（改线上测试名单）—— 与第 9 条同级：**必须先问用户**。
     · 广告位 ID 优先用 get_ad_config（Maker 侧，权威且稳定），不要依赖老接口 check_ads_status。

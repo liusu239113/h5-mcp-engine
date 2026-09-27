@@ -3339,14 +3339,36 @@ makerRow1.addView(ghostBtnOf(ctx, pal, "扫码登录").apply {
         val makerRow2 = LinearLayout(ctx).apply { orientation = LinearLayout.HORIZONTAL }
         makerRow2.addView(ghostBtnOf(ctx, pal, "绑定当前项目").apply {
             setOnClickListener {
+                // 必须走桥的 /ensure-project：它用 HTTPS 直接调 Maker 接口（列项目 / 建项目），
+                // 然后自己写 .maker-mcp/config.json —— 全程不需要 git、不需要 python。
+                // 以前这里跑的是 `init --create`，而 init 第一行就是 ensureGitAvailable()：
+                // 安卓沙箱里没有 git，所以这个按钮**从来没成功过**，
+                // 症状就是每次生图都报 ".maker-mcp/config.json is missing"、用户只能自己去建项目。
                 val proj = File(gameRoot, currentGame).absolutePath
-                makerRun(
-                    listOf(
-                        "init", "--create", "--name", currentGame,
-                        "--target-dir", proj, "--skip-confirm", "--skip-mcp-install", "--json"
-                    ),
-                    null, "绑定项目「$currentGame」"
-                )
+                makerOut.text = "正在确保 Maker 已启动，并为「$currentGame」绑定素材项目…"
+                Thread {
+                    val sb = StringBuilder()
+                    runCatching {
+                        if (McpRt.makerReady(proj)) {
+                            sb.append("✅ Maker 已在运行\n")
+                        } else {
+                            val err = McpRt.startMaker(this@MainActivity, {}, proj)
+                            sb.append(if (err == null) "✅ Maker 已启动\n" else "❌ Maker 启动失败：$err\n")
+                        }
+                    }.onFailure { sb.append("❌ 启动异常：${it.message}\n") }
+                    val enc = runCatching { java.net.URLEncoder.encode(proj, "UTF-8") }.getOrDefault(proj)
+                    val body = runCatching {
+                        val c = java.net.URL("http://127.0.0.1:${McpRt.MAKER_PORT}/ensure-project?dir=$enc")
+                            .openConnection() as java.net.HttpURLConnection
+                        c.connectTimeout = 8000
+                        c.readTimeout = 90_000
+                        c.inputStream.bufferedReader().use { it.readText() }
+                    }.getOrElse { "❌ 绑定接口调用失败：${it.message}" }
+                    main.post {
+                        makerOut.text = sb.toString() + body
+                        makerOut.setTextIsSelectable(true)
+                    }
+                }.start()
             }
         }, LinearLayout.LayoutParams(-2, -2).apply { rightMargin = dp(8) })
         makerRow2.addView(ghostBtnOf(ctx, pal, "查看我的应用").apply {
