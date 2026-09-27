@@ -215,13 +215,29 @@ class McpHub {
 
     fun handles(name: String): Boolean = index.containsKey(name)
 
+    /** 由 App 注入：确保服务在跑（必要时拉起并重建连接）。返回是否已可用 */
+    @Volatile
+    var onEnsure: (() -> Boolean)? = null
+
     fun call(name: String, argsJson: String): String {
-        val e = index[name] ?: return "未知的 MCP 工具：$name"
-        val c = clients[e.server.url] ?: return "服务器未连接：${e.server.name}（可到设置里重连）"
+        if (!index.containsKey(name)) return "未知的 MCP 工具：$name"
         return try {
-            c.callTool(e.tool.name, argsJson)
+            direct(name, argsJson)
         } catch (t: Throwable) {
-            "[MCP 调用失败] ${t.message}"
+            // 本地 node 被系统冻结/杀掉是常态：让守护逻辑把它拉回来，再重试一次
+            val ok = runCatching { onEnsure?.invoke() == true }.getOrDefault(false)
+            if (!ok) {
+                "[MCP 调用失败] ${t.message}（本地服务可能已退出，可到设置 → MCP 服务器点「启动 / 重连」）"
+            } else {
+                runCatching { direct(name, argsJson) }
+                    .getOrElse { "[MCP 调用失败] 服务已重启但仍不可用：${it.message}" }
+            }
         }
+    }
+
+    private fun direct(name: String, argsJson: String): String {
+        val e = index[name] ?: throw IllegalStateException("工具未注册：$name")
+        val c = clients[e.server.url] ?: throw IllegalStateException("服务器未连接：${e.server.name}")
+        return c.callTool(e.tool.name, argsJson)
     }
 }

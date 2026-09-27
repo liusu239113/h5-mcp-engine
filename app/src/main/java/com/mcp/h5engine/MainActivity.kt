@@ -241,25 +241,14 @@ class MainActivity : AppCompatActivity(), GameUi {
         Thread {
             fun say(s: String) = main.post { addSystemLine(s) }
             try {
-                val enabled = McpStore.load(this).filter { it.enabled }
-                if (enabled.isEmpty()) return@Thread
-                if (!McpRt.ready(this)) {
-                    say("MCP：首次启动，正在释放内置运行时（约 60MB，只做一次）…")
-                    val e = McpRt.extract(this) { }
-                    if (e != null) { say("MCP：运行时释放失败 → $e"); return@Thread }
+                val hub = McpBoot.ensure(this) { s -> say(s) }
+                if (hub == null) {
+                    say("MCP：未启动（可在 设置 → MCP 服务器 里检查）")
+                } else {
+                    say("MCP 已就绪：${hub.lastInfo}，AI 可直接调用这些工具")
+                    // 常驻前台服务：防止切后台被冻结/回收时把本地 node 服务一起带走
+                    McpGuardService.start(this)
                 }
-                if (!McpRt.health()) {
-                    say("MCP：正在启动本地服务…")
-                    val e = McpRt.start(this) { }
-                    if (e != null) { say("MCP：本地服务启动失败 → $e"); return@Thread }
-                }
-                val hub = McpHub()
-                hub.refresh(enabled) { }
-                EngineTools.mcp = hub
-                if (hub.size > 0) say("MCP 已就绪：${hub.lastInfo}，AI 可直接调用这些工具")
-                else say("MCP 未注册到工具：${hub.lastError ?: "未知原因"}")
-            } catch (t: Throwable) {
-                say("MCP 初始化异常：${t.javaClass.simpleName}: ${t.message}")
             } finally {
                 mcpBusy = false
             }
@@ -345,6 +334,15 @@ class MainActivity : AppCompatActivity(), GameUi {
             toast("项目目录已切换")
         }
         rootInited = true
+        // 回到前台顺手续一次：后台期间被系统冻结/回收过就立刻把 MCP 拉回来
+        Thread {
+            runCatching {
+                if (!McpRt.health()) {
+                    McpBoot.ensure(this) { }
+                    McpGuardService.start(this)
+                }
+            }
+        }.start()
     }
 
     private fun buildTopBar() {
@@ -2995,16 +2993,11 @@ class MainActivity : AppCompatActivity(), GameUi {
         fun mcpStart(restart: Boolean) {
             mcpStatus.text = "正在启动 MCP 服务…"
             Thread {
-                if (!McpRt.ready(ctx)) McpRt.extract(ctx) { }
-                val e = McpRt.start(ctx) { }
-                if (e == null) {
-                    val hub = McpHub()
-                    hub.refresh(McpStore.load(ctx).filter { it.enabled }) { }
-                    EngineTools.mcp = hub
-                }
+                val hub = McpBoot.ensure(ctx) { }
+                if (hub != null) McpGuardService.start(ctx)
                 main.post {
                     mcpRender()
-                    toast(if (e == null) "MCP 服务已就绪" else "MCP 启动失败：$e")
+                    toast(if (hub != null) "MCP 服务已就绪（${hub.lastInfo}）" else "MCP 启动失败，可在 设置 → MCP 服务器 的日志里看原因")
                 }
             }.start()
         }

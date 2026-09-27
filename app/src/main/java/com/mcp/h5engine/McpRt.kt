@@ -114,10 +114,17 @@ object McpRt {
             val p = pb.start()
             process = p
             // 吃掉输出，否则管道写满会卡住子进程
+            // 把 node 输出全部落盘（保留尾部），下次「服务没了」时能看到它到底怎么死的
+            val logFile = File(dir, "mcp.log")
+            runCatching { if (logFile.length() > 200_000) logFile.writeText("") }
             Thread {
                 runCatching {
                     p.inputStream.bufferedReader().forEachLine { line ->
                         if (line.contains("error", true) || line.contains("✅")) log(line.take(200))
+                        runCatching {
+                            if (logFile.length() > 200_000) logFile.writeText("")
+                            logFile.appendText(line + "\n")
+                        }
                     }
                 }
             }.apply { isDaemon = true }.start()
