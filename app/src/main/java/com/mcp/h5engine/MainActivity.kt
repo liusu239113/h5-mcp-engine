@@ -2474,7 +2474,7 @@ class MainActivity : AppCompatActivity(), GameUi {
                 setImageBitmap(bmp)
                 scaleType = ImageView.ScaleType.FIT_CENTER
             }
-            val d = Dialog(this, android.R.style.Theme_Black_NoActionBar_Fullscreen)
+            val d = Dialog(this, android.R.style.Theme_Black_NoTitleBar_Fullscreen)
             val wrap = FrameLayout(this).apply {
                 setBackgroundColor(0xFF000000.toInt())
                 addView(iv, FrameLayout.LayoutParams(-1, -1))
