@@ -106,6 +106,17 @@ interface GameUi {
     fun inputText(text: String)
     fun consoleTail(n: Int): List<String>
     fun consoleClear()
+
+    /** 当前停在哪一页：0 = 对话、1 = 游戏预览、2 = 发布 */
+    fun currentTab(): Int = 0
+
+    /**
+     * 切到某一页。
+     * **对话 / 预览 / 发布 这三页是 App 的原生控件，不在 webview 的 DOM 里**，
+     * 所以模型用 click / js_eval 永远点不到它们 —— 想截图验证游戏画面，
+     * 只能走这个工具先切过去，再调 screenshot。
+     */
+    fun switchTab(tab: Int): String = "当前版本不支持切页"
 }
 
 /**
@@ -231,6 +242,11 @@ class EngineTools(private val ui: GameUi, private val root: File) {
                 """{"code":{"type":"string","description":"表达式或 IIFE，返回值需可 JSON 化"}}""",
                 listOf("code")),
 
+            fn("switch_tab", "切换 App 的主页面：对话 / 游戏预览 / 发布。" +
+                "**这三页是 App 的原生控件，不在网页里**，click / js_eval 点不到它们；" +
+                "要看游戏跑起来的样子、要截图验证画面/有没有白屏错位，先用它切到 preview。" +
+                """{"tab":{"type":"string","description":"chat=对话, preview=游戏预览, pub=发布"}}""",
+                listOf("tab")),
             fn("screenshot", "截取**整屏**画面（跟手机自带截图一样，含 App 顶栏/底栏/游戏画面，返回图片）。" +
                 "用它检查 UI 有没有白屏/错位/遮挡。返回文本里带「图内坐标 → 点击坐标」的换算，" +
                 "也可以直接把图内像素喂给 tap(space=\"shot\")",
@@ -603,7 +619,26 @@ class EngineTools(private val ui: GameUi, private val root: File) {
 
         "js_eval" -> ToolResult(ui.runJsSync(a.getString("code")).take(6000))
 
+        "switch_tab" -> {
+            val wish = a.optString("tab", "preview").lowercase()
+            val idx = when (wish) {
+                "chat", "0", "对话" -> 0
+                "pub", "publish", "2", "发布" -> 2
+                else -> 1
+            }
+            ToolResult(ui.switchTab(idx) + "（当前页：${ui.currentTab()}）")
+        }
         "screenshot" -> {
+            // 带 tab 参数 = 先切页再截（最常用：切到 preview 截游戏画面）。
+            // 不给也行，那就截当前停留的那一页。
+            a.optString("tab").takeIf { it.isNotBlank() }?.let { wish ->
+                val idx = when (wish.lowercase()) {
+                    "chat", "0", "对话" -> 0
+                    "pub", "publish", "2", "发布" -> 2
+                    else -> 1
+                }
+                ui.switchTab(idx)
+            }
             val w = a.optInt("maxWidth", 720)
             val img = ui.snapshotCss(w)
             if (img == null || img.size < 128) {

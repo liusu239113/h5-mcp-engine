@@ -4840,6 +4840,25 @@ makerRow1.addView(ghostBtnOf(ctx, pal, "扫码登录").apply {
         return if (ok) holder.get() else "\"超时 (${timeoutMs}ms)\""
     }
 
+    // ---------------- 切页（给 AI 用） ----------------
+    override fun currentTab(): Int = activeTab
+
+    /**
+     * 切页。模型点不到原生控件，只能靠这个。
+     * 切完等一会儿再返回 —— 让 WebView 把游戏画面重绘出来，
+     * 否则紧接着的 screenshot 很可能还是上一帧（白图/旧图）。
+     */
+    override fun switchTab(tab: Int): String {
+        val t = tab.coerceIn(0, 2)
+        main.post { showTab(t) }
+        runCatching { Thread.sleep(700) }
+        return when (t) {
+            0 -> "已切到「对话」页"
+            1 -> "已切到「游戏预览」页 —— 现在截图就能看到游戏画面了"
+            else -> "已切到「发布」页"
+        }
+    }
+
     override fun snapshotCss(maxWidth: Int, quality: Int): ByteArray? {
         if (Looper.myLooper() == Looper.getMainLooper()) return null
 
