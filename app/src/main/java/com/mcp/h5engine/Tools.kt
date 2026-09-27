@@ -1,5 +1,6 @@
 package com.mcp.h5engine
 
+import android.content.Context
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
@@ -67,6 +68,13 @@ class EngineTools(private val ui: GameUi, private val root: File) {
          */
         @Volatile
         var mcpAllowed: Boolean = false
+
+        /**
+         * App 上下文（MainActivity 注入）。
+         * Maker 的授权与凭据检查要跑 CLI、读 pat.json，必须有 Context。
+         */
+        @Volatile
+        var ctxRef: Context? = null
     }
 
     // ==================== 工具声明 ====================
@@ -149,6 +157,14 @@ class EngineTools(private val ui: GameUi, private val root: File) {
                 "写较完整的游戏前先调它，别自己从零造轮子",
                 "{}", emptyList()),
             fn("lib_usage", "同 game_libs：查看内置框架清单与引用方式", "{}", emptyList()),
+
+            fn("maker_auth",
+                "【云素材必须先授权】管理 TapTap Maker 授权（生图 / 音乐 / 音效 / 配音 / 3D / 视频都要它）。" +
+                    "action=status 先查状态；没授权就用 action=start —— 它会**立刻返回一个授权链接**，" +
+                    "你把链接单独一行、原样贴进回复，让用户点开、登录、点「创建 token」。" +
+                    "不要让用户自己去设置页找入口（App 会在对话里把链接递给他）。",
+                """{"action":{"type":"string","description":"status=查状态；start=开始授权并拿到链接"}}""",
+                listOf("action")),
 
             fn("ad_guide",
                 "【接广告必调】一次给全：TapTap 激励视频官方契约 + adkit.js 模板位置 + 八条硬纪律 + 验收清单。" +
@@ -369,6 +385,40 @@ class EngineTools(private val ui: GameUi, private val root: File) {
                         "文件不存在: $p（共享资产要带 _shared/ 前缀，例如 _shared/adkit.js；" +
                             "用户上传的文档/技能也可以只报文件名）" + cand
                     } else "```\n${f.readText().take(60000)}\n```"
+                )
+            }
+        }
+
+        // Maker 云能力授权：AI 自己就能把授权链接递给用户，不用用户去设置页翻。
+        // 这是内置工具，不受 MCP 准入开关限制 —— 否则「需要授权」这件事它连说都说不出来。
+        "maker_auth" -> {
+            val c = ctxRef
+            if (c == null) {
+                ToolResult("App 上下文不可用，重启一次 App 再试")
+            } else when (a.optString("action", "status").lowercase()) {
+                "start" -> {
+                    if (MakerCli.hasPat(c)) {
+                        ToolResult("Maker 已经授权过了（pat.json 在），可以直接生成素材。状态：" + MakerAuth.statusText(c))
+                    } else {
+                        val u = MakerAuth.start(c)
+                        if (u == null) {
+                            ToolResult(
+                                "授权流程已启动，但 15 秒内还没拿到链接。\n当前状态：" + MakerAuth.statusText(c) +
+                                    "\n稍后再用 maker_auth action=status 看一次。"
+                            )
+                        } else {
+                            ToolResult(
+                                "已开始 Maker 授权。请把下面这个链接**单独一行、原样**写进你的回复" +
+                                    "（不要改写、不要加标点、不要加括号）：\n" + u + "\n\n" +
+                                    "并告诉用户：点开链接 → 登录 TapTap → 点「创建 token」→ 回来告诉你一声就行。\n" +
+                                    "（这个流程最长会等 10 分钟，用户在浏览器点完就自动完成；期间你可以先做别的。）"
+                            )
+                        }
+                    }
+                }
+                else -> ToolResult(
+                    "Maker 授权状态：" + MakerAuth.statusText(c) +
+                        (MakerAuth.url?.let { "\n当前授权链接：" + it } ?: "")
                 )
             }
         }

@@ -213,6 +213,10 @@ class MainActivity : AppCompatActivity(), GameUi {
 
         pal = paletteOf(this, themeModeOf(cfgStore.themeMode))
 
+        // Maker 的授权 / 凭据检查要跑 CLI、读 pat.json，需要 Context。
+        // AI 通过内置工具 maker_auth 触发（不受 MCP 准入开关限制）。
+        EngineTools.ctxRef = applicationContext
+
         rootView = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setBackgroundColor(pal.bg)
@@ -709,8 +713,11 @@ class MainActivity : AppCompatActivity(), GameUi {
 
     // ==================== 气泡 ====================
 
-    /** 段落里识别出来的链接（http/https），供「复制链接」用 */
+    /** 段落里识别出来的链接（http/https），供「复制链接 / 打开链接」用 */
     private val LINK_REGEX = Regex("https?://[^\\s\"'<>\\u3002\\uff0c\\uff09\\uff08\\u3010\\u3011]+")
+
+    /** 对话里链接的颜色：蓝 + 可点，和浏览器里一个观感 */
+    private val LINK_BLUE = 0xFF2E6BE6.toInt()
 
 
     private fun addBubble(text: String, fromUser: Boolean) {
@@ -726,10 +733,10 @@ class MainActivity : AppCompatActivity(), GameUi {
         for ((i, seg) in paras.withIndex()) {
             if (i > 0) card.addView(View(this), LinearLayout.LayoutParams(-1, dp(7)))
             card.addView(TextView(this).apply {
-                setText(seg)
+                // 链接染成蓝色、点一下直接跳外部浏览器；没有链接的段落才保持可长按选中
                 textSize = if (fromUser) 14f else 13.5f
                 setTextColor(if (fromUser) pal.userText else pal.aiText)
-                setTextIsSelectable(true)
+                linkifySeg(this, seg)
             })
             val links = LINK_REGEX.findAll(seg).map { it.value }.toList()
             val ops = LinearLayout(this).apply {
@@ -737,10 +744,12 @@ class MainActivity : AppCompatActivity(), GameUi {
                 gravity = Gravity.END
             }
             ops.addView(tinyOp("复制本段") { copyToClip(seg) })
-            if (links.isNotEmpty()) {
-                ops.addView(tinyOp(if (links.size == 1) "复制链接" else "复制链接 ${links.size}") {
-                    if (links.size == 1) copyToClip(links[0]) else pickLink(links)
-                })
+            if (links.size == 1) {
+                // 单个链接：给一个明显的按钮能点开（段落里的蓝字也能点）
+                ops.addView(tinyOp("打开链接") { openExternal(links[0]) })
+                ops.addView(tinyOp("复制链接") { copyToClip(links[0]) })
+            } else if (links.isNotEmpty()) {
+                ops.addView(tinyOp("复制链接 ${links.size}") { pickLink(links) })
             }
             card.addView(ops, LinearLayout.LayoutParams(-1, -2))
         }
@@ -791,6 +800,150 @@ class MainActivity : AppCompatActivity(), GameUi {
             }
             .setNegativeButton("取消", null)
             .show()
+    }
+
+    // ==================== Maker 授权（AI 直接把链接递给用户，不藏设置页） ====================
+
+    private var authBusy = false
+    private var authCardTv: TextView? = null
+    private var authListener: ((String, String?) -> Unit)? = null
+
+    /**
+     * Maker 报未授权时的自动处理：取授权链接 → 贴进对话 → 顺手打开浏览器。
+     *
+     * 为什么自动：用户明确要求「我要生图就自动把链接给我」，不许藏在设置页里翻。
+     */
+    private fun autoMakerAuth() {
+        if (authBusy) return
+        if (MakerCli.hasPat(this)) {
+            addSystemLine("Maker 已授权，继续生成就行。")
+            return
+        }
+        authBusy = true
+        ensureAuthListener()
+        addSystemLine("需要先授权 TapTap Maker，正在取授权链接…")
+        Thread {
+            val u = MakerAuth.start(this)
+            main.post {
+                authBusy = false
+                if (u == null) {
+                    addSystemLine("没拿到授权链接（" + MakerAuth.statusText(this) + "）。再让我生成一次我就重试。")
+                } else {
+                    addAuthCard(u)
+                    openExternal(u)
+                }
+            }
+        }.start()
+    }
+
+    /** 授权结果回来后更新对话里的卡片 */
+    private fun ensureAuthListener() {
+        if (authListener != null) return
+        val l: (String, String?) -> Unit = { st, _ ->
+            main.post {
+                when (st) {
+                    "done" -> {
+                        authCardTv?.text = "✅ 授权成功，可以生成素材了"
+                        authCardTv = null
+                        authBusy = false
+                        addSystemLine("✅ TapTap Maker 授权成功。现在直接说「生一张图」就行。")
+                        toast("Maker 授权成功")
+                    }
+                    "failed" -> {
+                        authCardTv?.text = "❌ 没成功：" + MakerAuth.lastError.replace("\n", " ").take(120)
+                        authBusy = false
+                    }
+                }
+            }
+        }
+        authListener = l
+        MakerAuth.addListener(l)
+    }
+
+    /**
+     * 授权卡：链接蓝字可点 +「打开授权页 / 复制链接」两个按钮 + 状态行。
+     * 全程留在对话里，用户不用去设置页。
+     */
+    private fun addAuthCard(url: String) {
+        val card = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(13), dp(10), dp(13), dp(10))
+            background = roundCard(this@MainActivity, pal.cardAlt, pal.border, 14)
+        }
+        card.addView(TextView(this).apply {
+            text = "需要授权 TapTap Maker：点下面链接 → 登录 → 点「创建 token」"
+            textSize = 13f
+            setTextColor(pal.aiText)
+        })
+        card.addView(TextView(this).apply {
+            val sp = android.text.SpannableString(url)
+            sp.setSpan(object : android.text.style.ClickableSpan() {
+                override fun onClick(w: View) { openExternal(url) }
+
+                override fun updateDrawState(ds: android.text.TextPaint) {
+                    ds.color = LINK_BLUE
+                    ds.isUnderlineText = true
+                }
+            }, 0, url.length, android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+            text = sp
+            textSize = 12f
+            setPadding(0, dp(4), 0, dp(6))
+            movementMethod = android.text.method.LinkMovementMethod.getInstance()
+        })
+        card.addView(LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.END
+            addView(tinyOp("打开授权页") { openExternal(url) })
+            addView(tinyOp("复制链接") { copyToClip(url) })
+        })
+        val st = TextView(this).apply {
+            text = "点完「创建 token」这里会自动变成已授权（流程最长等 10 分钟）"
+            textSize = 11.5f
+            setTextColor(pal.sub)
+        }
+        card.addView(st)
+        chatList.addView(card, LinearLayout.LayoutParams(-2, -2).apply {
+            gravity = Gravity.START
+            topMargin = dp(5)
+            bottomMargin = dp(5)
+            rightMargin = dp(30)
+        })
+        authCardTv = st
+        scrollChatToBottom()
+    }
+
+    /** 段落里的链接：染蓝 + 可点（跳外部浏览器）；没链接才保持可长按选中 */
+    private fun linkifySeg(tv: TextView, seg: String) {
+        val hits = LINK_REGEX.findAll(seg).toList()
+        if (hits.isEmpty()) {
+            tv.text = seg
+            tv.setTextIsSelectable(true)
+            return
+        }
+        val sp = android.text.SpannableString(seg)
+        for (m in hits) {
+            val u = m.value
+            sp.setSpan(object : android.text.style.ClickableSpan() {
+                override fun onClick(w: View) { openExternal(u) }
+
+                override fun updateDrawState(ds: android.text.TextPaint) {
+                    ds.color = LINK_BLUE
+                    ds.isUnderlineText = false
+                }
+            }, m.range.first, m.range.last + 1, android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+        }
+        tv.text = sp
+        // LinkMovementMethod 与「可选中」冲突：有链接就优先保证点得开
+        tv.movementMethod = android.text.method.LinkMovementMethod.getInstance()
+        tv.highlightColor = 0x00000000
+        tv.setTextIsSelectable(false)
+    }
+
+    /** 跳外部浏览器打开 */
+    private fun openExternal(url: String) {
+        runCatching {
+            startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+        }.onFailure { toast("打不开链接：${it.message}") }
     }
 
     // ==================== 素材卡（Maker 生成物直接出现在对话里） ====================
@@ -1145,6 +1298,11 @@ class MainActivity : AppCompatActivity(), GameUi {
                 ev.startsWith("ASSET:") -> {
                     // 素材生成完成：直接在对话里插一张卡，点一下就能预览 / 试听
                     addAssetCard(ev.removePrefix("ASSET:").trim())
+                }
+                ev.startsWith("AUTHREQ:") -> {
+                    // Maker 报未授权：App 自己把授权链接取回来，直接贴进对话（不让用户去设置页翻）
+                    flushNow()
+                    autoMakerAuth()
                 }
                 ev == "RELOAD" -> {
                     runWrote = true
@@ -3062,8 +3220,26 @@ class MainActivity : AppCompatActivity(), GameUi {
                 }
             }
         }, LinearLayout.LayoutParams(-2, -2).apply { rightMargin = dp(8) })
-        makerRow1.addView(ghostBtnOf(ctx, pal, "扫码登录").apply {
-            setOnClickListener { makerRun(listOf("login", "--json"), null, "获取登录链接") }
+makerRow1.addView(ghostBtnOf(ctx, pal, "扫码登录").apply {
+            setOnClickListener {
+                // 走 MakerAuth（流式 + 10 分钟等待）：链接一出来就显示，并顺手打开浏览器。
+                // 老写法是等进程退出才回读输出，链接永远显示不出来。
+                makerOut.text = "正在获取授权链接…"
+                Thread {
+                    val u = MakerAuth.start(this@MainActivity)
+                    main.post {
+                        if (u == null) {
+                            makerOut.text = "❌ 没拿到授权链接：" + MakerAuth.statusText(this@MainActivity)
+                        } else {
+                            makerOut.text = "✅ 授权链接（已尝试打开浏览器；也可长按复制）\n$u\n\n" +
+                                "登录后点「创建 token」，完成后这里会自动提示。"
+                            setTextIsSelectable(true)
+                            openExternal(u)
+                        }
+                    }
+                }.start()
+            }
+        })
         }, LinearLayout.LayoutParams(-2, -2).apply { rightMargin = dp(8) })
         makerRow1.addView(ghostBtnOf(ctx, pal, "自检").apply {
             setOnClickListener { makerRun(listOf("doctor", "--json"), null, "Maker 自检") }

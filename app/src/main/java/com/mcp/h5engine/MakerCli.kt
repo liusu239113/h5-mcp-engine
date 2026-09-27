@@ -10,30 +10,53 @@ import java.util.concurrent.TimeUnit
  * 为什么需要它：Maker 的 MCP 工具能做素材生成，但**授权**（pat / login）、
  * **绑定工程**（init）、**自检**（doctor）这些只有 CLI 有。
  * 而 App 内的 AI 跑在 WebView 沙箱里，`process` / `require` 都是 undefined，
- * **没有任何 exec 通道**（刻意的安全设计，不能放开）。
+ * **没有任何 exec 通道**（刻意的安全设计，不能放开）。所以由 App 本体代跑。
  *
- * 所以由 App 本体代跑：设置页点一下按钮 → 这里起一个一次性 node 进程。
- * 全程走我们自己的 musl 运行时（含 dnsfix / 内置 CA），和内置服务同一套环境。
+ * 两个入口，别混用：
+ *   · [run]       一次性命令（pat set / init / doctor / apps），跑完返回输出；
+ *   · [runStream] **流式命令**（login）—— 它把授权链接**立刻**打在 stdout，
+ *                 然后要等用户在浏览器点完才退出（最长 10 分钟）。
+ *                 必须逐行回调，绝不能等它退出再回读输出 —— 旧版就是死在这，链接永远显示不出来。
  */
 object MakerCli {
 
     data class Result(val ok: Boolean, val output: String)
 
+    /** 当前正在跑的 CLI 进程（供取消用） */
+    @Volatile
+    var current: Process? = null
+        private set
+
     /**
-     * 阻塞执行（必须放子线程）。
-     *
-     * @param cmd    Maker 子命令，例如 listOf("pat","set","--pat-stdin")
-     * @param stdin  需要喂给进程的标准输入（如 PAT 明文），null 表示直接关闭 stdin
+     * Maker 凭据目录：TAPTAP_MAKER_HOME。
+     * **必须和 McpRt.startMaker 用同一个**，否则桥服务读不到授权，生成素材会报未授权。
      */
-    fun run(ctx: Context, cmd: List<String>, stdin: String? = null, timeoutMs: Long = 90_000): Result {
+    fun home(ctx: Context): File = File(McpRt.rtDir(ctx), "home/maker").apply { mkdirs() }
+
+    fun patFile(ctx: Context): File = File(home(ctx), "pat.json")
+
+    /** pat.json 里有 token = 已授权。不起进程，判断几乎零成本 */
+    fun hasPat(ctx: Context): Boolean = runCatching {
+        val f = patFile(ctx)
+        f.isFile && f.length() > 8 && f.readText().contains("\"token\"")
+    }.getOrDefault(false)
+
+    fun cancelCurrent() {
+        runCatching { current?.destroy() }
+        current = null
+    }
+
+    /**
+     * musl 运行时前缀，与 McpRt.startMaker 同源（dnsfix 修 DNS + 内置 CA）。
+     * @param cwd 工作目录。**必须给当前工程目录** —— 否则 doctor 会报 doctor_cwd_alignment=not_bound。
+     */
+    private fun newProcess(ctx: Context, cmd: List<String>, cwd: File?, stdin: String?): Process? {
         val dir = McpRt.rtDir(ctx)
         val ld = File(ctx.applicationInfo.nativeLibraryDir, "libmuslrt.so")
         val node = File(dir, "node")
         val maker = File(dir, "maker/dist/maker.js")
-        if (!ld.isFile) return Result(false, "缺少 libmuslrt.so（仅支持 arm64 设备）")
-        if (!node.isFile || !maker.isFile) return Result(false, "Maker 未随运行时解包（请重新安装本版本）")
+        if (!ld.isFile || !node.isFile || !maker.isFile) return null
 
-        val home = File(dir, "home").apply { mkdirs() }
         val args = mutableListOf(
             ld.absolutePath, "--library-path", dir.absolutePath,
             node.absolutePath,
@@ -43,55 +66,112 @@ object MakerCli {
         )
         args += cmd
 
-        return try {
-            val pb = ProcessBuilder(args)
-            pb.directory(dir)
-            pb.redirectErrorStream(true)
-            val env = pb.environment()
-            env["HOME"] = home.absolutePath
-            env["TMPDIR"] = home.absolutePath
-            env["PATH"] = dir.absolutePath
-            env["TAPTAP_MAKER_HOME"] = File(home, "maker").apply { mkdirs() }.absolutePath
-            val p = pb.start()
+        val pb = ProcessBuilder(args)
+        pb.directory(cwd?.takeIf { it.isDirectory } ?: dir)
+        pb.redirectErrorStream(true)
 
-            // stdin：PAT 走管道喂进去，避免出现在命令行（防 ps / 日志泄露）
-            runCatching {
-                if (stdin != null) {
-                    p.outputStream.use {
-                        it.write(stdin.toByteArray(Charsets.UTF_8))
-                        it.flush()
-                    }
-                } else {
-                    p.outputStream.close()
+        val h = File(dir, "home").apply { mkdirs() }
+        val env = pb.environment()
+        env["HOME"] = h.absolutePath
+        env["TMPDIR"] = h.absolutePath
+        env["PATH"] = dir.absolutePath
+        env["TAPTAP_MAKER_HOME"] = home(ctx).absolutePath
+
+        val p = pb.start()
+        runCatching {
+            if (stdin != null) {
+                p.outputStream.use {
+                    it.write(stdin.toByteArray(Charsets.UTF_8))
+                    it.flush()
                 }
+            } else {
+                p.outputStream.close()
             }
-
-            val sb = StringBuilder()
-            val reader = Thread {
-                runCatching { p.inputStream.bufferedReader().forEachLine { line -> sb.appendLine(line) } }
-            }.apply { isDaemon = true }
-            reader.start()
-
-            val deadline = System.currentTimeMillis() + timeoutMs
-            var exited = false
-            while (System.currentTimeMillis() < deadline) {
-                try {
-                    p.exitValue()
-                    exited = true
-                    break
-                } catch (e: IllegalThreadStateException) {
-                    Thread.sleep(200)
-                }
-            }
-            if (!exited) {
-                runCatching { p.destroy() }
-                runCatching { p.waitFor(2, TimeUnit.SECONDS) }
-                return Result(false, sb.toString().ifBlank { "无输出" } + "\n[执行超时 ${timeoutMs / 1000}s，已终止]")
-            }
-            reader.join(1500)
-            Result(p.exitValue() == 0, sb.toString().ifBlank { "（无输出）" })
-        } catch (t: Throwable) {
-            Result(false, "执行失败：${t.javaClass.simpleName}: ${t.message}")
         }
+        current = p
+        return p
+    }
+
+    /**
+     * 阻塞执行一次性命令（必须放子线程）。
+     *
+     * @param stdin   需要喂给进程的标准输入（如 PAT 明文），null 表示直接关闭 stdin。
+     *                PAT 走管道是为了不出现在命令行（防 ps / 日志泄露）。
+     * @param cwd     工作目录，默认当前工程目录
+     */
+    fun run(
+        ctx: Context,
+        cmd: List<String>,
+        stdin: String? = null,
+        timeoutMs: Long = 90_000,
+        cwd: File? = null
+    ): Result {
+        val p = newProcess(ctx, cmd, cwd, stdin)
+            ?: return Result(false, "Maker 未随运行时解包（缺少 node / maker/dist/maker.js / libmuslrt.so，请重装本版本）")
+
+        val sb = StringBuilder()
+        val reader = Thread {
+            runCatching { p.inputStream.bufferedReader().forEachLine { sb.appendLine(it) } }
+        }.apply { isDaemon = true }
+        reader.start()
+
+        if (!waitExit(p, timeoutMs)) {
+            runCatching { p.destroy() }
+            runCatching { p.waitFor(2, TimeUnit.SECONDS) }
+            current = null
+            return Result(false, sb.toString().ifBlank { "（无输出）" } + "\n[执行超时 ${timeoutMs / 1000}s，已终止]")
+        }
+        reader.join(1500)
+        current = null
+        return Result(p.exitValue() == 0, sb.toString().ifBlank { "（无输出）" })
+    }
+
+    /**
+     * 流式执行（login 专用）：每读到一行就回调，进程该等多久等多久。
+     *
+     * @param timeoutMs 默认 10 分 30 秒 —— CLI 自己的轮询上限就是 10 分钟，我们比它多留 30 秒。
+     */
+    fun runStream(
+        ctx: Context,
+        cmd: List<String>,
+        cwd: File? = null,
+        timeoutMs: Long = 10 * 60_000 + 30_000,
+        onLine: (String) -> Unit
+    ): Result {
+        val p = newProcess(ctx, cmd, cwd, null)
+            ?: return Result(false, "Maker 未随运行时解包（缺少 node / maker/dist/maker.js / libmuslrt.so，请重装本版本）")
+
+        val sb = StringBuilder()
+        val reader = Thread {
+            runCatching {
+                p.inputStream.bufferedReader().forEachLine { line ->
+                    sb.appendLine(line)
+                    runCatching { onLine(line) }
+                }
+            }
+        }.apply { isDaemon = true }
+        reader.start()
+
+        if (!waitExit(p, timeoutMs)) {
+            runCatching { p.destroy() }
+            current = null
+            return Result(false, sb.toString() + "\n[等待超时 ${timeoutMs / 1000}s，已终止]")
+        }
+        reader.join(1500)
+        current = null
+        return Result(p.exitValue() == 0, sb.toString().ifBlank { "（无输出）" })
+    }
+
+    private fun waitExit(p: Process, timeoutMs: Long): Boolean {
+        val deadline = System.currentTimeMillis() + timeoutMs
+        while (System.currentTimeMillis() < deadline) {
+            try {
+                p.exitValue()
+                return true
+            } catch (e: IllegalThreadStateException) {
+                Thread.sleep(150)
+            }
+        }
+        return false
     }
 }

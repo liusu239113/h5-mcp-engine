@@ -116,6 +116,9 @@ class AgentRunner(
                 // 捞出来丢给 UI，用户就能在对话里直接看到缩略图、点一下预览/试听。
                 if (tc.name.startsWith("mcp_")) {
                     assetsIn(res.text).forEach { onEvent("ASSET:$it") }
+                    // 云能力没授权（PAT 缺失 / 登录失效）：通知 UI 主动把授权链接递给用户，
+                    // 而不是让用户自己去设置页翻（那是上一版的做法，用户明确否掉了）。
+                    if (looksLikeAuthMissing(res.text)) onEvent("AUTHREQ:${tc.name}")
                 }
 
                 if (tc.name == "game_write" || tc.name == "game_patch" ||
@@ -134,6 +137,23 @@ class AgentRunner(
         } else {
             onEvent("INFO: 到步数上限（$limit），可再发一条让它继续，或在设置里调大上限。")
         }
+    }
+
+    /**
+     * MCP 返回这种味道的文本 = 云能力还没授权。
+     * 判定刻意保守（只认 CLI 自己的原话），免得普通业务报错也触发授权流程。
+     */
+    private fun looksLikeAuthMissing(t: String): Boolean {
+        if (t.isBlank()) return false
+        return listOf(
+            "PAT not found",
+            "pat_required",
+            "Maker login is required",
+            "Maker CLI login",
+            "taptap-maker login",
+            "Maker Git 鉴权失败",
+            "auth 缺失"
+        ).any { t.contains(it) }
     }
 
     /**
