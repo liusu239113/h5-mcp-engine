@@ -773,6 +773,15 @@ class AiClient(private val cfg: ProviderConfig) {
     private fun bodyOpenAi(history: List<ChatMsg>, tools: List<JSONObject>): JSONObject {
         val msgs = JSONArray()
         for (m in history) {
+            // 严格服务商（DeepSeek / 火山 / 智谱等）会校验：
+            // assistant 消息必须带 content 或 tool_calls，否则整轮 400
+            // 「Invalid assistant message: content or tool_calls must be set」。
+            // 这种空壳多来自「tool_calls 被拆掉后剩下的空 assistant」，
+            // 或「上游失败轮把空回复写进历史」—— 后者会让「再试一次」永远复现同一个 400。
+            // 直接跳过不发给服务商，比让整轮请求失败划算。
+            if (m.role == "assistant" && m.text.isNullOrBlank() &&
+                m.toolCalls.isEmpty() && m.images.isNullOrEmpty()
+            ) continue
             val o = JSONObject().put("role", m.role)
             if (m.role == "tool") {
                 o.put("tool_call_id", m.toolCallId ?: "")
