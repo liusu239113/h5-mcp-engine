@@ -1721,18 +1721,24 @@ class MainActivity : AppCompatActivity(), GameUi {
             setPadding(dp(8), 0, 0, 0)
         }
         val toggle = TextView(this).apply {
-            textSize = 11.5f
+            text = "▾"
+            textSize = 13f
             setTextColor(pal.accent)
-            setPadding(dp(8), 0, dp(2), 0)
+            setPadding(0, 0, dp(6), 0)
         }
+        // 观感对齐 Operit：三角在最左，然后是标题，运行信息靠右。
+        // 整行都能点开合，不用去戳右边那个小字。
+        head.addView(toggle)
         head.addView(title)
         head.addView(stat, LinearLayout.LayoutParams(0, -2, 1f))
-        head.addView(toggle)
+        head.isClickable = true
 
         val body = TextView(this).apply {
             textSize = 11.5f
             setTextColor(pal.sub)
             setPadding(dp(12), 0, dp(12), dp(10))
+            // 思考文字是用来「读」的：行距松一点、颜色灰一档，不抢正文的注意力
+            setLineSpacing(dp(4).toFloat(), 1.0f)
             visibility = View.VISIBLE
             setTextIsSelectable(true)
         }
@@ -1755,15 +1761,15 @@ class MainActivity : AppCompatActivity(), GameUi {
         latestActivity = ""
         runStartAt = SystemClock.elapsedRealtime()
         stat.text = "启动中…"
-        toggle.text = "收起"
+        toggle.text = "▾"
         runBar?.visibleIf(true)
         runBar?.text = "启动中…"
         askNotiPermission()
         startGuard()
-        toggle.setOnClickListener {
+        head.setOnClickListener {
             bodyExpanded = !bodyExpanded
             body.visibleIf(bodyExpanded)
-            toggle.text = if (bodyExpanded) "收起" else "展开"
+            toggle.text = if (bodyExpanded) "▾" else "▸"
             // 记住用户的手动选择：他自己收起了，流式进度就不要再强行摊开
             userCollapsedThinking = !bodyExpanded
             if (bodyExpanded) scrollChatToBottom()
@@ -1797,7 +1803,7 @@ class MainActivity : AppCompatActivity(), GameUi {
         if (!userCollapsedThinking && !bodyExpanded) {
             bodyExpanded = true
             b.visibleIf(true)
-            runToggle?.text = "收起"
+            runToggle?.text = "▾"
         }
         scrollChatToBottom()
     }
