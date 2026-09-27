@@ -219,7 +219,7 @@ class McpHub {
             "function",
             JSONObject()
                 .put("name", exposed)
-                .put("description", ("[TapTap 官方 MCP] " + e.tool.description.ifBlank { e.tool.name }).take(1200))
+                .put("description", ("[" + e.server.name + "] " + e.tool.description.ifBlank { e.tool.name }).take(1200))
                 .put("parameters", e.tool.schema)
         )
     }

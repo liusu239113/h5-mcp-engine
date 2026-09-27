@@ -2,6 +2,7 @@ package com.mcp.h5engine
 
 import android.content.Context
 import android.system.Os
+import android.system.OsConstants
 import java.io.File
 import java.io.FileOutputStream
 import java.io.RandomAccessFile
@@ -187,14 +188,24 @@ object McpRt {
 
     // ==================== Maker（本地制造开发）：stdio → HTTP 桥 ====================
 
-    /** 桥的健康检查（守护巡检直接用这个） */
+    /**
+     * 桥的健康检查（守护巡检直接用这个）。
+     *
+     * 只看 HTTP 200 是不够的：bridge 进程活着、但它 spawn 的 Maker 子进程死了时，
+     * /health 依旧回 200。那时 App 会一直认为「Maker 已就绪」，于是永不重启，
+     * Maker 工具数永远是 0（症状：授权过了，AI 却始终没有 generate_image）。
+     * 所以这里必须把 ok 字段（=子进程是否可用）一起判掉。
+     */
     fun makerHealth(): Boolean = try {
         val c = URL("http://127.0.0.1:$MAKER_PORT/health").openConnection() as HttpURLConnection
         c.connectTimeout = 1500
         c.readTimeout = 1500
         val code = c.responseCode
+        val body = if (code == 200) {
+            runCatching { c.inputStream.bufferedReader().use { it.readText() } }.getOrDefault("")
+        } else ""
         c.disconnect()
-        code == 200
+        code == 200 && body.contains("\"ok\":true")
     } catch (t: Throwable) {
         false
     }
@@ -219,7 +230,14 @@ object McpRt {
             val bridge = File(dir, "bridge.js")
             val maker = File(dir, "maker/dist/maker.js")
             if (!ld.isFile) return "缺少 libmuslrt.so（本包只支持 arm64 设备）"
-            if (!bridge.isFile || !maker.isFile) return "Maker 未随运行时解包（需重新安装本版本）"
+            if (!maker.isFile) return "Maker 未随运行时解包（需重新安装本版本）"
+            // 桥脚本随 APK 热更新：已装设备不用重新解包 65MB 运行时，
+            // 每次启动前从 assets 覆盖一份，保证跑的一定是带「子进程自愈」的新桥。
+            runCatching {
+                ctx.assets.open("bridge.js").use { ins ->
+                    FileOutputStream(File(dir, "bridge.js")).use { ins.copyTo(it) }
+                }
+            }
             stopMaker()
             val home = File(dir, "home").apply { mkdirs() }
             writeDnsMap(ctx)
@@ -242,6 +260,10 @@ object McpRt {
             env["PATH"] = dir.absolutePath
             // Maker 自己的家目录也塞私有目录，免得它往沙箱外写
             env["TAPTAP_MAKER_HOME"] = File(home, "maker").apply { mkdirs() }.absolutePath
+            // 关键：Maker 本体是桥 spawn 出来的**另一个** node 进程，它不继承我们给桥的启动参数。
+            // 不给它带上 CA / DNS 修正，它自己发起的网络请求（生图、音乐、配音都要联网）
+            // 会因为 musl 读不到 Android DNS、找不到 CA 而全部失败。
+            env["MAKER_CHILD_ARGS"] = "--use-bundled-ca -r " + File(dir, "dnsfix.js").absolutePath
             log("正在启动 Maker（本地制造开发）…")
             val p = pb.start()
             makerProcess = p
@@ -279,11 +301,43 @@ object McpRt {
         runCatching { makerProcess?.destroy() }
         makerProcess = null
         makerProject = ""
+        killStaleOnPort(MAKER_PORT)
     }
 
     fun stop() {
         runCatching { process?.destroy() }
         process = null
+        killStaleOnPort(PORT)
+    }
+
+    /**
+     * 把「占着端口的僵尸服务」清掉。
+     *
+     * 真实场景：App 被系统回收后，旧桥变成孤儿进程继续占着 3011，而它内部 spawn 的
+     * Maker 子进程早就死了（旧版桥不会重启子进程）。这时新 App 起来想重新拉桥，
+     * listen 直接撞 EADDRINUSE 退出，而旧桥只会一直回「Maker 子进程未运行」——
+     * 结果就是：授权过了、服务看着"在"，但 Maker 工具数永远是 0。
+     *
+     * 桥的 /health 会把自己的 pid 报出来；同一 uid 下可以直接 kill。
+     */
+    private fun killStaleOnPort(port: Int) {
+        val pid = runCatching {
+            val c = URL("http://127.0.0.1:$port/health").openConnection() as HttpURLConnection
+            c.connectTimeout = 800
+            c.readTimeout = 800
+            val body = if (c.responseCode == 200) {
+                c.inputStream.bufferedReader().use { it.readText() }
+            } else ""
+            c.disconnect()
+            Regex("\"pid\":(\\d+)").find(body)?.groupValues?.get(1)?.toIntOrNull()
+        }.getOrNull() ?: return
+        runCatching { Os.kill(pid, OsConstants.SIGKILL) }
+        // 给它一点时间真正退出，否则紧接着 bind 还是可能撞 EADDRINUSE
+        for (i in 0 until 20) {
+            val alive = runCatching { Os.kill(pid, 0); true }.getOrDefault(false)
+            if (!alive) break
+            runCatching { Thread.sleep(100) }
+        }
     }
 
     // ==================== tar 解包（ustar + GNU longname + pax 跳过） ====================
