@@ -1190,7 +1190,7 @@ class MainActivity : AppCompatActivity(), GameUi {
         }
         attachInfo.visibility = View.VISIBLE
         attachInfo.text = buildString {
-            if (attached.isNotEmpty()) append("待发送 ${attached.size} 项：点条目加入对话，× 移除")
+            if (attached.isNotEmpty()) append("待发送 ${attached.size} 项：直接发送会一起带上，× 移除")
             if (queued.isNotEmpty()) {
                 if (isNotEmpty()) append(" · ")
                 append("已加入对话 ${queued.size} 项")
@@ -1231,6 +1231,15 @@ class MainActivity : AppCompatActivity(), GameUi {
             return
         }
 
+        // 待发送区里的附件：不必再点一次「加入对话」。
+        // 用户选完图/文件，直接打字发出去，直觉上就是「这些一起发出去」；
+        // 老逻辑只弹一句「点一下条目就能带上」，附件留在原地 —— 用户会以为图丢了
+        // （实测反馈：选了图发出去，对话里没有图，下面还挂着待发送）。
+        // 现在：发送时自动全部并入本轮（图片进多模态、其余带路径 + 正文）。
+        if (attached.isNotEmpty()) {
+            for (a in attached.toList()) queueAttach(a, silent = true)
+        }
+
         val images = pendingShots.toList()
         val docs = queued.toList()
         pendingShots.clear()
@@ -1238,11 +1247,6 @@ class MainActivity : AppCompatActivity(), GameUi {
         updateAttachInfo()
         inputEt.setText("")
         lastUserText = text
-
-        // 待发送区里没点「加入对话」的条目：不偷偷发出去，只提醒一句，留给下一轮
-        if (attached.isNotEmpty()) {
-            addSystemLine("还有 ${attached.size} 项在待发送区没加入对话（点一下条目就能带上）")
-        }
 
         // 附件块：图片走多模态（上面的 images），其余把「路径 + 文件名 + 正文」一起给模型，
         // 这样既能 game_read 读原文件，也能只报文件名命中（Tools.fuzzyFind）
@@ -1719,12 +1723,21 @@ class MainActivity : AppCompatActivity(), GameUi {
         return Attach(name, rel, kind, text)
     }
 
-    /** 点待发送区条目 = 加入对话：图片并入多模态，其余在本轮消息里带上路径 + 正文 */
-    private fun queueAttach(a: Attach) {
+    /** 加入对话：图片并入多模态，其余在本轮消息里带上路径 + 正文。
+     *  silent=true 时用于「发送时自动并入」，不刷一条系统提示（避免噪音）。 */
+    private fun queueAttach(a: Attach, silent: Boolean = false) {
         if (!attached.remove(a)) return
-        if (a.kind == "image") shotBytes[a.rel]?.let { pendingShots += it }
+        if (a.kind == "image") {
+            // 优先用内存里已压缩好的那份；没有就现读文件再压
+            // （readAttach 存的是 shotBytes[rel]，rel 是相对 gameRoot 的路径，别当绝对路径用）
+            val b = shotBytes[a.rel] ?: runCatching {
+                val f = File(a.rel).let { if (it.isAbsolute) it else File(gameRoot, a.rel) }
+                if (f.isFile) shrinkToJpeg(f.readBytes(), 1024, 80) else null
+            }.getOrNull()
+            if (b != null && b.isNotEmpty()) pendingShots += b
+        }
         queued += a
-        addSystemLine("已加入对话：${a.kind}「${a.name}」")
+        if (!silent) addSystemLine("已加入对话：${a.kind}「${a.name}」")
         updateAttachInfo()
     }
 
