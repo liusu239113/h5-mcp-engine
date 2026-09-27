@@ -110,6 +110,10 @@ class MainActivity : AppCompatActivity(), GameUi {
     private lateinit var previewSlot: LinearLayout            // 预览容器原位（退出全屏搬回来）
     private var sessStore: SessionStore? = null
 
+    /** 正在试听的音频（再点一次就停；避免多个播放器叠着响） */
+    @Volatile
+    private var audioPlayer: android.media.MediaPlayer? = null
+
     /** 会话库按项目取：项目变了就换库，新项目 = 全新上下文 */
     private fun ss(): SessionStore {
         val cur = sessStore
@@ -789,6 +793,110 @@ class MainActivity : AppCompatActivity(), GameUi {
             .show()
     }
 
+    // ==================== 素材卡（Maker 生成物直接出现在对话里） ====================
+
+    /** 对话里的素材卡：图片给缩略图、音频给播放条；点一下预览 / 试听 */
+    private fun addAssetCard(path: String) {
+        val f = File(path)
+        if (!f.isFile) return
+        val ext = f.extension.lowercase()
+        val isImg = ext in setOf("png", "jpg", "jpeg", "webp", "gif", "bmp")
+        val card = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(10), dp(10), dp(10), dp(10))
+            background = roundCard(this@MainActivity, pal.cardAlt, pal.border, 14)
+        }
+        if (isImg) {
+            card.addView(android.widget.ImageView(this).apply {
+                scaleType = android.widget.ImageView.ScaleType.FIT_CENTER
+                adjustViewBounds = true
+                setImageBitmap(decodeThumb(f, 900))
+            }, LinearLayout.LayoutParams(-1, -2))
+        } else {
+            card.addView(TextView(this).apply {
+                text = "🎵"
+                textSize = 30f
+                gravity = Gravity.CENTER
+            })
+        }
+        card.addView(TextView(this).apply {
+            text = (if (isImg) "🖼 " else "🎵 ") + f.name + " · " + (f.length() / 1024) + " KB"
+            textSize = 11.5f
+            setTextColor(pal.sub)
+            setPadding(0, dp(6), 0, 0)
+        })
+        card.addView(TextView(this).apply {
+            text = if (isImg) "点一下看大图" else "点一下试听"
+            textSize = 11f
+            setTextColor(pal.faint)
+            setPadding(0, dp(2), 0, 0)
+        })
+        card.setOnClickListener { if (isImg) showImageFull(f) else playAudio(f) }
+        chatList.addView(card, LinearLayout.LayoutParams(-2, -2).apply {
+            gravity = Gravity.START
+            topMargin = dp(6)
+            bottomMargin = dp(4)
+            rightMargin = dp(30)
+        })
+        scrollChatToBottom()
+    }
+
+    /** 缩略图：按目标边长采样，别把几十 MB 的原图整张读进内存 */
+    private fun decodeThumb(f: File, target: Int): android.graphics.Bitmap? = runCatching {
+        val o = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        android.graphics.BitmapFactory.decodeFile(f.absolutePath, o)
+        var s = 1
+        while (o.outWidth / (s * 2) >= target || o.outHeight / (s * 2) >= target) s *= 2
+        android.graphics.BitmapFactory.decodeFile(
+            f.absolutePath,
+            android.graphics.BitmapFactory.Options().apply { inSampleSize = s }
+        )
+    }.getOrNull()
+
+    /** 点开大图：全屏黑底，点一下关掉 */
+    private fun showImageFull(f: File) {
+        val bm = decodeThumb(f, 2400)
+        if (bm == null) {
+            toast("图片读取失败")
+            return
+        }
+        val iv = android.widget.ImageView(this).apply {
+            setImageBitmap(bm)
+            adjustViewBounds = true
+            scaleType = android.widget.ImageView.ScaleType.FIT_CENTER
+            setBackgroundColor(0xFF000000.toInt())
+        }
+        val d = Dialog(this, android.R.style.Theme_Black_NoTitleBar_Fullscreen)
+        d.setContentView(iv, android.view.ViewGroup.LayoutParams(-1, -1))
+        iv.setOnClickListener { d.dismiss() }
+        d.show()
+    }
+
+    /** 试听：点一下放，再点一下停 */
+    private fun playAudio(f: File) {
+        runCatching {
+            val cur = audioPlayer
+            if (cur != null && cur.isPlaying) {
+                cur.stop()
+                cur.release()
+                audioPlayer = null
+                toast("已停止")
+                return
+            }
+            cur?.release()
+            val mp = android.media.MediaPlayer()
+            mp.setDataSource(f.absolutePath)
+            mp.prepare()
+            mp.start()
+            audioPlayer = mp
+            mp.setOnCompletionListener {
+                runCatching { it.release() }
+                if (audioPlayer === it) audioPlayer = null
+            }
+            toast("正在播放：${f.name}")
+        }.onFailure { toast("播放失败：${it.message}") }
+    }
+
     private fun addSystemLine(text: String) {
         val tv = TextView(this).apply {
             setText(text)
@@ -1033,6 +1141,10 @@ class MainActivity : AppCompatActivity(), GameUi {
                     val l = ev.removePrefix("TOOL:").trim()
                     latestActivity = l.take(30)
                     appendThinking(l)
+                }
+                ev.startsWith("ASSET:") -> {
+                    // 素材生成完成：直接在对话里插一张卡，点一下就能预览 / 试听
+                    addAssetCard(ev.removePrefix("ASSET:").trim())
                 }
                 ev == "RELOAD" -> {
                     runWrote = true

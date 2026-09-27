@@ -112,6 +112,12 @@ class AgentRunner(
                 if (head.length > 150) head = head.take(150) + "…"
                 onEvent("TOOL:[${tc.name}] $head")
 
+                // Maker 会把生成的图/音「materialize」到项目里并返回本地路径：
+                // 捞出来丢给 UI，用户就能在对话里直接看到缩略图、点一下预览/试听。
+                if (tc.name.startsWith("mcp_")) {
+                    assetsIn(res.text).forEach { onEvent("ASSET:$it") }
+                }
+
                 if (tc.name == "game_write" || tc.name == "game_patch" ||
                     tc.name == "game_create" || tc.name == "game_launch"
                 ) {
@@ -128,6 +134,28 @@ class AgentRunner(
         } else {
             onEvent("INFO: 到步数上限（$limit），可再发一条让它继续，或在设置里调大上限。")
         }
+    }
+
+    /**
+     * 从工具返回的文本里捞出「真实存在的素材文件」。
+     *
+     * Maker 的 generate_image / text_to_music 等会把产物落到项目里并回传本地路径，
+     * 但格式不一定规整（可能带引号、markdown 链接、括号说明），所以这里按后缀兜底匹配，
+     * 并且**必须真的存在**才算数 —— 免得把文档里举例的假路径当成生成结果。
+     */
+    private fun assetsIn(text: String): List<String> {
+        if (text.isBlank()) return emptyList()
+        val re = Regex(
+            "[^\\s\"'`（）()\\[\\]{}，。；;<>|*?]+?\\.(?:png|jpg|jpeg|webp|gif|bmp|mp3|wav|ogg|m4a|aac|flac|mp4)",
+            RegexOption.IGNORE_CASE
+        )
+        val out = LinkedHashSet<String>()
+        for (m in re.findAll(text)) {
+            val p = m.value.trim().trimEnd('.', ',', ';')
+            val f = java.io.File(p)
+            if (f.isFile && f.length() > 0) out += f.absolutePath
+        }
+        return out.toList()
     }
 
     private fun saveShot(img: ByteArray): String = try {
