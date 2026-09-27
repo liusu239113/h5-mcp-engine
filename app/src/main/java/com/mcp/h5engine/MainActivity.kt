@@ -224,6 +224,46 @@ class MainActivity : AppCompatActivity(), GameUi {
         openGame(currentGame)
         addSystemLine("引擎已就绪 · 当前游戏：$currentGame")
         addSystemLine("直接说「做个贪吃蛇」，或点底部「当前画面」把画面发给 AI 让它改。")
+        startMcp()
+    }
+
+    // ==================== 内置 MCP（TapTap 小游戏官方服务） ====================
+
+    @Volatile private var mcpBusy = false
+
+    /**
+     * 把随 APK 分发的 MCP 运行时释放到私有目录并拉起本地服务，
+     * 再把服务暴露的工具全部注册给 AI。全程后台线程，不阻塞冷启动。
+     */
+    private fun startMcp() {
+        if (mcpBusy) return
+        mcpBusy = true
+        Thread {
+            fun say(s: String) = main.post { addSystemLine(s) }
+            try {
+                val enabled = McpStore.load(this).filter { it.enabled }
+                if (enabled.isEmpty()) return@Thread
+                if (!McpRt.ready(this)) {
+                    say("MCP：首次启动，正在释放内置运行时（约 60MB，只做一次）…")
+                    val e = McpRt.extract(this) { }
+                    if (e != null) { say("MCP：运行时释放失败 → $e"); return@Thread }
+                }
+                if (!McpRt.health()) {
+                    say("MCP：正在启动本地服务…")
+                    val e = McpRt.start(this) { }
+                    if (e != null) { say("MCP：本地服务启动失败 → $e"); return@Thread }
+                }
+                val hub = McpHub()
+                hub.refresh(enabled) { }
+                EngineTools.mcp = hub
+                if (hub.size > 0) say("MCP 已就绪：${hub.lastInfo}，AI 可直接调用这些工具")
+                else say("MCP 未注册到工具：${hub.lastError ?: "未知原因"}")
+            } catch (t: Throwable) {
+                say("MCP 初始化异常：${t.javaClass.simpleName}: ${t.message}")
+            } finally {
+                mcpBusy = false
+            }
+        }.start()
     }
 
     private var topHolder: LinearLayout? = null
@@ -2889,6 +2929,123 @@ class MainActivity : AppCompatActivity(), GameUi {
 
             override fun onNothingSelected(parent: android.widget.AdapterView<*>?) {}
         }
+
+        // ---------- MCP 服务器 ----------
+        section("MCP 服务器（TapTap 小游戏等，运行时已内置）")
+        val mcpStatus = TextView(ctx).apply {
+            textSize = 12.5f
+            setTextColor(pal.sub)
+            setPadding(dp(2), 0, dp(2), dp(6))
+        }
+        col.addView(mcpStatus)
+
+        val mcpList = LinearLayout(ctx).apply { orientation = LinearLayout.VERTICAL }
+        col.addView(mcpList)
+
+        fun mcpRender() {
+            val rt = when {
+                !McpRt.ready(ctx) -> "运行时未释放"
+                McpRt.running() -> "本地服务运行中（端口 ${McpRt.PORT}）"
+                else -> "运行时已就绪，服务未启动"
+            }
+            val hub = EngineTools.mcp
+            val info = hub?.lastInfo ?: "未连接"
+            mcpStatus.text = "$rt · $info · 已注册 ${hub?.size ?: 0} 个工具"
+        }
+
+        fun mcpRebuild() {
+            mcpList.removeAllViews()
+            val list = McpStore.load(ctx)
+            if (list.isEmpty()) {
+                mcpList.addView(TextView(ctx).apply {
+                    text = "（还没有服务器，点下面「添加服务器」）"
+                    textSize = 12f
+                    setTextColor(pal.faint)
+                    setPadding(dp(2), 0, 0, dp(4))
+                })
+            }
+            list.forEach { s ->
+                val row = LinearLayout(ctx).apply { orientation = LinearLayout.HORIZONTAL }
+                row.addView(android.widget.CheckBox(ctx).apply {
+                    isChecked = s.enabled
+                    setOnCheckedChangeListener { _, v ->
+                        s.enabled = v
+                        McpStore.save(ctx, list)
+                        toast("MCP「${s.name}」已${if (v) "启用" else "停用"}，重启服务后生效")
+                    }
+                })
+                row.addView(TextView(ctx).apply {
+                    text = "${s.name}\n${s.url}"
+                    textSize = 12.5f
+                    setTextColor(pal.text)
+                    setPadding(dp(2), dp(4), dp(2), dp(4))
+                    layoutParams = LinearLayout.LayoutParams(0, -2, 1f)
+                })
+                row.addView(ghostBtnOf(ctx, pal, "删除").apply {
+                    setOnClickListener {
+                        McpStore.save(ctx, list.filter { it !== s })
+                        mcpRebuild()
+                        mcpRender()
+                    }
+                })
+                mcpList.addView(row, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(4) })
+            }
+        }
+
+        fun mcpStart(restart: Boolean) {
+            mcpStatus.text = "正在启动 MCP 服务…"
+            Thread {
+                if (!McpRt.ready(ctx)) McpRt.extract(ctx) { }
+                val e = McpRt.start(ctx) { }
+                if (e == null) {
+                    val hub = McpHub()
+                    hub.refresh(McpStore.load(ctx).filter { it.enabled }) { }
+                    EngineTools.mcp = hub
+                }
+                main.post {
+                    mcpRender()
+                    toast(if (e == null) "MCP 服务已就绪" else "MCP 启动失败：$e")
+                }
+            }.start()
+        }
+
+        mcpRebuild()
+        mcpRender()
+
+        val mcpRow = LinearLayout(ctx).apply { orientation = LinearLayout.HORIZONTAL }
+        mcpRow.addView(ghostBtnOf(ctx, pal, "启动 / 重连").apply { setOnClickListener { mcpStart(true) } })
+        mcpRow.addView(ghostBtnOf(ctx, pal, "刷新状态").apply { setOnClickListener { mcpRender() } })
+        mcpRow.addView(ghostBtnOf(ctx, pal, "添加服务器").apply {
+            setOnClickListener {
+                val box = LinearLayout(ctx).apply {
+                    orientation = LinearLayout.VERTICAL
+                    setPadding(dp(18), dp(6), dp(18), dp(6))
+                }
+                val nameEt = input("名称", "我的 MCP")
+                val urlEt2 = input("地址（Streamable HTTP，如 http://127.0.0.1:3000/）", "http://")
+                box.addView(nameEt, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(6) })
+                box.addView(urlEt2, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(6) })
+                AlertDialog.Builder(themed())
+                    .setTitle("添加 MCP 服务器")
+                    .setView(box)
+                    .setPositiveButton("添加") { _, _ ->
+                        val list = McpStore.load(ctx)
+                        list.add(
+                            McpServer(
+                                nameEt.text.toString().trim().ifBlank { "MCP" },
+                                urlEt2.text.toString().trim(),
+                                true
+                            )
+                        )
+                        McpStore.save(ctx, list)
+                        mcpRebuild()
+                        mcpRender()
+                    }
+                    .setNegativeButton("取消", null)
+                    .show()
+            }
+        })
+        col.addView(mcpRow, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(6) })
 
         val dlg = AlertDialog.Builder(themed())
             .setTitle("设置")

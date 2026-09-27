@@ -52,6 +52,12 @@ class EngineTools(private val ui: GameUi, private val root: File) {
 
     data class ToolResult(val text: String, val images: List<ByteArray> = emptyList())
 
+    companion object {
+        /** MCP 工具桥（TapTap 小游戏等），App 启动时注入；声明与执行都会带上它 */
+        @Volatile
+        var mcp: McpHub? = null
+    }
+
     // ==================== 工具声明 ====================
 
     private fun fn(name: String, desc: String, props: String, required: List<String>): JSONObject {
@@ -140,19 +146,26 @@ class EngineTools(private val ui: GameUi, private val root: File) {
         )
     }
 
-    /** allow 为 null 或空集合都表示全开 */
-    fun specs(allow: Set<String>? = null): List<JSONObject> =
-        if (allow.isNullOrEmpty()) allSpecs
+    /** allow 为 null 或空集合都表示全开；MCP 工具始终附带（技能白名单只管引擎工具） */
+    fun specs(allow: Set<String>? = null): List<JSONObject> {
+        val base = if (allow.isNullOrEmpty()) allSpecs
         else allSpecs.filter { allow.contains(it.getJSONObject("function").getString("name")) }
+        val extra = mcp?.specs() ?: emptyList()
+        return if (extra.isEmpty()) base else base + extra
+    }
 
     fun names(): List<String> = allSpecs.map { it.getJSONObject("function").getString("name") }
 
     // ==================== 执行 ====================
 
-    fun call(name: String, argsJson: String): ToolResult = try {
-        exec(name, runCatching { JSONObject(argsJson) }.getOrDefault(JSONObject()))
-    } catch (t: Throwable) {
-        ToolResult("工具执行失败 ${t.javaClass.simpleName}: ${t.message}")
+    fun call(name: String, argsJson: String): ToolResult {
+        // MCP 工具（TapTap 等）直接转给对应服务器
+        mcp?.let { hub -> if (hub.handles(name)) return ToolResult(hub.call(name, argsJson)) }
+        return try {
+            exec(name, runCatching { JSONObject(argsJson) }.getOrDefault(JSONObject()))
+        } catch (t: Throwable) {
+            ToolResult("工具执行失败 ${t.javaClass.simpleName}: ${t.message}")
+        }
     }
 
     /** 广告硬纪律：即使文档读不到，也要把正确做法塞给模型 */

@@ -56,6 +56,15 @@ android {
     androidResources {
         noCompress += listOf("zip", "wasm", "data", "json")
     }
+    // 关键：把 jniLibs 按传统方式解压到 nativeLibraryDir。
+    // 我们靠自己带的 musl 加载器 exec node，而安卓只允许从 lib 目录执行，
+    // 所以 libmuslrt.so 必须真实落地（新版 AGP 默认不再解压）。
+    packaging {
+        jniLibs {
+            useLegacyPackaging = true
+            keepDebugSymbols += "**/libmuslrt.so"
+        }
+    }
 }
 
 dependencies {
