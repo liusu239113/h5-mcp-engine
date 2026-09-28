@@ -336,6 +336,10 @@ class MainActivity : AppCompatActivity(), GameUi {
     /** 预览里现在该不该出声：默认静音，只有停在「预览」页时才放开 */
     @Volatile private var previewMuted = true
 
+    /** 用户在预览页手动按的静音开关（优先级最高：切页、重载都按它来） */
+    private var userMutePreview = false
+    private var previewMuteChip: TextView? = null
+
     /** 最近一次导出的 zip，用于「分享 / 复制路径」 */
     @Volatile
     private var lastExport: File? = null
@@ -713,7 +717,7 @@ class MainActivity : AppCompatActivity(), GameUi {
         // 声音纪律：预览 WebView 是常驻的（切页只是改 visibility），
         // 不主动静音的话，游戏 BGM / 音效会在「对话」「发布」页一直响下去。
         // 只有停在预览页时才允许发声；切走立刻掐掉。
-        applyPreviewMute(tab != 1)
+        applyPreviewMute(userMutePreview || tab != 1)
         // 补一刀：游戏可能在「切页瞬间」刚起了一段音（定时器 / 场景切换），
         // 单次静音会漏掉这一声，350ms 后再对一次表。
         if (tab != 1) main.postDelayed({ if (activeTab != 1) applyPreviewMute(true) }, 350)
@@ -2804,6 +2808,19 @@ class MainActivity : AppCompatActivity(), GameUi {
 
         bar.addView(previewLabel, LinearLayout.LayoutParams(0, -2, 1f))
         bar.addView(reload)
+        // 手动静音：游戏 BGM / 音效太吵时一键关掉，状态一直记着
+        previewMuteChip = chipOf(this, pal, "🔇静音", false).apply {
+            setOnClickListener {
+                userMutePreview = !userMutePreview
+                text = if (userMutePreview) "🔊有声" else "🔇静音"
+                applyPreviewMute(userMutePreview || activeTab != 1)
+                toast(if (userMutePreview) "预览已静音（切页、重载也保持）" else "预览恢复发声")
+            }
+        }
+        bar.addView(
+            previewMuteChip,
+            LinearLayout.LayoutParams(-2, -2).apply { leftMargin = dp(8) }
+        )
         bar.addView(shot, LinearLayout.LayoutParams(-2, -2).apply { leftMargin = dp(6) })
         bar.addView(switch, LinearLayout.LayoutParams(-2, -2).apply { leftMargin = dp(6) })
         // 手绘全屏图标：把预览容器整个搬进全屏 Dialog（同一个 WebView 实例，游戏状态不丢）
@@ -4834,7 +4851,7 @@ makerRow1.addView(ghostBtnOf(ctx, pal, "扫码登录").apply {
                 // 页面换了（重载 / 切项目）：注入脚本默认是安静的，这里把「当前该不该出声」
                 // 重新对齐一次 —— 停在「预览」页就放声，其它页保持静音，
                 // 否则重载后 BGM 会在对话页自己响起来。
-                applyPreviewMute(if (activeTab == 1) false else previewMuted)
+                applyPreviewMute(userMutePreview || activeTab != 1)
             }
 
             override fun shouldInterceptRequest(
