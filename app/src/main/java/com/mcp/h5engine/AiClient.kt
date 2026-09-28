@@ -779,6 +779,20 @@ class AiClient(private val cfg: ProviderConfig) {
             val c = strOf(m, "content")
             m.put("content", "（历史工具结果，对应的调用记录已丢失）\n" + c)
         }
+        // 最后一道保险：拆完 tool_calls 之后变成空壳的 assistant，绝不能再原样发出去。
+        // DeepSeek 会直接 400：Invalid assistant message: content or tool_calls must be set。
+        // （长会话中途工具记录不完整时必现，用户已经踩到过。）
+        for (i in 0 until msgs.length()) {
+            val m = msgs.optJSONObject(i) ?: continue
+            if (strOf(m, "role") != "assistant") continue
+            val hasTc = (m.optJSONArray("tool_calls")?.length() ?: 0) > 0
+            val c = m.opt("content")
+            val blank = c == null || c === JSONObject.NULL ||
+                c.toString().replace("null", "").isBlank()
+            if (!hasTc && blank) {
+                m.put("content", "（上一步的工具记录不完整，这里省略）")
+            }
+        }
         return msgs
     }
 
