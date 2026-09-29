@@ -115,7 +115,10 @@ object McpRt {
         if (ready(ctx)) return null
         return try {
             val dir = rtDir(ctx)
-            dir.deleteRecursively()
+            val __home = File(dir, "home")
+val __bak = File(ctx.cacheDir, "rt_home_bak")
+if (__home.isDirectory) { __bak.deleteRecursively(); if (!__home.renameTo(__bak)) __home.copyRecursively(__bak, overwrite = true) }
+dir.deleteRecursively()
             dir.mkdirs()
             val tar = File(dir, "rt.tar")
             log("首次运行：正在释放运行时（约 60MB，只做一次）…")
@@ -126,6 +129,7 @@ object McpRt {
             extractTar(tar, dir)
             tar.delete()
             stampFile(ctx).writeText(STAMP)
+if (__bak.isDirectory) { __home.deleteRecursively(); if (!__bak.renameTo(__home)) __bak.copyRecursively(__home, overwrite = true) }
             File(dir, "node").setExecutable(true, false)
             ensureGitrt(ctx, dir)
             log("运行时就绪")
