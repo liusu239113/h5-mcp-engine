@@ -306,6 +306,11 @@ class MainActivity : AppCompatActivity(), GameUi {
     private var runSteps = 0
     private var bodyExpanded = false
     private var latestActivity = ""
+    // ===== 工具卡片（Operit 那种可视化）：每调一个工具，对话里出一张卡，运行中→成功绿点/失败红点 =====
+    private var curToolCard: LinearLayout? = null
+    private var curToolIcon: ImageView? = null
+    private var curToolIconKind = "layers"
+    private var curToolText: TextView? = null
     private var runToggle: TextView? = null
     /** 用户手动收起了思考面板：那就别再自动摊开 */
     private var userCollapsedThinking = false
@@ -1478,6 +1483,117 @@ class MainActivity : AppCompatActivity(), GameUi {
         scrollChatToBottom()
     }
 
+    // ==================== 工具卡片（Operit 那种可视化） ====================
+
+    private val TOOL_OK = 0xFF3BA55D.toInt()
+    private val TOOL_FAIL = 0xFFD9534F.toInt()
+
+    /** 按工具名给图标（照 Operit 的 getToolIcon 思路：不同工具给不同图标） */
+    private fun toolIconKind(name: String): String {
+        val n = name.lowercase()
+        return when {
+            n.contains("search") || n.contains("grep") || n.contains("find") -> "search"
+            n.contains("read") || n.contains("doc") || n.contains("usage") -> "doc"
+            n.contains("write") || n.contains("patch") || n.contains("edit") || n.contains("code") -> "code"
+            n.contains("shot") || n.contains("image") || n.contains("bg") || n.contains("ui") -> "image"
+            n.contains("music") || n.contains("audio") || n.contains("voice") -> "audio"
+            n.contains("video") -> "video"
+            n.contains("list") || n.contains("status") || n.contains("apps") || n.contains("project") -> "list"
+            n.contains("skill") -> "skill"
+            else -> "layers"
+        }
+    }
+
+    /** 从事件载荷里拆出 head（摘要）和 full（详情全文）——见 AgentRunner 的 \u0000 分隔 */
+    private fun toolPayload(rest: String): Pair<String, String> {
+        val head = rest.substringBefore("\u0000").trim()
+        val full = rest.substringAfter("\u0000", head).trim()
+        return head to (if (full.isBlank()) head else full)
+    }
+
+    /** 工具开始：插一张「运行中」卡（图标灰 + 工具名 + 运行中…），结果回来由 updateToolCard 定型 */
+    private fun addToolCardRunning(name: String) {
+        val nm = if (name.isBlank()) "工具" else name
+        val kind = toolIconKind(nm)
+        val icon = ImageView(this).apply {
+            setImageDrawable(LineIcon(kind, pal.sub, dp(2).toFloat()))
+        }
+        val title = TextView(this).apply {
+            text = nm
+            textSize = 12.5f
+            setTextColor(pal.text)
+            typeface = Typeface.DEFAULT_BOLD
+            setPadding(dp(6), 0, 0, 0)
+        }
+        val body = TextView(this).apply {
+            text = "运行中…"
+            textSize = 11.5f
+            setTextColor(pal.faint)
+            setPadding(dp(6), 0, 0, 0)
+            maxLines = 1
+        }
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(12), dp(7), dp(12), dp(7))
+            background = roundCard(this@MainActivity, pal.cardAlt, pal.border, 12)
+            addView(icon, LinearLayout.LayoutParams(dp(16), dp(16)))
+            addView(title)
+            addView(body, LinearLayout.LayoutParams(0, -2, 1f))
+        }
+        chatList.addView(row, LinearLayout.LayoutParams(-2, -2).apply {
+            topMargin = dp(3)
+            leftMargin = dp(6)
+            rightMargin = dp(40)
+        })
+        scrollChatToBottom()
+        curToolCard = row
+        curToolIcon = icon
+        curToolIconKind = kind
+        curToolText = body
+    }
+
+    /** 工具结束：图标转绿/红，摘要取前 200 字；点卡片看全文详情（可复制）——对齐 Operit 的 ToolResultDisplay */
+    private fun updateToolCard(ok: Boolean, name: String, head: String, full: String) {
+        val c = if (ok) TOOL_OK else TOOL_FAIL
+        runCatching { curToolIcon?.setImageDrawable(LineIcon(curToolIconKind, c, dp(2).toFloat())) }
+        val summary = when {
+            head.isNotBlank() -> head.take(200)
+            ok -> "执行成功"
+            else -> "执行失败"
+        }
+        runCatching {
+            curToolText?.text = summary
+            curToolText?.setTextColor(if (ok) pal.faint else TOOL_FAIL)
+        }
+        val card = curToolCard
+        val t = if (name.isBlank()) "工具" else name
+        if (card != null) card.setOnClickListener {
+            showTextDetail(t + if (ok) " · 结果" else " · 失败", full.ifBlank { summary })
+        }
+        curToolCard = null
+        curToolIcon = null
+        curToolText = null
+    }
+
+    /** 工具全文详情弹窗：可滚动 + 可选中 + 一键复制 */
+    private fun showTextDetail(title: String, content: String) {
+        val tv = TextView(this).apply {
+            setText(content)
+            textSize = 12.5f
+            setTextColor(pal.text)
+            setTextIsSelectable(true)
+            setPadding(dp(16), dp(10), dp(16), dp(10))
+        }
+        val sv = ScrollView(this).apply { addView(tv) }
+        AlertDialog.Builder(themed())
+            .setTitle(title)
+            .setView(sv)
+            .setPositiveButton("复制") { _, _ -> copyToClip(content, "工具结果") }
+            .setNegativeButton("关闭", null)
+            .show()
+    }
+
     /** 错误卡片：可读的字号 + 明确的原因 + 一键再试，不再是看不清的灰字 */
     private fun addErrorCard(msg: String) {
         val card = LinearLayout(this).apply {
@@ -1782,10 +1898,27 @@ class MainActivity : AppCompatActivity(), GameUi {
                     val t = ev.removePrefix("THINK:").trim()
                     if (t.isNotEmpty()) appendThinking("思考：\n" + t.take(1500))
                 }
+                ev.startsWith("TOOLRUN:") -> {
+                    // 工具开始执行：先插一张「运行中」卡（灰图标），结果回来再改成绿/红
+                    val nm = ev.removePrefix("TOOLRUN:").trim().removePrefix("[").substringBefore("]")
+                    addToolCardRunning(nm)
+                }
+                ev.startsWith("TOOLFAIL:") -> {
+                    val l = ev.removePrefix("TOOLFAIL:").trim()
+                    val nm = l.substringAfter("[").substringBefore("]")
+                    val (head, full) = toolPayload(l.substringAfter("] ").trim())
+                    latestActivity = head.take(30)
+                    appendThinking("[$nm] $head")
+                    updateToolCard(false, nm, head, full)
+                    runCatching { mediaPathsIn(l).forEach { p -> autoCardMedia(p) } }
+                }
                 ev.startsWith("TOOL:") -> {
                     val l = ev.removePrefix("TOOL:").trim()
-                    latestActivity = l.take(30)
-                    appendThinking(l)
+                    val nm = l.substringAfter("[").substringBefore("]")
+                    val (head, full) = toolPayload(l.substringAfter("] ").trim())
+                    latestActivity = head.take(30)
+                    appendThinking("[$nm] $head")
+                    updateToolCard(true, nm, head, full)
                     // AI 产出的音视频：直接在对话里给一张能点的播放卡。
                     // 用户反馈：只给一个路径 = "发了个听不了的链接"，还得自己去找临时按钮听。
                     runCatching { mediaPathsIn(l).forEach { p -> autoCardMedia(p) } }
@@ -1875,6 +2008,9 @@ class MainActivity : AppCompatActivity(), GameUi {
         bodyExpanded = true
         userCollapsedThinking = false
         latestActivity = ""
+        curToolCard = null
+        curToolIcon = null
+        curToolText = null
         runStartAt = SystemClock.elapsedRealtime()
         stat.text = "启动中…"
         toggle.text = "▾"

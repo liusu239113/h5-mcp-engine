@@ -235,6 +235,7 @@ class AgentRunner(
                 }
 
                 // 工具自己抛异常（参数不合法 / 文件不存在之类）同样要补响应，道理同上
+                onEvent("TOOLRUN:[${tc.name}]")
                 val res = runCatching { tools.call(tc.name, tc.argsJson) }
                     .getOrElse { t -> EngineTools.ToolResult("工具执行出错：${t.javaClass.simpleName}: ${t.message}") }
                 val images = if (cfg.vision) res.images else emptyList()
@@ -247,7 +248,13 @@ class AgentRunner(
 
                 var head = res.text.lineSequence().firstOrNull() ?: ""
                 if (head.length > 150) head = head.take(150) + "…"
-                onEvent("TOOL:[${tc.name}] $head")
+                // 判失败：工具返回首行带这些味道 = 失败了，UI 卡片显示红点（Operit 那种）。
+                val fail = head.startsWith("错误") || head.contains("失败") ||
+                    head.contains("工具执行出错") || head.contains("未授权") || head.contains("超时")
+                // NUL 分隔：head（进卡片摘要/思考面板）+ full（详情弹窗用全文），
+                // 用 \u0000 当分隔符是因为工具文本里绝不可能出现它，不会串味。
+                val full = res.text.replace("\u0000", "").take(4000)
+                onEvent((if (fail) "TOOLFAIL:" else "TOOL:") + "[${tc.name}] " + head + "\u0000" + full)
 
                 // Maker 会把生成的图/音「materialize」到项目里并返回本地路径：
                 // 捞出来丢给 UI，用户就能在对话里直接看到缩略图、点一下预览/试听。
