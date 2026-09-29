@@ -1137,8 +1137,9 @@ class MainActivity : AppCompatActivity(), GameUi {
         }
         sendBtn = primaryBtnOf(this, pal, "发送").apply {
             setOnClickListener { send() }
-            // 长按 = 排队（等这一轮跑完再发）；正常点 = 立刻发（打断上一轮）
-            setOnLongClickListener { send(queueIfBusy = true); true }
+            // 点 = 发出去（上一轮还在跑就**排队**，跑完自动发）；
+            // 长按 = 等不及了，**打断**当前轮立刻发。
+            setOnLongClickListener { send(interrupt = true); true }
         }
 
         row.addView(attachBtn)
@@ -1482,6 +1483,10 @@ class MainActivity : AppCompatActivity(), GameUi {
     private fun addAssetCard(path: String) {
         val src = File(path)
         if (!src.isFile) return
+        // 同一个文件只出一张卡：Maker 有时在结果里把同一张图报好几遍，
+        // 工具也可能连着被调两次 —— 不挡的话对话里会排满同一张卡。
+        // （去重以前挂在 autoCardMedia 上，那条路已经删了，挪到这儿来。）
+        if (!autoCarded.add(src.absolutePath)) return
         // 并入工作区：Maker 把生成物 materialize 在「<项目>/assets/…」下，
         // 而工作区（素材）读的是「<项目>/_uploads/media」—— 用户要的是"生成完就在工作区里"。
         // 这里复制一份进去（同名同大小就跳过），卡片指向工作区那份，
@@ -1611,32 +1616,15 @@ class MainActivity : AppCompatActivity(), GameUi {
     /** 已经自动出过卡的媒体文件（同一文件只出一张，别刷屏） */
     private val autoCarded = HashSet<String>()
 
-    /**
-     * 从工具输出里挑出「真实存在的媒体文件」，返回绝对路径。
-     * 只认能在磁盘上找到、且非空的文件 —— 免得把日志里随手提到的名字也变成卡。
-     */
-    private fun mediaPathsIn(text: String): List<String> {
-        val out = LinkedHashSet<String>()
-        val re = Regex(
-            """[A-Za-z0-9_./\\-]+\.(mp3|wav|ogg|m4a|aac|mp4|webm|mov)""",
-            RegexOption.IGNORE_CASE
-        )
-        for (m in re.findAll(text)) {
-            val raw = m.value
-            val f = runCatching {
-                val one = File(raw)
-                if (one.isAbsolute) one else File(gameRoot, raw)
-            }.getOrNull() ?: continue
-            if (f.isFile && f.length() > 0) out.add(f.absolutePath)
-        }
-        return out.toList()
-    }
-
-    /** 给媒体文件插一张可点播放的卡（只插一次） */
-    private fun autoCardMedia(path: String) {
-        if (!autoCarded.add(path)) return
-        runCatching { addAssetCard(path) }
-    }
+    // 【已移除】mediaPathsIn / autoCardMedia：以前拿正则扫**任何**工具输出的文本，
+    // 见到 .mp3/.mp4 之类的后缀、而且磁盘上真有这个文件，就往对话里插一张播放卡。
+    //
+    // 结果就是用户说的「读项目老是跑这个音频出来」——AI 只要 game_read 一个列出文件的
+    // 目录、或者 code_search 命中了一行带路径的代码，那张卡就冒出来了，
+    // 跟「AI 刚生成了这段音频」完全是两回事。
+    //
+    // 现在只认 AgentRunner 明确发来的 ASSET: 事件（只会由 maker_ / mcp_ 这类
+    // 真在产出素材的工具触发），不再靠猜文本。
 
     private fun addSystemLine(text: String) {
         val tv = TextView(this).apply {
@@ -2074,19 +2062,18 @@ class MainActivity : AppCompatActivity(), GameUi {
     // ==================== 发送 ====================
 
     /**
-     * 发送入口。
-     *
-     * queueIfBusy = true 时（长按「发送」）才是「排队等它跑完」；
-     * 正常点「发送」是**立刻发**：上一轮还在跑就直接打断它，不闷声排队
-     * （用户反馈：发消息只会排队发不出去，还停不掉）。
-     */
-    /**
      * 发消息（或续跑）。
      *
-     * @param resume true = **接着上一轮继续**，用在错误卡片的「再试一次」上。
-     *   这时不发新消息、不重置轮次、也不碰输入框，直接拿当前会话的历史接着往下跑。
+     * 上一轮还在跑的时候怎么办，两种都留着，但要用户自己说：
+     *   · 点「发送」      → **排队**。等这一轮跑完，队列自动往下发（一次一条）。
+     *   · 长按「发送」    → **打断**，这条立刻发。
+     * 队列面板上每条还带 ▶ 立即发（插队，同样打断）、✎ 编辑、✕ 删除。
+     *
+     * @param resume true = 接着上一轮继续，用在错误卡片的「接着做」上。
+     *   不发新消息、不重置轮次、也不碰输入框，直接拿当前会话的历史接着往下跑。
+     * @param interrupt 见上：true 才打断当前轮。
      */
-    private fun send(queueIfBusy: Boolean = false, resume: Boolean = false) {
+    private fun send(resume: Boolean = false, interrupt: Boolean = false) {
         // 输入框空着时**不再**回退到 lastUserText。
         // 那条回退是「再试一次」事故的元凶：它会悄悄把上一条用户消息再发一遍，
         // 而轮次从 1 重新数 —— 用户看到的是「跑了 11 轮，点一下重试全白干」。
@@ -2098,19 +2085,20 @@ class MainActivity : AppCompatActivity(), GameUi {
         }
         if (running) {
             if (text0.isNotBlank()) {
-                if (queueIfBusy || msgQueue.isNotEmpty()) {
-                    // 明确要求排队 / 队列里已经攒了东西：不再连环打断，老老实实排队
-                    msgQueue.addLast(text0)
-                    inputEt.setText("")
-                    renderQueue()
-                    toast("已加入队列（第 ${msgQueue.size} 条）")
-                } else {
-                    // 发送就是发送：立刻打断上一轮，把这句话发出去
-                    msgQueue.addLast(text0)
-                    inputEt.setText("")
-                    renderQueue()
-                    toast("已打断上一轮，这句马上发出")
+                msgQueue.addLast(text0)
+                inputEt.setText("")
+                renderQueue()
+                if (interrupt) {
+                    // 长按「发送」= 明确要求别等了，现在就发 —— 打断当前轮
+                    toast("已打断上一轮，这条马上发出")
                     doStop("发送新消息")
+                } else {
+                    // 普通点「发送」= **排队**，等这一轮跑完自动发下一条。
+                    // 老逻辑正好相反：一点就打断，于是刚进队的那条立刻又被取走，
+                    // 队列面板上的「编辑 / 立即发 / 删除」永远来不及用 ——
+                    // 用户看得见那排按钮却摸不着，以为它们坏了。
+                    // 现在队列是真的会停在那儿的，想插队就用行尾的 ▶。
+                    toast("已排在队列第 ${msgQueue.size} 条 · 长按「发送」可立刻打断")
                 }
             }
             return
@@ -2344,7 +2332,6 @@ class MainActivity : AppCompatActivity(), GameUi {
                     // 不再往思考面板里追加这一行：工具行本身就是记录，追加反而会把
                     // 正在流式的思考文字冲掉（两路都写同一段文本，谁后到谁赢）
                     updateToolCard(false, nm, head, full)
-                    runCatching { mediaPathsIn(l).forEach { p -> autoCardMedia(p) } }
                 }
                 ev.startsWith("TOOL:") -> {
                     val l = ev.removePrefix("TOOL:").trim()
@@ -2352,9 +2339,10 @@ class MainActivity : AppCompatActivity(), GameUi {
                     val (head, full) = toolPayload(l.substringAfter("] ").trim())
                     latestActivity = head.take(30)
                     updateToolCard(true, nm, head, full)
-                    // AI 产出的音视频：直接在对话里给一张能点的播放卡。
-                    // 用户反馈：只给一个路径 = "发了个听不了的链接"，还得自己去找临时按钮听。
-                    runCatching { mediaPathsIn(l).forEach { p -> autoCardMedia(p) } }
+                    // 这里以前还有一句「扫结果文本里有没有媒体后缀 → 自动出播放卡」。
+                    // 删掉了：它会把「读到过的文件」当成「刚生成的素材」，
+                    // 于是 game_read / code_search 一碰到 .mp4 路径就弹卡（用户说的
+                    // 「读项目老是跑这个音频出来」）。真正产出的素材走 ASSET: 事件。
                 }
                 ev.startsWith("ASSET:") -> {
                     // 素材生成完成：直接在对话里插一张卡，点一下就能预览 / 试听
@@ -4002,10 +3990,13 @@ class MainActivity : AppCompatActivity(), GameUi {
         bar.addView(previewLabel, LinearLayout.LayoutParams(0, -2, 1f))
         bar.addView(reload)
         // 手动静音：游戏 BGM / 音效太吵时一键关掉，状态一直记着
-        previewMuteChip = chipOf(this, pal, "🔇静音", false).apply {
+        // 标签显示的是**当前状态**，不是「点了会怎样」。
+        // 以前显示动作：初始「🔇静音」而实际有声，点一下变「🔊有声」反而静音了 ——
+        // 用户点完看着字变了，也不知道到底静音没有，只能用一句「这开关好像没啥用」。
+        previewMuteChip = chipOf(this, pal, "🔊 有声", false).apply {
             setOnClickListener {
                 userMutePreview = !userMutePreview
-                text = if (userMutePreview) "🔊有声" else "🔇静音"
+                text = if (userMutePreview) "🔇 已静音" else "🔊 有声"
                 applyPreviewMute(userMutePreview || activeTab != 1)
                 toast(if (userMutePreview) "预览已静音（切页、重载也保持）" else "预览恢复发声")
             }
@@ -6488,6 +6479,20 @@ makerRow1.addView(ghostBtnOf(ctx, pal, "扫码登录").apply {
             // 切项目 = 换一份会话库：先把旧项目这轮对话落盘，再切新库
             runCatching { persistSessions() }
             sessStore = null
+            // 再把「跟着上一个项目走」的东西一并清掉，否则界面看着像没换干净
+            // （用户反馈：「切换项目了好像还残留之前的东西，比如底部啥的」）：
+            //   · 待发送区的附件：路径指向旧项目的 _uploads/…，发出去必然读不到
+            //   · 待发送队列：是给旧项目排的
+            //   · 底部那两行：运行状态行还留着上一轮的「运行中 / 已完成 · 11 轮」
+            msgQueue.clear()
+            attached.clear()
+            queued.clear()
+            pendingShots.clear()
+            runBar?.visibleIf(false)
+            main.post {
+                runCatching { updateAttachInfo() }
+                runCatching { renderQueue() }
+            }
         }
         currentGame = id
         cfgStore.lastGame = id   // 落盘：供下次冷启动 / 覆盖安装后恢复

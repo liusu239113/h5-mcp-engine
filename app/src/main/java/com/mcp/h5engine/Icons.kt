@@ -20,12 +20,25 @@ import android.widget.TextView
 class LineIcon(
     private val kind: String,
     private val color: Int,
+    /**
+     * 【已废弃，保留只为不改动一堆调用点】
+     *
+     * 这个参数历史上被当成「线宽」传，但它是**缩放前**的路径坐标单位：
+     * draw() 里会 canvas.scale(图标边长 / 24)，所以传进来的值会被乘上一个 s。
+     * 调用点普遍传的是「图标尺寸」（dp(16) / dp(17) 这种），一乘就变成上百像素的线宽，
+     * 整张图标糊成一个实心方块 —— 这就是界面上那些「绿色小方块」的由来。
+     *
+     * 现在线宽在 24 单位的路径网格上固定取值，任何尺寸下都是同一支笔画的，
+     * 画风自然统一。参数留着是因为调用点太多，逐个改收益不大、风险更大。
+     */
+    @Suppress("UNUSED_PARAMETER")
     private val stroke: Float
 ) : Drawable() {
 
     private val p = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.STROKE
-        strokeWidth = stroke
+        // 24 单位网格上的 1.8 ≈ 视觉上 1.5~2dp 的线，够细不糊，小图标（11~13dp）也看得清
+        strokeWidth = 1.8f
         strokeCap = Paint.Cap.ROUND
         strokeJoin = Paint.Join.ROUND
         this.color = this@LineIcon.color
