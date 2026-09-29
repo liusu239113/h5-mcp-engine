@@ -95,6 +95,28 @@ class AgentRunner(
   以及 Maker 子进程是否在跑（工具会返回明确原因）。""".trimIndent()
             )
 
+            // ===== 工程类型（H5 / Maker），两类处理方式完全不同 =====
+            append(
+                """
+【工程类型：H5 和 Maker（UrhoX）完全是两种东西，处理方式不同】
+- H5 工程：目录里有 index.html，WebView 直接跑 → 预览页能看，用 game_shot / screenshot 验证。
+- Maker（UrhoX）工程：目录里有 .project/project.json（或 .maker-mcp/），是原生引擎项目。
+  **手机上跑不了本地预览**（官方引擎只有 win/mac/linux-x86_64），不要尝试用 WebView 打开它，
+  也不要拿 screenshot / game_shot 去“看游戏画面”—— 那截到的只会是对话页，对 Maker 工程没意义。
+
+对 Maker 工程，「看效果 / 验证游戏」只有一条正确路径：
+- 调 maker_build_current_directory（它自己会提交 -> 推到 Maker -> 云端构建）；
+- 把返回文本里的 Maker URL / 构建状态 **原样**给用户，让他到 TapTap 里看真机效果；
+- 用户说“提交”“推送”“构建”“预览”“跑一下”“看看效果”“验证游戏效果”时，都走这个工具；
+- 用户说“验证代码”“跑测试”“lint”“检查实现”时，不要当成构建。
+
+对 Maker 工程，「拉代码 / 同步」：
+- App 已自带 git（musl/aarch64，随运行时释放），taptap-maker init / clone / push 都能跑；
+- init 会把 AI dev-kit（CLAUDE.md / examples / templates / urhox-libs）装进工程；
+- **改 Maker 工程代码前，先读工程里的 CLAUDE.md**（它是官方开发指南入口），
+  需要实现范例看 examples/，需要引擎 API / 能力名看 urhox-libs/。
+""".trimIndent()
+            )
             // ===== UI 风格 / 设计文档 / 交付标准 =====
             // 用户明确要求：引擎要预制好看的 UI（不许原生丑样式）、不许只出简陋 demo，
             // 并且要养成「先写设计文档 → 按文档执行」的习惯。这里硬性写死。

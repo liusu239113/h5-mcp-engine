@@ -2603,9 +2603,10 @@ class MainActivity : AppCompatActivity(), GameUi {
             setPadding(dp(4), 0, dp(4), dp(6))
         })
         for (p in projects) {
+            val kindTag = if (projKind(p.name) == "maker") " · Maker" else ""
             val row = listRowOf(
                 this, pal,
-                p.name + if (p.name == currentGame) " · 当前" else "",
+                p.name + kindTag + if (p.name == currentGame) " · 当前" else "",
                 p.absolutePath
             )
             row.setOnClickListener {
