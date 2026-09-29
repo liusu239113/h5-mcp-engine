@@ -28,7 +28,7 @@ object McpRt {
      *   2 → 官方 MCP
      *   3 → 追加 @taptap/maker（本地制造开发）+ bridge.js（stdio→HTTP 桥）
      */
-    private const val STAMP = "4"
+    private const val STAMP = "5"
     const val PORT = 3000
     const val URL_BASE = "http://127.0.0.1:3000/"
 
@@ -147,9 +147,12 @@ object McpRt {
      */
     fun ensureGitrt(ctx: Context, dir: File): String? {
         val g = File(dir, "gitrt/git")
-        // 老设备上可能已经解过一遍，但解包器没还原执行位（EACCES），
-        // 所以「存在」不等于「能用」：必须可执行才跳过，否则整目录重来。
-        if (g.isFile && g.canExecute()) return null
+        // 「存在」不等于「能用」：Android 10+ 起，untrusted_app 对私有目录
+        // （app_data_file）里的文件一律禁止 execve（avc denied execute_no_trans），
+        // 旧版那种「脚本直接放在 gitrt 里」的做法在真机上必然 EACCES。
+        // 现在：git 是软链 → 指向 APK 的 nativeLibraryDir/libhexgit.so
+        // （apk_data_file，允许执行）。所以必须「已是可执行软链」才跳过。
+        if (g.isFile && g.canExecute() && g.absolutePath != g.canonicalPath) return null
         return try {
             File(dir, "gitrt").deleteRecursively()
             val tar = File(dir, "gitrt.tar")
@@ -158,11 +161,35 @@ object McpRt {
             }
             extractTar(tar, dir)
             tar.delete()
-            g.setExecutable(true, false)
+            linkGit(ctx, dir)
             null
         } catch (t: Throwable) {
             "git 释放失败：${t.message}"
         }
+    }
+
+    /**
+     * 把 <rt>/gitrt/git 做成软链接，指向 nativeLibraryDir/libhexgit.so。
+     *
+     * 为什么必须这样：从 Android 10 开始，untrusted_app 域对「自己私有目录」
+     * （SELinux 标签 app_data_file）里的文件禁止 execve —— 真机 logcat 原文：
+     *   avc: denied { execute_no_trans } for
+     *     path="/data/data/<pkg>/files/hexrt/gitrt/git"
+     *     tcontext=u:object_r:app_data_file:s0 tclass=file
+     * 而 APK 的 lib 目录（nativeLibraryDir）是 apk_data_file，允许执行。
+     * 所以在私有目录里放一个软链指向那边，execve 会跟着软链落到允许的位置。
+     * （Operit 的 Linux 终端用的就是这招：usr/bin/busybox -> libbusybox.so）
+     *
+     * libhexgit.so 是个静态链接的小程序，负责把调用转交给
+     * <rt>/libmuslrt.so（musl 加载器）去跑 <rt>/gitrt/git.bin。
+     */
+    private fun linkGit(ctx: Context, dir: File) {
+        val launcher = File(ctx.applicationInfo.nativeLibraryDir, "libhexgit.so")
+        launcher.setExecutable(true, false)
+        val link = File(dir, "gitrt/git")
+        runCatching { link.delete() }
+        val ok = runCatching { Os.symlink(launcher.absolutePath, link.absolutePath) }.isSuccess
+        if (!ok) throw IllegalStateException("git 软链创建失败: " + link.absolutePath)
     }
 
     /** 拉起服务；返回 null 表示成功（阻塞，放子线程） */
@@ -351,6 +378,7 @@ object McpRt {
             env["HEXORA_RT"] = dir.absolutePath
             env["HEXORA_LD"] = ld.absolutePath
             env["GIT_EXEC_PATH"] = File(dir, "gitrt/git-core").absolutePath
+            env["TAPTAP_MAKER_GIT_BIN"] = File(dir, "gitrt/git").absolutePath
             env["GIT_SSL_CAINFO"] = File(dir, "gitrt/cacert.pem").absolutePath
             env["GIT_TEMPLATE_DIR"] = File(dir, "gitrt/templates").absolutePath
             env["GIT_TERMINAL_PROMPT"] = "0"

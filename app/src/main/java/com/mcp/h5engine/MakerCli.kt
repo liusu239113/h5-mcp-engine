@@ -80,6 +80,7 @@ object MakerCli {
         env["HEXORA_RT"] = dir.absolutePath
         env["HEXORA_LD"] = ld.absolutePath
         env["GIT_EXEC_PATH"] = File(dir, "gitrt/git-core").absolutePath
+        env["TAPTAP_MAKER_GIT_BIN"] = File(dir, "gitrt/git").absolutePath
         env["GIT_SSL_CAINFO"] = File(dir, "gitrt/cacert.pem").absolutePath
         env["GIT_TEMPLATE_DIR"] = File(dir, "gitrt/templates").absolutePath
         env["GIT_TERMINAL_PROMPT"] = "0"

@@ -568,7 +568,12 @@ class EngineTools(private val ui: GameUi, private val root: File) {
                 ToolResult("App 上下文不可用，重启一次 App 再试")
             } else {
                 val act = a.optString("action", "status").lowercase()
-                val proj = root
+                // 工程目录 = 「当前激活的那个游戏」，不能用 root。
+                // root 是所有游戏的父目录（.../files/games），拿它当 --target-dir 会把
+                // dev-kit / 仓库直接拉进父目录，跟别的游戏搅在一起（上一版就是这个 bug）。
+                val cid = runCatching { ui.currentGameId() }.getOrNull().orEmpty()
+                val cand = if (cid.isNotBlank()) File(root, cid) else null
+                val proj = if (cand != null && cand.isDirectory) cand else root
                 val dir = McpRt.rtDir(c)
                 val gitBin = File(dir, "gitrt/git")
                 when (act) {
@@ -594,7 +599,7 @@ class EngineTools(private val ui: GameUi, private val root: File) {
                     else -> {
                         val sb = StringBuilder()
                         sb.append("工程目录：").append(proj.absolutePath).append("\n")
-                        sb.append("自带 git：").append(if (gitBin.isFile) "已就绪" else "未释放").append("\n")
+                        sb.append("自带 git：").append(if (gitBin.isFile && gitBin.canExecute()) "已就绪" else "未释放（需重启 App 重建软链）").append("\n")
                         sb.append(".project/project.json：").append(File(proj, ".project/project.json").isFile).append("\n")
                         sb.append(".maker-mcp/：").append(File(proj, ".maker-mcp").isDirectory).append("\n")
                         sb.append("urhox-libs（dev-kit）：").append(File(proj, "urhox-libs").isDirectory).append("\n")
