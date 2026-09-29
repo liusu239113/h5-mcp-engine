@@ -7,6 +7,10 @@ on:
 
 permissions:
   contents: read
+# 同分支连续推送时，取消上一次还在跑的构建：省额度、也不用等队列里那个过期的
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   build:

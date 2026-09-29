@@ -19,8 +19,8 @@ android {
         applicationId = "com.mcp.h5engine"
         minSdk = 24
         targetSdk = 34
-        versionCode = 15
-        versionName = "1.14"
+        versionCode = 16
+        versionName = "1.15"
     }
 
     signingConfigs {
@@ -29,6 +29,12 @@ android {
             storePassword = ks.getProperty("storePassword") ?: "Hexora2026"
             keyAlias = ks.getProperty("keyAlias") ?: "hexora"
             keyPassword = ks.getProperty("keyPassword") ?: "Hexora2026"
+            // 签名方案轮换（B4）：只签 v1/v2 的话，Android 11+ 会走「签名校验降级」路径，
+            // 而且以后要换签名算法必须靠 v3 的 proof-of-rotation。v4 让增量安装更快。
+            enableV1Signing = true
+            enableV2Signing = true
+            enableV3Signing = true
+            enableV4Signing = true
         }
     }
 

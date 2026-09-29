@@ -311,6 +311,8 @@ class MainActivity : AppCompatActivity(), GameUi {
     private var curToolIcon: ImageView? = null
     private var curToolIconKind = "layers"
     private var curToolText: TextView? = null
+    /** 运行中用户又发的消息：排队，等这轮结束自动发出去（而不是粗暴掐断上一轮） */
+    private val msgQueue = ArrayDeque<String>()
     private var runToggle: TextView? = null
     /** 用户手动收起了思考面板：那就别再自动摊开 */
     private var userCollapsedThinking = false
@@ -1741,12 +1743,18 @@ class MainActivity : AppCompatActivity(), GameUi {
     private var lastUserText = ""
 
     private fun send() {
+        val text0 = inputEt.text.toString().trim().ifEmpty { lastUserText }
         if (running) {
-            // 运行中也能直接发：先掐断上一轮，再把新消息发出去
-            runCatching { runner?.cancel() }
-            toast("已中断上一轮，接着发新的")
+            // 运行中又发消息：不再掐断上一轮（掐断会丢掉它已经跑出来的东西），
+            // 先排队，等这轮自然结束自动发。想立刻打断就去按「停止」。
+            if (text0.isNotBlank()) {
+                msgQueue.addLast(text0)
+                inputEt.setText("")
+                toast("已排队（第 ${msgQueue.size} 条），这轮结束自动发送")
+            }
+            return
         }
-        val text = inputEt.text.toString().trim().ifEmpty { lastUserText }
+        val text = text0
         if (text.isEmpty() && pendingShots.isEmpty() && queued.isEmpty() && attached.isEmpty()) return
 
         val cfg = cfgStore.active()
@@ -2106,12 +2114,18 @@ class MainActivity : AppCompatActivity(), GameUi {
         runTicker?.let { main.removeCallbacks(it) }
         stopBtn.visibleIf(false)
         val ms = SystemClock.elapsedRealtime() - runStartAt
-        runHead?.text = "共用时 ${fmtDur(ms)} · ${runSteps} 轮 · 已结束"
+        runHead?.text = "共用时 ${fmtDur(ms)} · ${runSteps} 轮 · " + TokenStats.summary()
         runBar?.text = "上次运行 · 共用时 ${fmtDur(ms)} · ${runSteps} 轮 · 已结束"
         latestActivity = ""
         lastNotiSec = -1L
         stopGuard()
         if (runWrote) ensurePreviewFresh()
+        // 运行期间排队的消息：这轮结束后自动发下一条（一次只发一条，避免连环堆积）
+        if (msgQueue.isNotEmpty()) {
+            val next = msgQueue.removeFirst()
+            inputEt.setText(next)
+            main.postDelayed({ runCatching { send() } }, 400)
+        }
     }
 
     // ==================== 会话管理（像 Maker 那样开多个对话） ====================

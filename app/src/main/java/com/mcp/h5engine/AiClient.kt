@@ -27,7 +27,10 @@ data class ChatReply(
     val toolCalls: List<ToolCall>,
     val error: String? = null,
     /** 部分模型（deepseek-reasoner 等）会把思维链单独返回，拿出来给「思考过程」面板用 */
-    val reasoning: String? = null
+    val reasoning: String? = null,
+    /** 本次请求的输入/输出 token（服务商 usage 字段；拿不到就是 0） */
+    val inTokens: Int = 0,
+    val outTokens: Int = 0
 )
 
 /**
@@ -173,7 +176,10 @@ class AiClient(private val cfg: ProviderConfig) {
             )
             last = r
             val err = r.error
-            if (err == null) return r          // 成功
+            if (err == null) {                    // 成功
+                TokenStats.add(r.inTokens, r.outTokens)
+                return r
+            }
             if (aborted) return ChatReply(null, emptyList(), "已取消")   // 用户点了停止
             // ① 手机开着 VPN / 代理类 App 时，OkHttp 会继承 Android 系统代理，
             // 请求可能根本没到服务商，是代理层回的错误（402/413 都见过）。
@@ -1071,11 +1077,14 @@ class AiClient(private val cfg: ProviderConfig) {
         val reason = msg.optString("reasoning_content", "")
             .ifBlank { msg.optString("reasoning", "") }
             .ifBlank { msg.optString("thinking", "") }
+        val u = j.optJSONObject("usage")
         return ChatReply(
             textOfNode(msg.opt("content")),
             tcs,
             null,
-            reason.takeIf { it.isNotBlank() }
+            reason.takeIf { it.isNotBlank() },
+            u?.optInt("prompt_tokens", 0) ?: 0,
+            u?.optInt("completion_tokens", 0) ?: 0
         )
     }
 
@@ -1099,7 +1108,12 @@ class AiClient(private val cfg: ProviderConfig) {
                 )
             }
         }
-        return ChatReply(sb.toString().takeIf { it.isNotBlank() }, tcs)
+        val au = j.optJSONObject("usage")
+        return ChatReply(
+            sb.toString().takeIf { it.isNotBlank() }, tcs, null, null,
+            au?.optInt("input_tokens", 0) ?: 0,
+            au?.optInt("output_tokens", 0) ?: 0
+        )
     }
 
     private fun parseGemini(raw: String): ChatReply {
@@ -1125,6 +1139,11 @@ class AiClient(private val cfg: ProviderConfig) {
                 tcs += ToolCall(name, name, it.optJSONObject("args")?.toString() ?: "{}")
             }
         }
-        return ChatReply(sb.toString().takeIf { it.isNotBlank() }, tcs)
+        val gu = j.optJSONObject("usageMetadata")
+        return ChatReply(
+            sb.toString().takeIf { it.isNotBlank() }, tcs, null, null,
+            gu?.optInt("promptTokenCount", 0) ?: 0,
+            gu?.optInt("candidatesTokenCount", 0) ?: 0
+        )
     }
 }

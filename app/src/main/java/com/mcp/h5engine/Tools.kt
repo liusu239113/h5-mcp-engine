@@ -217,6 +217,13 @@ class EngineTools(private val ui: GameUi, private val root: File) {
                 """{"game":{"type":"string","description":"可选，指定游戏 id"}}""",
                 emptyList()),
 
+            fn("service_logs",
+                "【排查服务问题】读取本地服务日志尾部（MCP 服务 / Maker 桥）。" +
+                    "服务起不来、工具数为 0、生图报错、授权诡异时，先看它，别靠猜。",
+                """{"which":{"type":"string","description":"mcp 或 maker，默认 maker"},
+                   "lines":{"type":"integer","description":"可选，返回最后多少行，默认 120"}}""",
+                emptyList()),
+
             fn("game_list", "列出工程里所有游戏", "{}", emptyList()),
 
             fn("game_create", "创建新游戏骨架（index.html + game.js），已存在则不动",
@@ -233,6 +240,16 @@ class EngineTools(private val ui: GameUi, private val root: File) {
             fn("game_read", "读取游戏文件；不传 path 则返回文件清单",
                 """{"game":{"type":"string"},"path":{"type":"string"}}""",
                 emptyList()),
+
+            fn("code_search",
+                "【改代码前先搜】全工程文本搜索（grep / ripgrep 风格）：按关键词或正则找代码，" +
+                    "返回「文件:行号: 内容」。比一个个 game_read 翻文件省大量 token。" +
+                    "不传 path 就搜整个工程（含 _shared / _uploads / _skills）。",
+                """{"query":{"type":"string","description":"关键词或正则表达式"},
+                   "path":{"type":"string","description":"可选，限定子目录（相对工程根），如 my_game 或 my_game/js"},
+                   "glob":{"type":"string","description":"可选，按文件名后缀过滤，如 .js 或 .html,.css"},
+                   "max":{"type":"integer","description":"可选，最多返回多少条匹配，默认 60"}}""",
+                listOf("query")),
 
             fn("game_patch", "按行号替换文件片段（改大文件时优先用它，省 token）",
                 """{"path":{"type":"string"},"startLine":{"type":"integer"},
@@ -517,6 +534,69 @@ class EngineTools(private val ui: GameUi, private val root: File) {
                 "已写入 $rel（${f.length()} 字节）" +
                     if (isShared) "（共享资产，不需要重载）" else "，并已热重载"
             )
+        }
+
+        "service_logs" -> {
+            val c = ctxRef
+            if (c == null) {
+                ToolResult("App 上下文不可用，重启一次 App 再试")
+            } else {
+                val which = a.optString("which", "maker").lowercase()
+                val n = a.optInt("lines", 120).coerceIn(10, 1000)
+                val f = File(McpRt.rtDir(c), if (which == "mcp") "mcp.log" else "maker.log")
+                if (!f.isFile) {
+                    ToolResult("没有日志文件 ${f.name}（这个服务可能还没启动过）")
+                } else {
+                    val lines = runCatching { f.readLines() }.getOrNull()
+                    if (lines == null || lines.isEmpty()) {
+                        ToolResult("${f.name} 是空的（服务还没产出输出）")
+                    } else {
+                        val tail = lines.takeLast(n).joinToString("\n")
+                        ToolResult(
+                            "=== ${f.name}（最后 ${minOf(n, lines.size)} 行 / 共 ${f.length()} 字节）===\n```\n" +
+                                tail.take(8000) + "\n```"
+                        )
+                    }
+                }
+            }
+        }
+
+        "code_search" -> {
+            val q = a.optString("query").trim()
+            if (q.isEmpty()) {
+                ToolResult("query 不能为空")
+            } else {
+                val sub = a.optString("path").trim()
+                val subDir = if (sub.isEmpty()) null else File(root, sub)
+                val base = subDir?.takeIf { it.exists() } ?: root
+                val globs = a.optString("glob").trim().split(',', ' ')
+                    .map { it.trim() }.filter { it.isNotEmpty() }
+                val cap = a.optInt("max", 60).coerceIn(1, 300)
+                // 先当正则试；写错了（比如 `[`）就退化成纯文本搜，不让工具直接失败
+                val re = runCatching { Regex(q, RegexOption.IGNORE_CASE) }
+                    .getOrElse { Regex(Regex.escape(q), RegexOption.IGNORE_CASE) }
+                val sb = StringBuilder()
+                var hits = 0
+                val files = base.walkTopDown().filter { it.isFile }
+                    .filter { !it.path.contains("/.git/") && it.length() < 2_000_000 }
+                    .filter { f -> globs.isEmpty() || globs.any { g -> f.name.endsWith(g.removePrefix("*")) } }
+                    .take(600).toList()
+                scan@ for (f in files) {
+                    val lines = runCatching { f.readLines() }.getOrNull() ?: continue@scan
+                    for ((i, ln) in lines.withIndex()) {
+                        if (!re.containsMatchIn(ln)) continue
+                        val rel = runCatching { f.relativeTo(root).path }.getOrDefault(f.name)
+                        sb.append(rel).append(':').append(i + 1).append(": ")
+                            .append(ln.trim().take(200)).append('\n')
+                        hits++
+                        if (hits >= cap) break@scan
+                    }
+                }
+                ToolResult(
+                    if (hits == 0) "没有匹配「$q」的内容（共搜了 ${files.size} 个文件）。"
+                    else "匹配 $hits 条：\n```\n$sb```"
+                )
+            }
         }
 
         "game_read" -> {

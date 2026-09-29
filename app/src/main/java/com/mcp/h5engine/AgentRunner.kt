@@ -156,6 +156,16 @@ class AgentRunner(
   适配安全区、控制台零报错、无 TODO、无占位方块。宁可少做两个功能，也别交一个残缺的壳。""".trimIndent()
             )
 
+            // ===== 代码检索：先搜再改 =====
+            append(
+                """
+【改代码前先 code_search，别靠猜】
+- 要改某段逻辑，先用 code_search 搜关键词 / 函数名（返回「文件:行号: 内容」），拿到准确位置再动手；
+- 比一个个 game_read 翻文件省大量 token，也不容易漏掉别处的引用点；
+- 搜不到再扩大范围（不传 path 搜全工程，或换个更短的关键词）。
+""".trimIndent()
+            )
+
             // ===== 工具重试纪律 =====
             // 用户原话：「ai 老是这样，也不重试」。本地 MCP 子进程刚重启的一两秒里，
             // 工具清单可能还没注册完，模型一撞上「未知工具」就放弃 —— 这里是最后一道提示词保险。
@@ -219,7 +229,7 @@ class AgentRunner(
 
             if (reply.toolCalls.isEmpty()) {
                 if (wrote) onEvent("RELOAD")
-                onEvent("INFO: 完成 · 共跑了 $step 轮")
+                onEvent("INFO: 完成 · 共跑了 $step 轮 · " + TokenStats.summary())
                 return
             }
 
@@ -242,6 +252,12 @@ class AgentRunner(
                 var text = res.text
                 if (res.images.isNotEmpty() && !cfg.vision && visionFallback) {
                     text += "\n" + saveShot(res.images.first())
+                }
+                // 【结果治理】单条工具结果太大（读了个大文件 / 全量日志）会把历史瞬间撑爆：
+                // 下一轮请求体积超限 → 降级重试 → 还是超 → 报错。这里先截断，
+                // 完整内容仍然在对话里的工具卡片（点击可看/复制），模型需要细节可以再分段读。
+                if (text.length > 16000) {
+                    text = text.take(16000) + "\n…（结果过长已截断到 16k；完整内容见对话里的工具卡片）"
                 }
 
                 history += ChatMsg("tool", text, images, toolCallId = tc.id)
