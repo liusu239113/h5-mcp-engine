@@ -411,6 +411,16 @@ class EngineTools(private val ui: GameUi, private val root: File) {
     }
 
     /**
+     * 「精简工具定义」打开时要砍掉的工具。
+     *
+     * 刻意列得很短 —— 砍工具 = 模型看不到就调不了，是不折不扣的能力损失。
+     * 这里只放**跟做游戏完全无关**的那几个：管理 App 自己的插件市场和本地 HTTP 服务。
+     * 像 js_sandbox / shell_run / workflow_* 这种「看着无关、其实是干活工具」的一律不碰，
+     * 宁可少省点 token，也不要出现「昨天还能用，今天这个功能不见了」。
+     */
+    val SLIM_DROP: Set<String> = setOf("toolpkg", "localserver")
+
+    /**
      * allow 为 null 或空集合都表示全开；技能白名单只管引擎工具。
      *
      * MCP 工具**默认不附带**：只有本轮用户明确表达了相关意图（mcpAllowed=true）才注入声明，

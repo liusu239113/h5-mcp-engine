@@ -175,6 +175,27 @@ class AiConfigStore(ctx: Context) {
             sp.edit().putBoolean("send_tools", v).apply()
         }
 
+    /** 历史里最多保留几张截图（图片按 base64 塞进请求体，最费流量） */
+    var keepImages: Int
+        get() = sp.getInt("keep_images", 2)
+        set(v) {
+            sp.edit().putInt("keep_images", v.coerceIn(0, 20)).apply()
+        }
+
+    /** 最近多少条「长」工具结果保留全文，更早的压成一行占位 */
+    var keepToolResults: Int
+        get() = sp.getInt("keep_tool_results", 6)
+        set(v) {
+            sp.edit().putInt("keep_tool_results", v.coerceIn(1, 100)).apply()
+        }
+
+    /** 精简工具定义（砍掉跟做游戏无关的平台作者向工具）。默认关：这是能力损失 */
+    var slimTools: Boolean
+        get() = sp.getBoolean("slim_tools", false)
+        set(v) {
+            sp.edit().putBoolean("slim_tools", v).apply()
+        }
+
     /** 遇到 413 / TPM / 上下文超限时自动精简重试 */
     var autoSlim: Boolean
         get() = sp.getBoolean("auto_slim", true)
@@ -237,6 +258,9 @@ class AiConfigStore(ctx: Context) {
             vision = visionFor(p, m),
             maxOutTokens = maxOutTokens,
             historyLimit = historyLimit,
+            keepImages = keepImages,
+            keepToolResults = keepToolResults,
+            slimTools = slimTools,
             sendTools = sendTools,
             autoSlim = autoSlim
         )
@@ -255,6 +279,9 @@ class AiConfigStore(ctx: Context) {
             vision = visionFor(p, model),
             maxOutTokens = maxOutTokens,
             historyLimit = historyLimit,
+            keepImages = keepImages,
+            keepToolResults = keepToolResults,
+            slimTools = slimTools,
             sendTools = sendTools,
             autoSlim = autoSlim
         )

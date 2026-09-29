@@ -46,9 +46,22 @@ class AgentRunner(
     fun run(
         history: MutableList<ChatMsg>,
         userText: String,
-        userImages: List<ByteArray> = emptyList()
+        userImages: List<ByteArray> = emptyList(),
+        /** true = **接着上一轮继续**（错误卡片上的「再试一次」）：不新增用户消息，轮次从 startStep 往下数 */
+        resume: Boolean = false,
+        /** 续跑时的起始轮次；用于让轮次接着数、不「清零」 */
+        startStep: Int = 0
     ) {
-        val spec = tools.specs(skill.allowTools)
+        // 工具定义是一轮任务里每一步都要重发的大块头（内置工具 + MCP 几十个），
+        // 而且模型每次调用工具都要重来一遍。slimTools 打开时按白名单砍掉
+        // 跟「做游戏」完全无关的平台作者向工具。
+        // ⚠️ 砍工具 = 模型看不到就调不了，属于**能力损失**，所以默认关，由用户在设置里自己开。
+        val allow = when {
+            !cfg.slimTools -> skill.allowTools
+            skill.allowTools == null -> tools.names().filterNot { it in EngineTools.SLIM_DROP }.toSet()
+            else -> skill.allowTools.filterNot { it in EngineTools.SLIM_DROP }.toSet()
+        }
+        val spec = tools.specs(allow)
         val names = spec.map { it.getJSONObject("function").getString("name") }
 
         val sys = buildString {
@@ -212,11 +225,21 @@ class AgentRunner(
             history.add(0, ChatMsg("system", sys))
         }
 
-        history += ChatMsg("user", userText, userImages)
+        // resume = 接着上一轮跑：**不**再往历史里塞一条用户消息。
+        // 塞了的话历史里就会有两句一模一样的用户请求，模型容易把活重做一遍；
+        // 轮次又会从 1 重新数 —— 用户看到的就是「点了重试，前面全白干」。
+        if (!resume) history += ChatMsg("user", userText, userImages)
 
         val limit = cfg.maxSteps.coerceAtMost(skill.maxSteps)
-        var step = 0
+        var step = if (resume) startStep.coerceAtLeast(0) else 0
         var wrote = false
+
+        // 续跑但步数预算已经用满：明说一句。否则用户点了「再试一次」之后毫无反应，
+        // 只会以为按钮坏了。
+        if (resume && step >= limit) {
+            onEvent("INFO: 已经用满 $limit 轮上限了 —— 直接再发一句话，它就能接着往下做")
+            return
+        }
 
         while (!cancelled && step < limit) {
             step++

@@ -43,18 +43,18 @@ data class ChatReply(
  */
 class AiClient(private val cfg: ProviderConfig) {
 
-    /** 每次请求都新建客户端：避免切后台回来复用了已经死掉的连接池（Software caused connection abort） */
-    private fun newHttp(direct: Boolean = false): OkHttpClient {
-        val b = OkHttpClient.Builder()
-            .connectTimeout(20, TimeUnit.SECONDS)
-            .readTimeout(240, TimeUnit.SECONDS)
-            .writeTimeout(90, TimeUnit.SECONDS)
-            .retryOnConnectionFailure(true)
-        // direct=true 时强制直连：忽略系统代理/VPN 设的 HTTP 代理。
-        // 这类代理层回的错误（402 / 403 / 各种网关页）经常和「余额不足」长得一模一样。
-        if (direct) runCatching { b.proxy(java.net.Proxy.NO_PROXY) }
-        return b.build()
-    }
+    /**
+     * 拿共享的 OkHttpClient（整个 App 进程一份）。
+     *
+     * 以前是**每次请求**都 build() 一个新客户端：连接池、线程池全扔掉，等于每一步都要
+     * 重新做一次 TCP + TLS 握手（手机上 0.3~1.5 秒）。一轮任务几十步，光握手就白等几十秒 ——
+     * 而且这跟模型快慢无关。OkHttp 官方也明确要求 client 应当复用。
+     *
+     * direct=true 时走直连（忽略系统代理/VPN 设的 HTTP 代理）——
+     * 这类代理层回的错误（402 / 403 / 各种网关页）经常和「余额不足」长得一模一样。
+     */
+    private fun newHttp(direct: Boolean = false): OkHttpClient =
+        if (direct) directHttp else sharedHttp
 
     /** 当前是否走了系统代理（Android 的系统代理设置，VPN/代理类 App 会写入） */
     private fun systemProxyInUse(): Boolean = runCatching {
@@ -142,10 +142,11 @@ class AiClient(private val cfg: ProviderConfig) {
 
     fun chat(rawHistory: List<ChatMsg>, tools: List<JSONObject>): ChatReply {
         aborted = false
-        // 注意顺序：先按条数裁，再清洗配对。
-        // 反过来的话，裁剪会把某个 assistant(tool_calls) 的响应截在窗口外，
-        // 服务商直接回 400「An assistant message with 'tool_calls' must be followed by tool messages」。
-        val history = sanitizeHistory(limitHistory(rawHistory))
+        // 顺序有讲究：
+        //   ① 按条数裁窗口 → ② 清洗 tool 配对（裁剪会把某个 assistant(tool_calls) 的响应截到
+        //   窗口外，不洗的话服务商直接 400）→ ③ 长工具结果压占位 → ④ 旧截图清掉。
+        // ③④ 只改消息**内容**、不动条数也不动配对关系，所以放最后，不会破坏 ② 的成果。
+        val history = trimImages(compactToolResults(sanitizeHistory(limitHistory(rawHistory))))
         // 设置里可以直接关掉工具定义：50+ 个工具的 JSON 是 token 大头，
         // 免费档模型（Groq 8000 TPM 这类）关掉立刻就能用。
         val toolsUse = if (cfg.sendTools) tools else emptyList()
@@ -229,6 +230,55 @@ class AiClient(private val cfg: ProviderConfig) {
         return if (head != null) listOf(head) + tail else tail
     }
 
+    /**
+     * 较早的「长」工具结果压成一行占位。
+     *
+     * 一条 16000 字符的工具结果 ≈ 6k token，而且它会在**之后每一步**的请求里被重复发送 ——
+     * 十步前读过的文件，模型基本不会再回头看，但每一轮都在为它付钱。
+     *
+     * 只压「长」的（>400 字）：像「已写入 x（行数 120 → 135）」这种短回执原样留着 ——
+     * 那是任务的进度线索，丢了模型会以为自己没干过。被压的全是大文件 / 搜索结果，
+     * 占位文字里明确写了「要细节就重新读一次」，它自己会去补。
+     */
+    private fun compactToolResults(src: List<ChatMsg>): List<ChatMsg> {
+        val keep = cfg.keepToolResults
+        val idx = src.indices.filter { src[it].role == "tool" }
+        if (idx.size <= keep) return src
+        val recent = idx.takeLast(keep).toHashSet()
+        return src.mapIndexed { i, m ->
+            val n = m.text?.length ?: 0
+            if (m.role != "tool" || i in recent || n <= 400) m
+            else m.copy(
+                text = "（较早的工具结果共 " + n + " 字，已省略以省上下文；需要细节请重新调用一次对应工具）"
+            )
+        }
+    }
+
+    /**
+     * 历史里的截图只保留最近 N 张，更早的换成一行文字说明。
+     *
+     * 图片是按 base64 **直接塞进请求体**的：一张 720px JPEG ≈ 60~150 KB，base64 后还要 ×1.37，
+     * 而且**每一步**都连同历史重发一遍。历史里攒十张 = 每步上传 1~2 MB ——
+     * 手机上行带宽是瓶颈，光这一项就能让每步多等十几秒，token 也照样计费。
+     *
+     * AI 自检看的是**最新**那一帧，旧截图留着既没用又贵。但必须留一行文字说明：
+     * 直接抹掉的话模型会以为自己「本来就没截过图」，转头重复劳动。
+     */
+    private fun trimImages(src: List<ChatMsg>): List<ChatMsg> {
+        val keep = cfg.keepImages
+        val withImg = src.indices.filter { src[it].images.isNotEmpty() }
+        if (withImg.size <= keep) return src
+        val dropped = withImg.dropLast(keep).toHashSet()
+        return src.mapIndexed { i, m ->
+            if (i !in dropped) m
+            else m.copy(
+                text = (m.text ?: "").trimEnd() +
+                    "\n（较早的截图已省略以省流量，内容就是当时那一帧；需要再看请重新截图）",
+                images = emptyList()
+            )
+        }
+    }
+
     /** 请求体积超限：413 / TPM 限流 / 上下文超长。这类错误必须换小请求，重试同一条没意义 */
     private fun isTooLargeError(err: String): Boolean {
         val e = err.lowercase()
@@ -287,11 +337,15 @@ class AiClient(private val cfg: ProviderConfig) {
 
     private fun once(body: JSONObject, direct: Boolean = false, note: String = ""): ChatReply {
         // 流式优先：OpenAI 兼容协议默认开 stream —— 让「正在生成」的字实时出现在对话里。
-        // 服务商不认 stream 时 readSse 返回 null，下面自动退回非流式整段读（只多花一次请求）。
-        val wantStream = cfg.provider.protocol == Protocol.OPENAI && !body.has("stream")
+        // 服务商不认 SSE 时下面会自动退回非流式整段读，但那是**把整个请求体去掉 stream 重发一遍**：
+        // 每步都白付一次 token 和时间。所以一家试出来不支持就记下来，同一个 Base URL 不再试。
+        val streamKey = cfg.provider.id + "|" + cfg.baseUrl
+        val wantStream = cfg.provider.protocol == Protocol.OPENAI &&
+            !body.has("stream") && !streamKnownOff(streamKey)
         if (wantStream) body.put("stream", true)
+        // 注意这里**不再写** Connection: close —— 那句会让每条请求用完就断，
+        // 共享连接池等于白建，每一步都要重新握手。
         val rb = Request.Builder().url(endpoint)
-            .header("Connection", "close")
             .post(body.toString().toRequestBody("application/json".toMediaType()))
 
         when (cfg.provider.protocol) {
@@ -310,7 +364,10 @@ class AiClient(private val cfg: ProviderConfig) {
                 if (wantStream && r.isSuccessful && r.body != null) {
                     val sj = runCatching { readSse(r.body) }.getOrNull()
                     if (sj != null) return parse(sj)
-                    // 服务商没按 SSE 回：去掉 stream 重发一次，走下面的整段读
+                    // 服务商没按 SSE 回（200 但不是 SSE —— 这是个稳定信号，不是偶发抖动）：
+                    // 记进「这家不支持流式」，顺手去掉 stream 重发一次，走下面的整段读。
+                    // 记下之后，后面每一步就不必先白试一遍了。
+                    markStreamOff(streamKey)
                     body.remove("stream")
                     return once(body, direct, note)
                 }
@@ -397,6 +454,53 @@ class AiClient(private val cfg: ProviderConfig) {
     }
 
     companion object {
+
+        // ==================== 连接复用 ====================
+
+        /** 全进程共用一条连接池：相邻两步通常只隔几秒，TCP+TLS 只握手一次 */
+        private val pool = okhttp3.ConnectionPool(8, 5, TimeUnit.MINUTES)
+
+        private val sharedHttp: OkHttpClient by lazy {
+            OkHttpClient.Builder()
+                .connectTimeout(20, TimeUnit.SECONDS)
+                .readTimeout(240, TimeUnit.SECONDS)
+                .writeTimeout(90, TimeUnit.SECONDS)
+                // 复用连接后，偶发的失效连接（切网 / 切后台被系统掐断）由它兜底重试
+                .retryOnConnectionFailure(true)
+                .connectionPool(pool)
+                .build()
+        }
+
+        /** 直连版：和共享客户端**共用**同一个连接池（newBuilder 会继承），只是不继承系统代理 */
+        private val directHttp: OkHttpClient by lazy {
+            sharedHttp.newBuilder().proxy(java.net.Proxy.NO_PROXY).build()
+        }
+
+        /**
+         * 清一次连接池。**在每轮任务开始时调**，不是每步调 ——
+         * 上一轮可能已经过去很久（切后台、切网），池里那几条多半死了，
+         * 留着只会让新一轮的第一步白等一次超时。清掉之后本轮内照样复用。
+         */
+        fun evictConnections() {
+            runCatching { pool.evictAll() }
+        }
+
+        // ==================== 流式能力记忆 ====================
+
+        /**
+         * 已确认「不认 SSE 流式」的厂商（键 = 厂商 id + Base URL）。
+         *
+         * 以前每步都先发一次 stream=true，等对方回不了 SSE，再**把整个请求体去掉 stream 重发一遍** ——
+         * 代码注释自己也写着「只多花一次请求」。也就是说这类厂商每步的请求量直接翻倍，
+         * token 和时间都翻倍。第一次试出来之后记下来，后面这一步就不试了。
+         */
+        private val streamOff = java.util.Collections.synchronizedSet(mutableSetOf<String>())
+
+        fun streamKnownOff(key: String): Boolean = streamOff.contains(key)
+
+        fun markStreamOff(key: String) {
+            streamOff.add(key)
+        }
 
         /**
          * 实时进度回调：kind = "think" / "text"，text = 目前已收到的完整文本（覆盖式，不是增量）。
@@ -882,22 +986,53 @@ class AiClient(private val cfg: ProviderConfig) {
             .put("max_tokens", if (cfg.maxOutTokens > 0) cfg.maxOutTokens else 4096)
             .put("temperature", cfg.temperature)
 
-        if (system.isNotBlank()) out.put("system", system)
+        // 提示缓存：系统提示 + 工具清单是一轮任务里**逐字不变**的前缀，但每一步都要重发。
+        // 打上 cache_control 之后，第 2 步起这段按「缓存命中」计费（便宜一个数量级），
+        // 首字延迟也明显更短。断点最多 4 个，这里用 2 个：系统提示 + 工具清单最后一个
+        // （断点打在某个元素上表示「到这里为止都缓存」，所以打在最后那个工具上就把整块工具都盖住了）。
+        if (system.isNotBlank()) {
+            if (cacheOk) {
+                // 官方的 system 字段既接受纯字符串，也接受「内容块数组」——
+                // 要打 cache_control 就必须用数组形式。
+                out.put(
+                    "system",
+                    JSONArray().put(
+                        JSONObject().put("type", "text").put("text", system)
+                            .put("cache_control", JSONObject().put("type", "ephemeral"))
+                    )
+                )
+            } else {
+                out.put("system", system)
+            }
+        }
 
         if (tools.isNotEmpty()) {
             val ts = JSONArray()
-            for (t in tools) {
+            for ((i, t) in tools.withIndex()) {
                 val f = t.getJSONObject("function")
-                ts.put(
-                    JSONObject().put("name", f.getString("name"))
-                        .put("description", strOf(f, "description"))
-                        .put("input_schema", f.getJSONObject("parameters"))
-                )
+                val o = JSONObject().put("name", f.getString("name"))
+                    .put("description", strOf(f, "description"))
+                    .put("input_schema", f.getJSONObject("parameters"))
+                if (cacheOk && i == tools.lastIndex) {
+                    o.put("cache_control", JSONObject().put("type", "ephemeral"))
+                }
+                ts.put(o)
             }
             out.put("tools", ts)
         }
         return out
     }
+
+    /**
+     * 能不能给请求打 Anthropic 的缓存标记。
+     *
+     * 只认官方端点：中转站 / 自建代理对 `cache_control` 的支持参差不齐，
+     * 打上去万一被拒，用户看到的是「本来好好的突然报错」——
+     * 省下的钱远不够赔这个体验，所以拿不准就不打。
+     */
+    private val cacheOk: Boolean
+        get() = cfg.provider.protocol == Protocol.ANTHROPIC &&
+            cfg.baseUrl.contains("api.anthropic.com")
 
     private fun anthBlocks(m: ChatMsg): JSONArray {
         val parts = JSONArray()

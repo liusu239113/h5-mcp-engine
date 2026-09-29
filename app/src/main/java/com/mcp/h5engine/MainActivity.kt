@@ -350,6 +350,12 @@ class MainActivity : AppCompatActivity(), GameUi {
     private var runWrote = false
     /** 本轮是否摸过 maker_ 工具（保证「第一次做 Maker」也能自动构建） */
     private var makerTouched = false
+    /**
+     * 本轮**实际**用的技能 id。
+     * 技能可能是按意图自动切过去的（一句「帮我接广告」就切到 ads），
+     * 续跑时必须沿用同一个 —— 否则会掉回通用技能，做法整个变样。
+     */
+    private var lastRunSkillId: String? = null
     /** 本轮 AI 自己调过构建没 —— 调过就不要再重复自动构建 */
     private var builtThisRun = false
 
@@ -1866,8 +1872,12 @@ class MainActivity : AppCompatActivity(), GameUi {
             setPadding(0, dp(5), 0, 0)
             setTextIsSelectable(true)
         })
-        card.addView(ghostBtnOf(this, pal, "再试一次").apply {
-            setOnClickListener { send() }
+        // 「接着做」= **从断点继续**，不是把那句话重发一遍。
+        // 老实现调的是 send()，而 send() 在输入框为空时会回退到 lastUserText ——
+        // 同一句用户消息被塞进历史第二次、轮次从 1 重新数，
+        // 用户看到的就是「跑了 11 轮，点一下重试全白干」。那 11 轮的结果其实都还在历史里。
+        card.addView(ghostBtnOf(this, pal, "接着做（不重来）").apply {
+            setOnClickListener { send(resume = true) }
         }, LinearLayout.LayoutParams(-2, -2).apply { topMargin = dp(8) })
 
         chatList.addView(card, LinearLayout.LayoutParams(-1, -2).apply {
@@ -2010,9 +2020,6 @@ class MainActivity : AppCompatActivity(), GameUi {
 
     // ==================== 发送 ====================
 
-    @Volatile
-    private var lastUserText = ""
-
     /**
      * 发送入口。
      *
@@ -2020,8 +2027,18 @@ class MainActivity : AppCompatActivity(), GameUi {
      * 正常点「发送」是**立刻发**：上一轮还在跑就直接打断它，不闷声排队
      * （用户反馈：发消息只会排队发不出去，还停不掉）。
      */
-    private fun send(queueIfBusy: Boolean = false) {
-        val text0 = inputEt.text.toString().trim().ifEmpty { lastUserText }
+    /**
+     * 发消息（或续跑）。
+     *
+     * @param resume true = **接着上一轮继续**，用在错误卡片的「再试一次」上。
+     *   这时不发新消息、不重置轮次、也不碰输入框，直接拿当前会话的历史接着往下跑。
+     */
+    private fun send(queueIfBusy: Boolean = false, resume: Boolean = false) {
+        // 输入框空着时**不再**回退到 lastUserText。
+        // 那条回退是「再试一次」事故的元凶：它会悄悄把上一条用户消息再发一遍，
+        // 而轮次从 1 重新数 —— 用户看到的是「跑了 11 轮，点一下重试全白干」。
+        // 实际上那 11 轮的工具结果都还在历史里，根本不该重来。
+        val text0 = if (resume) "" else inputEt.text.toString().trim()
         if (running && !runAlive) {
             // 自愈：线程其实早结束了，running 却还挂着 —— 别让用户卡在「排队」里
             running = false
@@ -2045,8 +2062,20 @@ class MainActivity : AppCompatActivity(), GameUi {
             }
             return
         }
+        // 续跑：先确认真的有进度可续。第一步就挂的话 runSteps 也是 1
+        // （STEP:1 在发请求之前就报出来了），所以这里只挡「根本没跑过」那种情况。
+        if (resume && runSteps <= 0) {
+            toast("没有可续跑的进度，重新说一句吧")
+            return
+        }
+
         val text = text0
-        if (text.isEmpty() && pendingShots.isEmpty() && queued.isEmpty() && attached.isEmpty()) return
+        if (!resume && text.isEmpty() && pendingShots.isEmpty() &&
+            queued.isEmpty() && attached.isEmpty()
+        ) {
+            toast("先写点什么再发吧")
+            return
+        }
 
         val cfg = cfgStore.active()
         val local = cfg.baseUrl.contains("127.0.0.1") || cfg.baseUrl.contains("localhost")
@@ -2061,21 +2090,29 @@ class MainActivity : AppCompatActivity(), GameUi {
         // 老逻辑只弹一句「点一下条目就能带上」，附件留在原地 —— 用户会以为图丢了
         // （实测反馈：选了图发出去，对话里没有图，下面还挂着待发送）。
         // 现在：发送时自动全部并入本轮（图片进多模态、其余带路径 + 正文）。
-        if (attached.isNotEmpty()) {
-            for (a in attached.toList()) queueAttach(a, silent = true)
+        // 续跑时这一整段都跳过：不并附件、不动输入框、**不再插一条用户气泡**。
+        // 用户可能在上一轮失败后又选了几个附件 —— 那些该留给下一条真正的消息，
+        // 不该被这次重试顺手吞掉。
+        val images: List<ByteArray>
+        val docs: List<Attach>
+        if (resume) {
+            images = emptyList()
+            docs = emptyList()
+        } else {
+            if (attached.isNotEmpty()) {
+                for (a in attached.toList()) queueAttach(a, silent = true)
+            }
+            images = pendingShots.toList()
+            docs = queued.toList()
+            pendingShots.clear()
+            queued.clear()
+            updateAttachInfo()
+            inputEt.setText("")
         }
-
-        val images = pendingShots.toList()
-        val docs = queued.toList()
-        pendingShots.clear()
-        queued.clear()
-        updateAttachInfo()
-        inputEt.setText("")
-        lastUserText = text
 
         // 附件块：图片走多模态（上面的 images），其余把「路径 + 文件名 + 正文」一起给模型，
         // 这样既能 game_read 读原文件，也能只报文件名命中（Tools.fuzzyFind）
-        val docBlock = docs.joinToString("") { d ->
+        val docBlock = if (resume) "" else docs.joinToString("") { d ->
             val body = when {
                 d.text.isEmpty() ->
                     "\n（二进制内容，App 解析不出正文；可用 game_read path=${d.rel} 读原文件）"
@@ -2088,16 +2125,18 @@ class MainActivity : AppCompatActivity(), GameUi {
                 "\n（可直接 game_read(path=\"${d.rel}\")；只报文件名也能读到）" + body
         }
 
-        addBubble(
-            (text.ifEmpty { if (images.isEmpty()) "（看附件）" else "（看这张图）" }) +
-                docs.joinToString("") { "\n[附件] ${it.name}" },
-            true,
-            images
-        )
-        if (images.isNotEmpty()) addSystemLine("（附带 ${images.size} 张图片）")
-        if (docs.isNotEmpty()) addSystemLine("（附带 ${docs.size} 个文档）")
-        maybeAutoTitle(text)
-        persistSessions()
+        if (!resume) {
+            addBubble(
+                (text.ifEmpty { if (images.isEmpty()) "（看附件）" else "（看这张图）" }) +
+                    docs.joinToString("") { "\n[附件] ${it.name}" },
+                true,
+                images
+            )
+            if (images.isNotEmpty()) addSystemLine("（附带 ${images.size} 张图片）")
+            if (docs.isNotEmpty()) addSystemLine("（附带 ${docs.size} 个文档）")
+            maybeAutoTitle(text)
+            persistSessions()
+        }
 
         // 一句「帮我接广告」就自动切到广告技能，不用用户自己去翻设置
         val adWanted = listOf("广告", "激励视频", "发奖", "变现", "adunitid", "adkit", "rewarded")
@@ -2130,19 +2169,33 @@ class MainActivity : AppCompatActivity(), GameUi {
             // AI 问你「要不要我现在上传 / 发布？」你回一句「可以」——这也得算同意。
             // 这种回复本身不含任何领域关键词，光靠词表永远放行不了写接口，又是一轮来回。
             shortOK(text)
-        EngineTools.mcpAllowed = mcpWanted
-        if (mcpWanted) {
-            addSystemLine("本轮已放行 TapTap / Maker 的写 / 发布类接口（上传、发布、改信息等）；它动手前仍会先跟你确认")
-        } else if (EngineTools.mcp != null) {
-            // 只读查询与素材生成是常驻的，不需要放行；这里只是日志：写类本轮还锁着
-            android.util.Log.i("Hexora", "本轮未放行 MCP 写 / 发布类工具（无明确同意）")
+        // 续跑时**绝不能**重算上面这两件事：
+        //   · MCP 准入是看「这一轮用户说了什么」算的，而续跑没有新消息（text 是空的），
+        //     重算必然得 false —— 等于把上一轮已经放行的写权限又锁回去，任务当场做不下去。
+        //   · 技能也可能是上一轮按意图自动切过去的（比如自动切到 ads），
+        //     重算会掉回通用技能，做法整个变样。
+        val skill = if (resume) {
+            SkillPresets.byId(lastRunSkillId ?: cfgStore.skillId)
+        } else {
+            EngineTools.mcpAllowed = mcpWanted
+            if (mcpWanted) {
+                addSystemLine("本轮已放行 TapTap / Maker 的写 / 发布类接口（上传、发布、改信息等）；它动手前仍会先跟你确认")
+            } else if (EngineTools.mcp != null) {
+                // 只读查询与素材生成是常驻的，不需要放行；这里只是日志：写类本轮还锁着
+                android.util.Log.i("Hexora", "本轮未放行 MCP 写 / 发布类工具（无明确同意）")
+            }
+            val s = if (adWanted) SkillPresets.byId("ads") else SkillPresets.byId(cfgStore.skillId)
+            if (adWanted && cfgStore.skillId != "ads") {
+                addSystemLine("识别到广告需求：本轮自动使用「广告接入（TapTap 激励视频）」技能，按官方契约执行")
+            }
+            lastRunSkillId = s.id
+            s
         }
-
-        val skill =
-            if (adWanted) SkillPresets.byId("ads") else SkillPresets.byId(cfgStore.skillId)
-        if (adWanted && cfgStore.skillId != "ads") {
-            addSystemLine("识别到广告需求：本轮自动使用「广告接入（TapTap 激励视频）」技能，按官方契约执行")
-        }
+        // 新一轮开始时把连接池清一次：上一轮可能已经过去很久（切后台 / 切网 / 隔了半天），
+        // 池里那几条多半已经死了，留着只会让这一步白等一次连接超时。
+        // 清掉之后**本轮之内**照常复用连接 —— 省下的握手时间就是从这里开始的。
+        // 续跑不清：刚刚才失败的连接多半还活着，正好接着用。
+        if (!resume) AiClient.evictConnections()
         val tools = EngineTools(this, gameRoot)
         runSeq++
         val mySeq = runSeq
@@ -2158,10 +2211,17 @@ class MainActivity : AppCompatActivity(), GameUi {
         ) { ev -> if (mySeq == runSeq) onAgentEvent(ev) }
         runner = r
         running = true
-        runSteps = 0
-        runWrote = false
-        makerTouched = false
-        builtThisRun = false
+        // 续跑时轮次**接着数**（runSteps 保持原值）。重置成 0 就是用户看到的「进度清零」——
+        // 明明已经干了十几轮，一点重试又从「第 1 轮」开始，看着像全白做了。
+        val startStep = if (resume) runSteps else 0
+        runSteps = startStep
+        // 这三个标记同理：续跑时不能清。它们记的是「这轮改过代码 / 碰过 Maker / 自己构建过」，
+        // 清掉的话本轮结束就不会自动刷新预览、也不会自动提交构建 —— 又是白做一轮。
+        if (!resume) {
+            runWrote = false
+            makerTouched = false
+            builtThisRun = false
+        }
         stopBtn.visibleIf(true)
         startRunCard()
 
@@ -2170,8 +2230,11 @@ class MainActivity : AppCompatActivity(), GameUi {
             try {
                 r.run(
                     history,
-                    (text + docBlock).ifBlank { "请看我发的图片/文档，并按里面的内容改进游戏。" },
-                    images
+                    if (resume) "" else (text + docBlock)
+                        .ifBlank { "请看我发的图片/文档，并按里面的内容改进游戏。" },
+                    images,
+                    resume = resume,
+                    startStep = startStep
                 )
             } catch (t: Throwable) {
                 main.post {
@@ -5804,6 +5867,40 @@ makerRow1.addView(ghostBtnOf(ctx, pal, "扫码登录").apply {
         val histEt = input("历史条数上限（只带最近 N 条消息）", cfgStore.historyLimit.toString(), true)
         col.addView(histEt, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(6) })
 
+        // 下面这两项比「条数」更影响体积：截图和长工具结果都是**每一步都要重发一遍**的，
+        // 不像历史条数那样容易被忽略。
+        val keepImgEt = input("历史里保留几张截图（0 = 一张不留）", cfgStore.keepImages.toString(), true)
+        col.addView(keepImgEt, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(6) })
+
+        val keepTrEt = input(
+            "最近多少条长工具结果留全文（更早的压成一行占位）",
+            cfgStore.keepToolResults.toString(), true
+        )
+        col.addView(keepTrEt, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(6) })
+        col.addView(TextView(ctx).apply {
+            text = "截图是按 base64 直接塞进请求体的，而且每一步都连同历史重发 —— " +
+                "一张 720p 截图 ≈ 100KB，留十张就是每步多传 1MB，慢也慢在这儿。" +
+                "只留最近 1~2 张通常就够 AI 自检用了。"
+            textSize = 11.5f
+            setTextColor(pal.faint)
+            setPadding(dp(2), dp(4), dp(2), 0)
+        })
+
+        val slimToolsCb = CheckBox(ctx).apply {
+            text = "精简工具定义（省 token，但会少几个工具）"
+            textSize = 12.5f
+            setTextColor(pal.text)
+            isChecked = cfgStore.slimTools
+        }
+        col.addView(slimToolsCb, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(8) })
+        col.addView(TextView(ctx).apply {
+            text = "⚠️ 打开后会少发「插件市场 / 本地服务」这两个跟做游戏无关的工具给模型。" +
+                "被砍掉的工具它连看都看不到 —— 这是实打实的能力损失，所以默认关。"
+            textSize = 11.5f
+            setTextColor(pal.faint)
+            setPadding(dp(2), dp(4), dp(2), 0)
+        })
+
         val sendToolsCb = CheckBox(ctx).apply {
             text = "把工具清单发给模型（关掉最省 token，但 AI 不能调用工具/生图）"
             textSize = 12.5f
@@ -5820,13 +5917,15 @@ makerRow1.addView(ghostBtnOf(ctx, pal, "扫码登录").apply {
         }
         col.addView(autoSlimCb, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(4) })
 
-        col.addView(ghostBtnOf(ctx, pal, "按当前厂商一键省 token（输出 512 / 历史 12 / 关工具）").apply {
+        col.addView(ghostBtnOf(ctx, pal, "一键省额度（输出 512 / 历史 12 / 截图留 1 张）").apply {
             setOnClickListener {
                 maxOutEt.setText("512")
                 histEt.setText("12")
+                keepImgEt.setText("1")
+                keepTrEt.setText("3")
                 sendToolsCb.isChecked = false
                 autoSlimCb.isChecked = true
-                toast("已填入省 token 参数，点「保存」生效")
+                toast("已填入省额度参数，点「保存」生效")
             }
         }, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(6) })
 
@@ -6057,6 +6156,9 @@ makerRow1.addView(ghostBtnOf(ctx, pal, "扫码登录").apply {
                 cfgStore.maxOutTokens = maxOutEt.text.toString().toIntOrNull() ?: 0
                 cfgStore.historyLimit = histEt.text.toString().toIntOrNull() ?: 40
                 cfgStore.sendTools = sendToolsCb.isChecked
+                cfgStore.keepImages = keepImgEt.text.toString().toIntOrNull() ?: 2
+                cfgStore.keepToolResults = keepTrEt.text.toString().toIntOrNull() ?: 6
+                cfgStore.slimTools = slimToolsCb.isChecked
                 cfgStore.autoSlim = autoSlimCb.isChecked
                 val oldTheme = cfgStore.themeMode
                 cfgStore.themeMode = themeIds[themeSel]
