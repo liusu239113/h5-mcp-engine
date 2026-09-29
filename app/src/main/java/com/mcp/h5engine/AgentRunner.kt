@@ -66,6 +66,10 @@ class AgentRunner(
         val names = spec.map { it.getJSONObject("function").getString("name") }
 
         val sys = buildString {
+            // 人格块放最前：它自称「最高优先级，覆盖以下所有其它设定」，
+            // 排在技能提示之后就容易被后面那一大段工程纪律盖过去。
+            // 关了人格锁定时它返回空串，等于没这段。
+            append(AiConfigStore(appCtx).personaBlock())
             append(skill.system)
             // C1 长期记忆：把与本轮输入最相关的几条注入系统提示
             append(MemoryStore.promptBlock(appCtx, userText))

@@ -64,6 +64,13 @@ data class ProviderConfig(
      * 默认关：砍工具 = 模型看不到它，属于能力损失，得用户自己决定。
      */
     val slimTools: Boolean = false,
+    /**
+     * 人格锁定：不管你从哪个角度问（你是什么模型 / 谁训练的 / 是不是 GPT），
+     * 它都只承认自己是 [personaName]，不吐露底层模型和厂商。
+     */
+    val personaLock: Boolean = true,
+    /** 人格名，默认就是应用名。 */
+    val personaName: String = "Hexora",
     /** 是否携带工具定义。50+ 个工具的 JSON 是 token 大头，关掉最省（AI 就不能调工具） */
     val sendTools: Boolean = true,
     /** 遇 413 / TPM / 上下文超限时，自动精简请求并重试 */

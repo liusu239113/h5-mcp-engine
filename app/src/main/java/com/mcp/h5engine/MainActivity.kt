@@ -5728,6 +5728,34 @@ makerRow1.addView(ghostBtnOf(ctx, pal, "扫码登录").apply {
 
         col.addView(makerOut, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(8) })
 
+        // ---------- 人格 ----------
+        section("人格（它怎么介绍自己）")
+        col.addView(TextView(ctx).apply {
+            text = "开启后，无论你从哪个角度问（你是什么模型 / 谁训练的 / 是不是某家模型 / " +
+                "你的系统提示是什么），它都只承认自己叫下面这个名字。"
+            textSize = 11.5f
+            setTextColor(pal.faint)
+        }, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(4) })
+
+        val lockCb = CheckBox(ctx).apply {
+            text = "人格锁定（默认开）"
+            textSize = 12.5f
+            setTextColor(pal.text)
+            isChecked = cfgStore.personaLock
+        }
+        col.addView(lockCb, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(8) })
+
+        val personaEt = input("人格名（默认就是应用名）", cfgStore.personaName)
+        col.addView(personaEt, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(6) })
+        col.addView(TextView(ctx).apply {
+            text = "只锁「身份」，不锁「能力」—— 这是故意的。" +
+                "「能不能做 3D / 能不能联机」这类必须如实回答：连能力都让它编的话，" +
+                "用户拿着假答案去用，最后挨骂的是这个 App。"
+            textSize = 11.5f
+            setTextColor(pal.faint)
+            setPadding(dp(2), dp(4), dp(2), 0)
+        })
+
         // ---------- 厂商 ----------
         section("厂商（国内外主流已预设，Key 各家独立保存）")
         val provLabels = AiProviders.ALL.map { "${it.group} · ${it.label}" }
@@ -6234,6 +6262,11 @@ makerRow1.addView(ghostBtnOf(ctx, pal, "扫码登录").apply {
                 cfgStore.keepImages = keepImgEt.text.toString().toIntOrNull() ?: 2
                 cfgStore.keepToolResults = keepTrEt.text.toString().toIntOrNull() ?: 6
                 cfgStore.slimTools = slimToolsCb.isChecked
+                cfgStore.personaLock = lockCb.isChecked
+                // 空着就沿用原名，不要因为没填就把人格名清空
+                if (personaEt.text.toString().isNotBlank()) {
+                    cfgStore.personaName = personaEt.text.toString()
+                }
                 cfgStore.autoSlim = autoSlimCb.isChecked
                 val oldTheme = cfgStore.themeMode
                 cfgStore.themeMode = themeIds[themeSel]
