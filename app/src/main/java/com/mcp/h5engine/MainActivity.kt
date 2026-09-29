@@ -1522,7 +1522,7 @@ class MainActivity : AppCompatActivity(), GameUi {
         val kind = toolIconKind(nm)
         // 1:1 对齐 Operit CanvasToolSummaryRow：无边框、前置图标(16dp 主色0.7α) + 工具名(主色)
         val icon = ImageView(this).apply {
-            setImageDrawable(LineIcon(kind, tintA(pal.accent, 0.7f), dp(1.6f).toFloat()))
+            setImageDrawable(LineIcon(kind, tintA(pal.accent, 0.7f), dp(16).toFloat()))
         }
         val title = TextView(this).apply {
             text = nm
@@ -1577,7 +1577,7 @@ class MainActivity : AppCompatActivity(), GameUi {
             ellipsize = android.text.TextUtils.TruncateAt.END
         }
         val copy = ImageView(this).apply {
-            setImageDrawable(LineIcon("copy", tintA(pal.accent, 0.6f), dp(1.4f).toFloat()))
+            setImageDrawable(LineIcon("copy", tintA(pal.accent, 0.6f), dp(14).toFloat()))
             setOnClickListener { copyToClip(full.ifBlank { summary }, "$t 结果") }
         }
         val row = LinearLayout(this).apply {
@@ -1624,7 +1624,7 @@ class MainActivity : AppCompatActivity(), GameUi {
             typeface = Typeface.DEFAULT_BOLD
         }, LinearLayout.LayoutParams(0, -2, 1f))
         head.addView(ImageView(this).apply {
-            setImageDrawable(LineIcon("copy", pal.accent, dp(1.6f).toFloat()))
+            setImageDrawable(LineIcon("copy", pal.accent, dp(16).toFloat()))
             setOnClickListener { copyToClip(content, "工具结果") }
         }, LinearLayout.LayoutParams(dp(20), dp(20)))
         root.addView(head)
