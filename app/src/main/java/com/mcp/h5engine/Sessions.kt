@@ -49,9 +49,16 @@ class SessionStore(private val ctx: Context, val proj: String = "") {
     }
 
     fun load(): MutableList<ChatSession> {
-        if (!f.exists()) return mutableListOf()
+        // 先读主文件；读不出来（写到一半被杀进程 / 文件残缺）就退到 .bak。
+        // 绝不能因为一个坏 JSON 让用户「所有对话都没了」。
+        return readFrom(f) ?: readFrom(File(f.parentFile, f.name + ".bak")) ?: mutableListOf()
+    }
+
+    /** 读一个会话文件；不存在或解析失败都返回 null（由 load 决定怎么兜底） */
+    private fun readFrom(src: File): MutableList<ChatSession>? {
+        if (!src.exists()) return null
         return runCatching {
-            val arr = JSONArray(f.readText())
+            val arr = JSONArray(src.readText())
             val out = mutableListOf<ChatSession>()
             for (i in 0 until arr.length()) {
                 val o = arr.optJSONObject(i) ?: continue
@@ -85,8 +92,9 @@ class SessionStore(private val ctx: Context, val proj: String = "") {
                     o.optLong("updated", 0L)
                 )
             }
-            out
-        }.getOrDefault(mutableListOf())
+            // 最近用过的排前面：冷启动 / 切项目回来优先看到「上次那个」
+            out.sortedByDescending { it.updated }.toMutableList()
+        }.getOrNull()
     }
 
     fun save(list: List<ChatSession>) {
@@ -120,7 +128,18 @@ class SessionStore(private val ctx: Context, val proj: String = "") {
                         .put("msgs", ma)
                 )
             }
-            f.writeText(arr.toString())
+            // 原子写：先写 .tmp 再 rename，并留一份 .bak。
+            // 直接 writeText 的话，写到一半被系统杀进程 → JSON 残缺 →
+            // 下次启动解析失败 → 用户看到「所有对话都没了」（真实发生过的数据丢失）。
+            val tmp = File(f.parentFile, f.name + ".tmp")
+            tmp.writeText(arr.toString())
+            if (f.exists()) runCatching {
+                f.copyTo(File(f.parentFile, f.name + ".bak"), overwrite = true)
+            }
+            if (!tmp.renameTo(f)) {
+                f.delete()
+                tmp.renameTo(f)
+            }
         }
     }
 }

@@ -42,6 +42,16 @@ class AiConfigStore(ctx: Context) {
         set(v) {
             sp.edit().putString("last_root", v).apply()
         }
+    /**
+     * 上次停留的会话 id（按项目分开记）。
+     *
+     * 不记的话冷启动只能默认停在「第 0 个会话」—— 用户看到的是
+     * 「上次聊天记录不见了 / 没停在我离开的那条」（记录其实都在，只是开错了会话）。
+     */
+    fun lastSessionId(proj: String): String = sp.getString("last_session_" + proj, "") ?: ""
+    fun setLastSessionId(proj: String, id: String) {
+        sp.edit().putString("last_session_" + proj, id).apply()
+    }
 
     // ==================== 模型 ====================
 

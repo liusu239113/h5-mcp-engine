@@ -2442,8 +2442,12 @@ class MainActivity : AppCompatActivity(), GameUi {
         val loaded = ss().load().ifEmpty { mutableListOf(ChatSession(newId(), "新对话")) }
         sessions.clear()
         sessions.addAll(loaded)
-        activeSession = 0
-        history = sessions[0].msgs
+        // 停在「上次那个会话」：按落盘的会话 id 找回来，找不到才退回第一个。
+        // 以前写死 0，冷启动永远跳到最早那条 —— 用户以为记录丢了。
+        val want = runCatching { cfgStore.lastSessionId(currentGame) }.getOrDefault("")
+        val found = sessions.indexOfFirst { it.id == want }
+        activeSession = if (found >= 0) found else 0
+        history = sessions[activeSession].msgs
         chatList.removeAllViews()
         renderHistory()
         updateSessionBtn()
@@ -2459,6 +2463,8 @@ class MainActivity : AppCompatActivity(), GameUi {
         sessions.getOrNull(activeSession)?.let {
             it.msgs = history
             it.updated = System.currentTimeMillis()
+            // 记下「最后停在哪个会话」：冷启动 / 切项目回来才能接着上次看
+            runCatching { cfgStore.setLastSessionId(currentGame, it.id) }
         }
         ss().save(sessions)
     }
@@ -2482,6 +2488,8 @@ class MainActivity : AppCompatActivity(), GameUi {
         history = sessions[i].msgs
         renderHistory()
         updateSessionBtn()
+        // 切换后再落一次：上面那次记的是「切换前」的会话 id
+        runCatching { persistSessions() }
         toast("已切到「${sessions[i].title}」")
     }
 
@@ -5996,6 +6004,8 @@ makerRow1.addView(ghostBtnOf(ctx, pal, "扫码登录").apply {
     }
 
     override fun onDestroy() {
+        // 退出 / 被回收前再兜一次落盘（onPause 到 onDestroy 之间可能又说过话）
+        runCatching { persistSessions() }
         runCatching { runner?.cancel() }
         runCatching { web.destroy() }
         super.onDestroy()
