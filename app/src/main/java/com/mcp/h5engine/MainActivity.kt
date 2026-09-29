@@ -1854,6 +1854,7 @@ class MainActivity : AppCompatActivity(), GameUi {
         }
         val tools = EngineTools(this, gameRoot)
         val r = AgentRunner(
+            appCtx = this,
             cfg = cfg,
             skill = skill,
             tools = tools,

@@ -313,6 +313,75 @@ class EngineTools(private val ui: GameUi, private val root: File) {
                 """{"action":{"type":"string","description":"status=查状态；start/login=开始授权并拿链接；logout=退出授权；switch=换号（清旧+出新链接）；token=直接写入 token"},"token":{"type":"string","description":"可选。action=token 时要写入的 token 原文"}}""",
                 listOf("action")),
 
+            fn("memory_save",
+                "【长期记忆】把值得跨会话记住的事记下来（用户偏好、项目约定、踩过的坑、固定用法）。" +
+                    "每轮会自动把相关记忆注入你的上下文，以后不用再问。只记以后还用得上的，别记一次性闲聊。",
+                """{"text":{"type":"string","description":"要记住的内容，一句话说清"},
+                   "tags":{"type":"array","items":{"type":"string"},"description":"可选，标签，便于检索"}}""",
+                listOf("text")),
+
+            fn("memory_search",
+                "【长期记忆】检索以前记下来的事。不确定用户之前说过什么、约定过什么时，先搜一下再回答。",
+                """{"query":{"type":"string","description":"关键词，留空则返回最近的记忆"},
+                   "limit":{"type":"integer","description":"可选，最多返回几条，默认 8"}}""",
+                emptyList()),
+
+            fn("memory_forget",
+                "【长期记忆】忘掉某条记忆（按 id 删）。id 可从 memory_search 结果里看到。",
+                """{"id":{"type":"string","description":"要删除的记忆 id"}}""",
+                listOf("id")),
+
+            fn("workflow_list", "列出所有工作流（id / 名称 / 触发器 / 步骤数）。", "{}", emptyList()),
+
+            fn("workflow_save",
+                "【工作流】新建 / 更新一个工作流。nodes 是步骤数组，每步 {id,type,title,params,next}；" +
+                    "type=tool（params.tool 指定要调的引擎工具，其余键是它的参数）/ llm / delay（params.ms）。" +
+                    "next 指向下一步 id，最后一步不填。",
+                """{"id":{"type":"string","description":"可选，更新时传原 id"},
+                   "name":{"type":"string"},
+                   "trigger":{"type":"string","description":"manual / schedule / event，默认 manual"},
+                   "enabled":{"type":"boolean"},
+                   "nodes":{"type":"array","items":{"type":"object"}}}""",
+                listOf("name", "nodes")),
+
+            fn("workflow_run", "执行一个工作流（按节点顺序跑）。id 从 workflow_list 拿。",
+                """{"id":{"type":"string"}}""",
+                listOf("id")),
+
+            fn("js_sandbox",
+                "【代码执行】在内嵌 JS 沙箱里跑一段脚本并拿到返回值（Rhino 引擎，无网络 / 无文件 IO）。" +
+                    "适合纯计算、数据转换、字符串处理。用 return 返回结果。",
+                """{"code":{"type":"string","description":"JS 代码，用 return 返回结果"},
+                   "timeoutMs":{"type":"integer","description":"可选，超时毫秒，默认 3000"}}""",
+                listOf("code")),
+
+            fn("shell_run",
+                "【执行系统命令】在当前设备上跑一条命令并拿回输出（经 sh -c 解释；不会自动拿到 root）。" +
+                    "用于查设备状态 / 文件 / 进程。危险命令先告诉用户你想干什么。",
+                """{"cmd":{"type":"string","description":"要执行的命令"},
+                   "timeoutMs":{"type":"integer","description":"可选，超时毫秒，默认 15000"}}""",
+                listOf("cmd")),
+
+            fn("toolpkg",
+                "【插件包】管理本地 JS 插件：action=list（列出已装）/ install（装：需 id+manifest+code）/ " +
+                    "remove（卸：需 id）/ run（跑：需 id，可选 args）/ market（拉远端市场索引）。" +
+                    "插件在沙箱里运行（无网络 / 无文件 IO）。",
+                """{"action":{"type":"string","description":"list / install / remove / run / market"},
+                   "id":{"type":"string","description":"插件 id"},
+                   "manifest":{"type":"string","description":"install 时的 manifest.json 内容"},
+                   "code":{"type":"string","description":"install 时的入口 JS 代码"},
+                   "args":{"type":"string","description":"run 时传给插件的参数"},
+                   "indexUrl":{"type":"string","description":"market 时的索引地址，可选"}}""",
+                listOf("action")),
+
+            fn("localserver",
+                "【本地服务】启停内置 HTTP 服务（web-chat / a2a-server，供电脑或别的 Agent 访问）。" +
+                    "action=start（可带 port，默认 8787）/ stop / status。启动后返回 token，" +
+                    "调用 /api/* 需带 header X-Token。",
+                """{"action":{"type":"string","description":"start / stop / status"},
+                   "port":{"type":"integer","description":"start 时端口，默认 8787"}}""",
+                listOf("action")),
+
             fn("ad_guide",
                 "【接广告必调】一次给全：TapTap 激励视频官方契约 + adkit.js 模板位置 + 八条硬纪律 + 验收清单。" +
                     "用户只要提到广告 / 激励视频 / 发奖 / 变现，先调它，别凭印象写，更不许用「模拟广告」糊过去",
@@ -534,6 +603,205 @@ class EngineTools(private val ui: GameUi, private val root: File) {
                 "已写入 $rel（${f.length()} 字节）" +
                     if (isShared) "（共享资产，不需要重载）" else "，并已热重载"
             )
+        }
+
+        "memory_save" -> {
+            val c = ctxRef
+            if (c == null) ToolResult("App 上下文不可用，重启一次 App 再试")
+            else {
+                val text = a.optString("text").trim()
+                if (text.isEmpty()) ToolResult("text 不能为空")
+                else {
+                    val tags = a.optJSONArray("tags")?.let { ja ->
+                        (0 until ja.length()).map { ja.optString(it) }.filter { it.isNotBlank() }
+                    } ?: emptyList()
+                    val it0 = MemoryStore.save(c, text, tags)
+                    ToolResult(if (it0 == null) "没记下来（内容为空）" else "已记住（id=${it0.id}）：${it0.text.take(80)}")
+                }
+            }
+        }
+
+        "memory_search" -> {
+            val c = ctxRef
+            if (c == null) ToolResult("App 上下文不可用，重启一次 App 再试")
+            else {
+                val q = a.optString("query").trim()
+                val lim = a.optInt("limit", 8).coerceIn(1, 30)
+                val hits = MemoryStore.search(c, q, lim)
+                ToolResult(
+                    if (hits.isEmpty()) "没有相关记忆。" + if (q.isEmpty()) "（目前还没记过任何东西）" else ""
+                    else "相关记忆 ${hits.size} 条：\n" + hits.joinToString("\n") {
+                        "- [${it.id}] ${it.text}" + if (it.tags.isEmpty()) "" else "  <${it.tags.joinToString(",")}>"
+                    }
+                )
+            }
+        }
+
+        "memory_forget" -> {
+            val c = ctxRef
+            if (c == null) ToolResult("App 上下文不可用，重启一次 App 再试")
+            else {
+                val id = a.optString("id").trim()
+                if (id.isEmpty()) ToolResult("id 不能为空")
+                else ToolResult(if (MemoryStore.delete(c, id)) "已忘掉 [$id]" else "没找到 id=[$id] 的记忆")
+            }
+        }
+
+        "workflow_list" -> {
+            val c = ctxRef
+            if (c == null) ToolResult("App 上下文不可用，重启一次 App 再试")
+            else {
+                val l = WorkflowStore.list(c)
+                ToolResult(
+                    if (l.isEmpty()) "暂无工作流。用 workflow_save 建一个。"
+                    else l.joinToString("\n") {
+                        "${it.id}  ${it.name}  [${it.trigger}]  ${if (it.enabled) "启用" else "停用"}  ${it.nodes.size}步"
+                    }
+                )
+            }
+        }
+
+        "workflow_save" -> {
+            val c = ctxRef
+            if (c == null) ToolResult("App 上下文不可用，重启一次 App 再试")
+            else {
+                val name = a.optString("name").trim()
+                val na = a.optJSONArray("nodes")
+                if (name.isEmpty() || na == null || na.length() == 0) ToolResult("name 和 nodes 都不能为空")
+                else {
+                    val nodes = mutableListOf<WorkflowStore.Node>()
+                    for (i in 0 until na.length()) {
+                        val n = na.optJSONObject(i) ?: continue
+                        nodes += WorkflowStore.Node(
+                            n.optString("id", "n$i"),
+                            n.optString("type", "tool"),
+                            n.optString("title", "步骤$i"),
+                            n.optJSONObject("params") ?: JSONObject(),
+                            n.optString("next").ifBlank { null }
+                        )
+                    }
+                    val id = a.optString("id").trim().ifEmpty { WorkflowStore.newId() }
+                    WorkflowStore.upsert(
+                        c,
+                        WorkflowStore.Flow(id, name, a.optString("trigger", "manual"), a.optBoolean("enabled", true), nodes)
+                    )
+                    ToolResult("已保存工作流 [$id]：$name（${nodes.size} 步）")
+                }
+            }
+        }
+
+        "workflow_run" -> {
+            val c = ctxRef
+            if (c == null) ToolResult("App 上下文不可用，重启一次 App 再试")
+            else {
+                val id = a.optString("id").trim()
+                if (id.isEmpty()) ToolResult("id 不能为空")
+                else ToolResult(
+                    WorkflowStore.run(c, id) { node ->
+                        when (node.type) {
+                            "delay" -> {
+                                val ms = node.params.optInt("ms", 500).coerceIn(0, 10000).toLong()
+                                Thread.sleep(ms)
+                                "等待 ${ms}ms"
+                            }
+                            "llm" -> "[llm 节点：请在对话中执行] " + node.params.optString("prompt").take(80)
+                            else -> {
+                                val tn = node.params.optString("tool").trim()
+                                if (tn.isEmpty()) "（tool 节点缺少 params.tool）"
+                                else {
+                                    val p = JSONObject(node.params.toString())
+                                    p.remove("tool")
+                                    call(tn, p.toString()).text
+                                }
+                            }
+                        }
+                    }
+                )
+            }
+        }
+
+        "js_sandbox" -> {
+            val code = a.optString("code")
+            if (code.isBlank()) ToolResult("code 不能为空")
+            else {
+                val timeout = a.optInt("timeoutMs", 3000).coerceIn(100, 20000).toLong()
+                runCatching { JsSandbox.eval(code, emptyMap(), timeout) }
+                    .fold(
+                        { ToolResult(it.take(4000)) },
+                        { ToolResult("脚本出错：${it.message}") }
+                    )
+            }
+        }
+
+        "shell_run" -> {
+            val cmd = a.optString("cmd").trim()
+            if (cmd.isEmpty()) ToolResult("cmd 不能为空")
+            else {
+                val timeout = a.optInt("timeoutMs", 15000).coerceIn(500, 60000).toLong()
+                val r = Shell.run(listOf("/system/bin/sh", "-c", cmd), null, emptyMap(), timeout)
+                ToolResult(
+                    (if (r.ok) "" else "[退出码 ${r.code}]\n") +
+                        r.text().ifBlank { "(无输出)" }.take(8000)
+                )
+            }
+        }
+
+        "toolpkg" -> {
+            val c = ctxRef
+            if (c == null) ToolResult("App 上下文不可用，重启一次 App 再试")
+            else when (a.optString("action", "list").lowercase()) {
+                "list" -> {
+                    val l = ToolPkg.list(c)
+                    ToolResult(
+                        if (l.isEmpty()) "还没装任何插件。用 action=market 看市场。"
+                        else l.joinToString("\n") { "${it.id}  ${it.name} v${it.version} — ${it.desc}" }
+                    )
+                }
+                "install" -> {
+                    val id = a.optString("id").trim()
+                    val mf = a.optString("manifest").trim()
+                    val code = a.optString("code")
+                    if (id.isEmpty() || mf.isEmpty() || code.isEmpty()) ToolResult("install 需 id+manifest+code")
+                    else {
+                        val p = ToolPkg.install(c, id, mf, code)
+                        ToolResult("已安装插件 [${p.id}] ${p.name} v${p.version}（入口 ${p.entry}）")
+                    }
+                }
+                "remove" -> {
+                    val id = a.optString("id").trim()
+                    ToolResult(
+                        when {
+                            id.isEmpty() -> "remove 需 id"
+                            ToolPkg.remove(c, id) -> "已卸载 [$id]"
+                            else -> "没找到插件 [$id]"
+                        }
+                    )
+                }
+                "run" -> {
+                    val id = a.optString("id").trim()
+                    ToolResult(
+                        if (id.isEmpty()) "run 需 id"
+                        else runCatching { ToolPkg.run(c, id, a.optString("args"), 3000) }
+                            .getOrElse { "运行失败：${it.message}" }.take(4000)
+                    )
+                }
+                "market" -> ToolResult(
+                    runCatching { ToolPkg.market(a.optString("indexUrl")) }
+                        .getOrElse { "市场拉取失败：${it.message}" }.take(8000)
+                )
+                else -> ToolResult("未知 action：${a.optString("action")}（支持 list/install/remove/run/market）")
+            }
+        }
+
+        "localserver" -> {
+            val c = ctxRef
+            if (c == null) ToolResult("App 上下文不可用，重启一次 App 再试")
+            else when (a.optString("action", "status").lowercase()) {
+                "start" -> ToolResult(LocalServerHost.start(c, a.optInt("port", 8787).coerceIn(1024, 65535)))
+                "stop" -> ToolResult(LocalServerHost.stop())
+                "status" -> ToolResult(LocalServerHost.status())
+                else -> ToolResult("未知 action：${a.optString("action")}（start/stop/status）")
+            }
         }
 
         "service_logs" -> {

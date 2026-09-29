@@ -19,8 +19,8 @@ android {
         applicationId = "com.mcp.h5engine"
         minSdk = 24
         targetSdk = 34
-        versionCode = 16
-        versionName = "1.15"
+        versionCode = 17
+        versionName = "1.16"
     }
 
     signingConfigs {
@@ -79,4 +79,9 @@ dependencies {
     implementation("androidx.webkit:webkit:1.10.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
+    // C3 内嵌 JS 引擎：Rhino（纯 JVM 实现，免 native so / 免子进程、无 ABI 问题，也不受
+    // SELinux「禁 execve 私有目录」限制）。给插件体系(D1) 与工作流脚本节点提供受限执行环境。
+    implementation("org.mozilla:rhino:1.7.15")
+    // D2 web-chat / a2a-server：内嵌轻量 HTTP 服务（NanoHTTPD，纯 Java，无 native）
+    implementation("org.nanohttpd:nanohttpd:2.3.1")
 }

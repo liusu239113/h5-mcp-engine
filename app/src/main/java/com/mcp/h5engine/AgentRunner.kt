@@ -1,5 +1,6 @@
 package com.mcp.h5engine
 
+import android.content.Context
 import java.io.File
 
 /**
@@ -15,6 +16,7 @@ import java.io.File
  *   [失败] xxx         错误卡片
  */
 class AgentRunner(
+    private val appCtx: Context,
     private val cfg: ProviderConfig,
     private val skill: Skill,
     private val tools: EngineTools,
@@ -49,6 +51,8 @@ class AgentRunner(
 
         val sys = buildString {
             append(skill.system)
+            // C1 长期记忆：把与本轮输入最相关的几条注入系统提示
+            append(MemoryStore.promptBlock(appCtx, userText))
             // 交付纪律：用户反复踩到的坑，直接写死在系统提示里
             append(
                 """
