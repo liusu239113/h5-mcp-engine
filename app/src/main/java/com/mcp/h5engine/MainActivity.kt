@@ -2387,6 +2387,48 @@ class MainActivity : AppCompatActivity(), GameUi {
      * **对话区的可见高度从头到尾不变**，屏幕自然不会闪。
      */
     private fun startRunCard() {
+        // 本轮统计清零 + 计时重置，然后挂卡
+        latestActivity = ""
+        lastTail = ""
+        thinkLog = ""
+        toolTotal = 0
+        toolVerbCount.clear()
+        pendingStatus = null
+        pendingSummary = null
+        pendingRow = null
+        pendingSpinView = null
+        pendingMarkView = null
+        // 新一轮开始：用户没主动上滑的话，内容默认贴着底部往下长
+        if (!userPinned) stickBottom = true
+        runStartAt = SystemClock.elapsedRealtime()
+        attachWorkCard()
+        updateWorkStat("启动中")
+        runBar?.visibleIf(true)
+        setTextIf(runBar, "运行中 · 启动中")
+        setTextIf(statusRun, "运行中")
+        askNotiPermission()
+        startGuard()
+        startTicker()
+        // 模型正在流回来的「思考 / 正文」实时打进面板。
+        // 不接这个回调的话，思考版模型长时间推理时用户只能以为它卡死了。
+        AiClient.onProgress = { kind, text ->
+            val s = runSeq
+            main.post { if (s == runSeq) paintProgress(kind, text) }
+        }
+        scrollChatToBottom()
+    }
+
+    /**
+     * 建一张「已工作」卡挂到对话末尾，并把所有字段指向它的内部视图。
+     *
+     * 单独拆出来，是因为 renderHistory() 会把整个对话容器**整体换掉**
+     * （先拼好新的再换上去，为了不闪）。换完之后，正在跑的这一轮手里那些引用
+     * （toolWrap / runHead / runBody）指的还是**旧容器** —— 已经脱离视图树了：
+     * 之后每一条工具行都会塞进一个看不见的地方，用户看到的就是
+     * 「工作过程突然不见了」，而且等多久都不会回来。
+     * 所以 renderHistory 收尾时，如果这一轮还在跑，必须重新挂一张接住后面。
+     */
+    private fun attachWorkCard() {
         // ===== 组头 =====
         val icon = ImageView(this).apply {
             setImageDrawable(LineIcon("layers", tintA(pal.accent, 0.75f), dp(13).toFloat()))
@@ -2459,25 +2501,11 @@ class MainActivity : AppCompatActivity(), GameUi {
         // 「工具开始 / 工具结束」时动一两行，频率从每秒几十次降到每轮几次。
         bodyExpanded = true
         userCollapsedThinking = false
-        latestActivity = ""
+        // 组头文案的节流状态必须清掉：它记着**上一张卡**写过什么，
+        // 不清的话新卡上的 setTextIf 会以为「没变」，一个字都不写。
         lastWorkStat = ""
-        lastTail = ""
-        thinkLog = ""
-        toolTotal = 0
-        toolVerbCount.clear()
-        pendingStatus = null
-        pendingSummary = null
-        pendingRow = null
+        updateWorkStat("")
 
-        // 新一轮开始：用户没主动上滑的话，内容默认贴着底部往下长
-        if (!userPinned) stickBottom = true
-        runStartAt = SystemClock.elapsedRealtime()
-        updateWorkStat("启动中")
-        runBar?.visibleIf(true)
-        setTextIf(runBar, "运行中 · 启动中")
-        setTextIf(statusRun, "运行中")
-        askNotiPermission()
-        startGuard()
         head.setOnClickListener {
             bodyExpanded = !bodyExpanded
             body.visibleIf(bodyExpanded)
@@ -2490,14 +2518,6 @@ class MainActivity : AppCompatActivity(), GameUi {
                 scrollChatToBottom()
             }
         }
-        startTicker()
-        // 模型正在流回来的「思考 / 正文」实时打进面板。
-        // 不接这个回调的话，思考版模型长时间推理时用户只能以为它卡死了。
-        AiClient.onProgress = { kind, text ->
-            val s = runSeq
-            main.post { if (s == runSeq) paintProgress(kind, text) }
-        }
-        scrollChatToBottom()
     }
 
     /**
@@ -2937,6 +2957,14 @@ class MainActivity : AppCompatActivity(), GameUi {
         chatScroll.removeAllViews()
         chatScroll.addView(fresh)
         old.removeAllViews()
+        // ⚠️ 关键：这一轮如果还在跑，必须重新挂一张「已工作」卡。
+        // 上面是把整个对话容器**换掉**的，跑着的那一轮手里那些引用
+        // （toolWrap / runHead / runBody）还指着**刚被丢弃的旧容器** —— 已经脱离视图树了。
+        // 不重挂的话，之后每一条工具行都会塞进一个看不见的地方，屏幕上就是
+        // 「工作过程突然不见了」，而且再也不会回来（用户报的正是这个）。
+        // 已经跑完的那几轮，上面的循环已经补成「已工作 · N 次」摘要行了；
+        // 这里只接住**接下来**的部分 —— 计时和统计都不碰，不能让时钟归零。
+        if (running) attachWorkCard()
         stickBottom = true
         scrollChatToBottom(true)
     }
