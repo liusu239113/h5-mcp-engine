@@ -2817,6 +2817,34 @@ class MainActivity : AppCompatActivity(), GameUi {
             .filter { it.isDirectory && !it.name.startsWith("_") }
             .sortedBy { it.name.lowercase() }
 
+    /**
+     * 删除项目。
+     *
+     * 明面的「删除」按钮和长按都进这里：原来的入口只有长按，
+     * 用户反馈「怎么没有删除项目」——藏起来的入口等于没有。
+     */
+    private fun askDeleteProject(p: File) {
+        if (p.name == currentGame) {
+            toast("这是当前项目，先切到别的项目再删")
+            return
+        }
+        AlertDialog.Builder(themed())
+            .setTitle("删除项目「${p.name}」？")
+            .setMessage(
+                p.absolutePath + "\n\n" +
+                    "整个目录会删掉：代码 / 素材 / 技能 / 存档都没了，不可恢复。"
+            )
+            .setPositiveButton("删除") { _, _ ->
+                val ok = runCatching { p.deleteRecursively() }.getOrDefault(false)
+                toast(if (ok) "已删除「${p.name}」" else "删除失败（可能被占用）")
+                projectDlg?.dismiss()
+                refreshHeader()
+            }
+            .setNegativeButton("取消", null)
+            .show()
+    }
+
+
     private fun showProjects() {
         val col = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -2855,13 +2883,13 @@ class MainActivity : AppCompatActivity(), GameUi {
             })
         }
         col.addView(TextView(this).apply {
-            text = "长按某个项目可删除（当前项目要先切到别的项目）"
+            text = "每个项目右侧有「删除」（当前项目要先切到别的项目）"
             textSize = 11f
             setTextColor(pal.faint)
             setPadding(dp(4), 0, dp(4), dp(6))
         })
         for (p in projects) {
-            val kindTag = if (projKind(p.name) == "maker") " · Maker" else ""
+            val kindTag = " · " + kindLabel(p.name)
             val row = listRowOf(
                 this, pal,
                 p.name + kindTag + if (p.name == currentGame) " · 当前" else "",
@@ -2873,35 +2901,17 @@ class MainActivity : AppCompatActivity(), GameUi {
             }
             // 长按项目 = 删除该项目。用户反馈：项目列表里根本没有删除入口，
             // 建过的项目只能一直堆着。删当前项目先拦住（避免把正在跑的东西抽掉）。
-            row.setOnLongClickListener {
-                if (p.name == currentGame) {
-                    android.widget.Toast.makeText(
-                        this, "这是当前项目，先切到别的项目再删",
-                        android.widget.Toast.LENGTH_SHORT
-                    ).show()
-                } else {
-                    AlertDialog.Builder(themed())
-                        .setTitle("删除项目「${p.name}」？")
-                        .setMessage(
-                            p.absolutePath + "\n\n" +
-                                "整个目录会删掉：代码 / 素材 / 技能 / 存档都没了，不可恢复。"
-                        )
-                        .setPositiveButton("删除") { _, _ ->
-                            val ok = runCatching { p.deleteRecursively() }.getOrDefault(false)
-                            android.widget.Toast.makeText(
-                                this,
-                                if (ok) "已删除「${p.name}」" else "删除失败（可能被占用）",
-                                android.widget.Toast.LENGTH_SHORT
-                            ).show()
-                            projectDlg?.dismiss()
-                            refreshHeader()
-                        }
-                        .setNegativeButton("取消", null)
-                        .show()
-                }
-                true
+            row.setOnLongClickListener { askDeleteProject(p); true }
+            // 明面上的删除入口：长按也能删，但不该是唯一入口（用户反馈「怎么没有删除项目」）
+            val line = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
             }
-            col.addView(row, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(8) })
+            line.addView(row, LinearLayout.LayoutParams(0, -2, 1f))
+            line.addView(chipOf(this, pal, "删除", false).apply {
+                setOnClickListener { askDeleteProject(p) }
+            }, LinearLayout.LayoutParams(-2, -2).apply { leftMargin = dp(6) })
+            col.addView(line, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(8) })
         }
 
         val dlg = AlertDialog.Builder(themed())
