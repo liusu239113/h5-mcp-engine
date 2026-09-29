@@ -16,7 +16,7 @@ interface ShellBackend {
 
     val id: String
 
-    data class Result(val code: Int, val out: String, val err: String) {
+    data class Res(val code: Int, val out: String, val err: String) {
         val ok: Boolean get() = code == 0
         fun text(): String {
             val sb = StringBuilder(out.trimEnd())
@@ -30,14 +30,14 @@ interface ShellBackend {
         cwd: File? = null,
         env: Map<String, String> = emptyMap(),
         timeoutMs: Long = 60_000
-    ): Result
+    ): Res
 }
 
 /** 应用进程内直接 exec。native 可执行文件走私有 lib 目录（已解决 SELinux 禁 execve 私有目录）。 */
 class DirectShellBackend : ShellBackend {
     override val id = "direct"
 
-    override fun run(cmd: List<String>, cwd: File?, env: Map<String, String>, timeoutMs: Long): Result {
+    override fun run(cmd: List<String>, cwd: File?, env: Map<String, String>, timeoutMs: Long): Res {
         val pb = ProcessBuilder(cmd)
         if (cwd != null) pb.directory(cwd)
         pb.environment().putAll(env)
@@ -53,10 +53,10 @@ class DirectShellBackend : ShellBackend {
         val done = p.waitFor(timeoutMs, TimeUnit.MILLISECONDS)
         if (!done) {
             p.destroyForcibly()
-            return Result(-1, out.toString(), err.toString() + "\n[超时 ${timeoutMs}ms，已强杀]")
+            return Res(-1, out.toString(), err.toString() + "\n[超时 ${timeoutMs}ms，已强杀]")
         }
         t1.join(500); t2.join(500)
-        return Result(p.exitValue(), out.toString(), err.toString())
+        return Res(p.exitValue(), out.toString(), err.toString())
     }
 }
 
@@ -64,7 +64,7 @@ class DirectShellBackend : ShellBackend {
 class SuShellBackend(private val suPath: String = "su") : ShellBackend {
     override val id = "su"
 
-    override fun run(cmd: List<String>, cwd: File?, env: Map<String, String>, timeoutMs: Long): Result {
+    override fun run(cmd: List<String>, cwd: File?, env: Map<String, String>, timeoutMs: Long): Res {
         val line = (if (cwd != null) "cd ${cwd.absolutePath} && " else "") + cmd.joinToString(" ")
         return DirectShellBackend().run(listOf(suPath, "-c", line), null, env, timeoutMs)
     }
@@ -80,5 +80,5 @@ object Shell {
         cwd: File? = null,
         env: Map<String, String> = emptyMap(),
         timeoutMs: Long = 60_000
-    ): ShellBackend.Result = backend.run(cmd, cwd, env, timeoutMs)
+    ): ShellBackend.Res = backend.run(cmd, cwd, env, timeoutMs)
 }

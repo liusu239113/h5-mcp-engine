@@ -5,7 +5,7 @@ import fi.iki.elonen.NanoHTTPD
 
 /**
  * 本地服务管理器（D2）：持有单例 LocalServer，供工具启停。
- * 服务监听 0.0.0.0:8787，局域网内可访问 —— 只有知道 token 的人能调用 /api/*。
+ * 服务监听 0.0.0.0:8787，局域网内可访问 —— 只有知道 token 的人能调用 /api/。
  */
 object LocalServerHost {
 
