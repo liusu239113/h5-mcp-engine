@@ -17,7 +17,7 @@ android {
 
     defaultConfig {
         applicationId = "com.mcp.h5engine"
-        minSdk = 24
+        minSdk = 26
         targetSdk = 34
         versionCode = 22
         versionName = "1.21"
