@@ -227,6 +227,43 @@ private class GameMuteInjectHandler(
     }
 }
 
+/**
+ * 从页面内部抓一张 canvas 截图（给「AI 看一眼画面」用），返回 dataURL 或空串。
+ *
+ * 为什么走这条路：WebView 是硬件加速渲染的，画面在 Chromium 自己的图层里，
+ * `web.draw(canvas)` 只能拿到空白；而 PixelCopy 要求页面在窗口上可见 ——
+ * 那就要翻页，会动用户正在看的屏幕（用户明确不许）。从页面里抓跟窗口无关，两难都绕开了。
+ *
+ * 两个要点：
+ *   1) 先同步抓一次 —— 2D canvas 任何时候都能拿到。
+ *   2) 拿不到就排两个 rAF，在**游戏自己画完之后的同一帧里**再抓：
+ *      WebGL 的绘制缓冲合成完就被清掉，晚一帧就是全黑。这是唯一能抓到 WebGL 画面的时机。
+ *      抓完把 armed 复位，方便下一次再抓（不复位的话第二次就永远抓不到了）。
+ */
+private val CANVAS_SHOT_JS = """
+(function(){
+  window.__hexShot='';
+  function pick(){
+    var cs=document.querySelectorAll('canvas'),best=null,area=0;
+    for(var i=0;i<cs.length;i++){var c=cs[i],a=(c.width|0)*(c.height|0);if(a>area){area=a;best=c;}}
+    return best;
+  }
+  function grab(){
+    var c=pick(); if(!c||!c.width||!c.height) return '';
+    try{var d=c.toDataURL('image/jpeg',0.75);return (d&&d.indexOf('data:image')===0)?d:'';}catch(e){return '';}
+  }
+  var now=grab();
+  if(now) return now;
+  if(!window.__hexShotArmed){
+    window.__hexShotArmed=1;
+    requestAnimationFrame(function(){requestAnimationFrame(function(){
+      window.__hexShot=grab();window.__hexShotArmed=0;
+    });});
+  }
+  return '';
+})()
+""".trimIndent()
+
 class MainActivity : AppCompatActivity(), GameUi {
 
     // ---------- 视图 ----------
@@ -1843,13 +1880,26 @@ class MainActivity : AppCompatActivity(), GameUi {
             ellipsize = android.text.TextUtils.TruncateAt.END
         }, LinearLayout.LayoutParams(0, -2, 1f))
         // 点一下看全文（复用工具详情的弹窗，能选中、能复制）
-        row.setOnClickListener { showTextDetail("过程自述", full, true) }
+        // withStatus = false：过程自述不是「执行」出来的东西，
+        // 拼上「执行成功」会变成「过程自述执行成功」这种读不通的话
+        row.setOnClickListener { showTextDetail("过程自述", full, withStatus = false) }
         rows.addView(row, LinearLayout.LayoutParams(-1, -2))
         scrollChatToBottom()
     }
 
-    /** 工具全文详情弹窗：可滚动 + 可选中 + 一键复制 */
-    private fun showTextDetail(title: String, content: String, ok: Boolean = true) {
+    /**
+     * 全文详情弹窗：可滚动 + 可选中 + 一键复制。
+     *
+     * @param withStatus true = 标题后面拼「执行成功 / 执行失败」，并在前面带 ✓/✕。
+     *   工具结果要它；**过程自述那类不是「执行」出来的内容不要** ——
+     *   否则标题会变成「过程自述执行成功」这种读不通的话（用户看到的正是这个）。
+     */
+    private fun showTextDetail(
+        title: String,
+        content: String,
+        ok: Boolean = true,
+        withStatus: Boolean = true
+    ) {
         val t = if (title.isBlank()) "工具" else title
         // 1:1 对齐 Operit ToolResultDetailDialog：标题行(状态图标+名称+复制) / 分隔线 / 圆角可滚内容区
         val root = LinearLayout(this).apply {
@@ -1860,14 +1910,27 @@ class MainActivity : AppCompatActivity(), GameUi {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
         }
+        // 状态图标只在「工具结果」这种真被执行过的东西上出现
+        if (withStatus) {
+            head.addView(TextView(this).apply {
+                setText(if (ok) "✓" else "✕")
+                textSize = 16f
+                setTextColor(if (ok) TOOL_OK else TOOL_FAIL)
+                typeface = Typeface.DEFAULT_BOLD
+            }, LinearLayout.LayoutParams(-2, -2).apply { rightMargin = dp(10) })
+        } else {
+            // 过程自述用一个中性标记，别让它看着像「某个工具的结果」
+            head.addView(TextView(this).apply {
+                setText("✎")
+                textSize = 15f
+                setTextColor(pal.accent)
+            }, LinearLayout.LayoutParams(-2, -2).apply { rightMargin = dp(10) })
+        }
         head.addView(TextView(this).apply {
-            setText(if (ok) "✓" else "✕")
-            textSize = 16f
-            setTextColor(if (ok) TOOL_OK else TOOL_FAIL)
-            typeface = Typeface.DEFAULT_BOLD
-        }, LinearLayout.LayoutParams(-2, -2).apply { rightMargin = dp(10) })
-        head.addView(TextView(this).apply {
-            setText(t + if (ok) "执行成功" else "执行失败")
+            setText(
+                if (!withStatus) t
+                else t + if (ok) "执行成功" else "执行失败"
+            )
             textSize = 15f
             setTextColor(pal.text)
             typeface = Typeface.DEFAULT_BOLD
@@ -1890,7 +1953,9 @@ class MainActivity : AppCompatActivity(), GameUi {
             background = roundCard(this@MainActivity, pal.cardAlt, pal.cardAlt, 8, 0)
             addView(tv)
         }
-        root.addView(sv, LinearLayout.LayoutParams(-1, dp(300)))
+        // 内容短就贴着内容收起来。以前固定 300dp，短内容底下留一大片空白，
+        // 看着像「没加载出来」（用户截的图就是这样）。
+        root.addView(sv, LinearLayout.LayoutParams(-1, if (content.length > 700) dp(320) else -2))
         AlertDialog.Builder(themed())
             .setView(root)
             .setPositiveButton("关闭", null)
@@ -6724,6 +6789,11 @@ makerRow1.addView(ghostBtnOf(ctx, pal, "扫码登录").apply {
     override fun snapshotGameOffscreen(maxWidth: Int): ByteArray? {
         if (!::web.isInitialized) return null
         if (Looper.myLooper() == Looper.getMainLooper()) return null
+        // ① 先从**页面内部**截（见 shootFromPage）：不碰窗口、不改可见性、不打断用户。
+        //    这是唯一既拿得到真画面、又不动用户屏幕的路子。
+        shootFromPage()?.let { if (it.size > 1024) return scaleJpeg(it, maxWidth) }
+        // ② 退一步试 web.draw —— 便宜，但硬件加速的 WebView 基本抓不到（拿不到就算了，
+        //    绝不为了截图去翻页：用户明确不许动他正在看的屏幕）
         val dm = resources.displayMetrics
         val w = dm.widthPixels.coerceAtLeast(1)
         val h = dm.heightPixels.coerceAtLeast(1)
@@ -6755,6 +6825,9 @@ makerRow1.addView(ghostBtnOf(ctx, pal, "扫码登录").apply {
             latch.countDown()
         }
         runCatching { latch.await(3, java.util.concurrent.TimeUnit.SECONDS) }
+        // 直接抓 WebView 失败（**多数机型都会失败**：硬件加速的 WebView 内容在 Chromium
+        // 自己的图层里，不在 View 的 Canvas 上）。拿不到就如实返回 null，
+        // **不翻页、不切可见性** —— 用户明确不许动他正在看的屏幕。
         val b = shot ?: return null
         if (looksBlank(b)) {
             b.recycle()
@@ -6771,6 +6844,57 @@ makerRow1.addView(ghostBtnOf(ctx, pal, "扫码登录").apply {
             b.recycle()
             baos.toByteArray()
         }.getOrNull()
+    }
+
+    /**
+     * 让 AI 看一眼游戏画面 —— **全程不碰用户的屏幕**（不切页、不改可见性、不打断）。
+     *
+     * 为什么不能用 `web.draw()`：WebView 是**硬件加速**渲染的，画面在 Chromium 自己的
+     * 图层里，根本不在 View 的 Canvas 上 —— 那条路只会拿到一张空白。
+     * 为什么不能翻到预览页再 PixelCopy：那会动用户正在看的屏幕（用户明确不许）。
+     * 剩下唯一可行的路就是**让页面自己把 canvas 吐出来**：它跟窗口无关，切不切页都成立。
+     *
+     * 代价：只有 canvas 类游戏抓得到（2D / WebGL 都行）。纯 DOM 排版的页面没有 canvas，
+     * 这时如实返回 null，由工具那边告诉模型「改用逻辑验证」。
+     */
+    private fun shootFromPage(): ByteArray? {
+        val direct = jsString(runJsSync(CANVAS_SHOT_JS, 1500))
+        val url = if (!direct.isNullOrBlank()) {
+            direct
+        } else {
+            // WebGL 的绘制缓冲在合成后就被清掉，同步取多半是空 ——
+            // 上面那段 JS 已经在**游戏画完的同一帧**里补抓了一次，等它一下再来取。
+            runCatching { Thread.sleep(220) }
+            jsString(runJsSync("window.__hexShot||''", 1500))
+        }
+        val b64 = url?.substringAfter("base64,", "")?.trim().orEmpty()
+        if (b64.isEmpty()) return null
+        return runCatching { android.util.Base64.decode(b64, android.util.Base64.DEFAULT) }.getOrNull()
+    }
+
+    /** evaluateJavascript 回传的是 JSON 表示（字符串会带引号），这里解回真正的字符串 */
+    private fun jsString(raw: String?): String? {
+        if (raw.isNullOrBlank() || raw == "null") return null
+        return runCatching { org.json.JSONTokener(raw).nextValue() as? String }.getOrNull()
+    }
+
+    /** 把已有 JPEG 缩到 maxWidth 以内（本来就够小就原样返回），省 token 也省上传 */
+    private fun scaleJpeg(raw: ByteArray, maxWidth: Int): ByteArray {
+        val bmp = runCatching { BitmapFactory.decodeByteArray(raw, 0, raw.size) }.getOrNull()
+            ?: return raw
+        if (bmp.width <= maxWidth) {
+            bmp.recycle()
+            return raw
+        }
+        return runCatching {
+            val w = maxWidth.coerceAtLeast(160)
+            val h = (bmp.height.toFloat() * w / bmp.width).toInt().coerceAtLeast(1)
+            val s = Bitmap.createScaledBitmap(bmp, w, h, true)
+            val out = java.io.ByteArrayOutputStream()
+            s.compress(Bitmap.CompressFormat.JPEG, 78, out)
+            if (s !== bmp) s.recycle()
+            out.toByteArray()
+        }.getOrDefault(raw).also { bmp.recycle() }
     }
 
     override fun snapshotCss(maxWidth: Int, quality: Int): ByteArray? {

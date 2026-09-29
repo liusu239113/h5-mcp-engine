@@ -1108,14 +1108,18 @@ class EngineTools(private val ui: GameUi, private val root: File) {
             val img = ui.snapshotGameOffscreen(a.optInt("maxWidth", 720))
             if (img == null || img.size < 128) {
                 ToolResult(
-                    "离屏抓游戏画面没拿到图（${img?.size ?: 0} 字节）。这条路不切页、不动用户屏幕，" +
-                        "失败通常是：游戏页还没打开过、该机型不允许离屏画 WebView、或者抓到的是一张纯色图。\n" +
-                        "→ 先用 js_eval / console_logs / engine_status 验证逻辑；" +
-                        "要眼见为实，可以请用户手动切到「预览」页后再调用 screenshot。"
+                    "没抓到画面（${img?.size ?: 0} 字节）。抓图走的是「**从页面内部取 canvas**」，" +
+                        "不切页、不改可见性、不动用户屏幕，所以抓不到只会是这两种情况：\n" +
+                        "  · 页面里根本没有 canvas（纯 DOM 排版的界面）—— 这种就是抓不到，别重试；\n" +
+                        "  · 游戏刚打开/刚热重载，canvas 还没画第一帧 —— 稍等一下再抓一次就行。\n" +
+                        "→ **不要请用户切到预览页**（用户明确不许动他正在看的屏幕）。" +
+                        "改用 js_eval / console_logs / engine_status 做逻辑验证：" +
+                        "把关键状态（当前屏幕名、关键变量、元素是否存在）读出来自检，一样能定位问题。"
                 )
             } else {
                 ToolResult(
-                    "已离屏抓到游戏画面（${img.size / 1024} KB）—— 用户屏幕没有被切换、没有被动过。\n" +
+                    "已抓到画面（${img.size / 1024} KB）—— 从页面内部取的 canvas，" +
+                        "用户屏幕没有被切换、没有被动过。\n" +
                         "看图确认：有没有白屏、布局是否完整、有没有被系统栏压住、素材有没有加载出来。",
                     listOf(img)
                 )

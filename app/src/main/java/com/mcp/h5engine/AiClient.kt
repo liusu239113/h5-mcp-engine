@@ -342,7 +342,13 @@ class AiClient(private val cfg: ProviderConfig) {
         val streamKey = cfg.provider.id + "|" + cfg.baseUrl
         val wantStream = cfg.provider.protocol == Protocol.OPENAI &&
             !body.has("stream") && !streamKnownOff(streamKey)
-        if (wantStream) body.put("stream", true)
+        if (wantStream) {
+            body.put("stream", true)
+            // OpenAI 规定：**流式响应默认不带 usage**。不显式要，TokenStats 就永远是 0 ——
+            // 用户看到的「token 统计是个假功能」根子在这儿。
+            // 部分中转/老网关不认这个字段，下面遇到相关报错会去掉它重试一次。
+            runCatching { body.put("stream_options", JSONObject().put("include_usage", true)) }
+        }
         // 注意这里**不再写** Connection: close —— 那句会让每条请求用完就断，
         // 共享连接池等于白建，每一步都要重新握手。
         val rb = Request.Builder().url(endpoint)
@@ -377,6 +383,16 @@ class AiClient(private val cfg: ProviderConfig) {
                 val text = if (r.isSuccessful) readWithProgress(r.body)
                 else (r.body?.string() ?: "")
                 if (!r.isSuccessful) {
+                    // 有些中转/老网关不认 stream_options（我们为了拿 token 统计加的）：
+                    // 去掉它重试一次。宁可这次没有统计，也不能因为这个可选字段把请求整个搞挂。
+                    val low = text.lowercase()
+                    if (body.has("stream_options") &&
+                        (low.contains("stream_options") || low.contains("include_usage") ||
+                            low.contains("unknown") || low.contains("unsupported"))
+                    ) {
+                        body.remove("stream_options")
+                        return once(body, direct, note)
+                    }
                     // 把「这条请求到底发给了谁、带了多大东西」一并带出来。
                     // 以前只显示服务商原文，用户和 AI 都无从判断是 Key / Base URL / 请求体量哪一环的问题
                     // （比如「明明有钱却报余额不足」，很可能根本是另一把 Key 或另一条 URL）。
@@ -563,6 +579,9 @@ class AiClient(private val cfg: ProviderConfig) {
             val tools = LinkedHashMap<Int, JSONObject>()
             var sawData = false
             var usable = false
+            // 流式响应里 usage 只出现在**最后一个 chunk**，而那个 chunk 的 choices 是空数组 ——
+            // 必须在下面 `?: continue` 之前接住，否则永远读不到（token 统计一直是 0 的原因之一）
+            var usage: JSONObject? = null
             while (true) {
                 val line = runCatching { src.readUtf8Line() }.getOrNull() ?: break
                 if (line.isEmpty() || !line.startsWith("data:")) continue
@@ -572,6 +591,9 @@ class AiClient(private val cfg: ProviderConfig) {
                 }
                 val j = runCatching { JSONObject(payload) }.getOrNull() ?: continue
                 sawData = true
+                // 收 usage：它所在的那个 chunk 没有 choices，下面那句就会 continue 掉，
+                // 所以必须先在这里接住
+                j.optJSONObject("usage")?.let { u -> if (u.length() > 0) usage = u }
                 val d = j.optJSONArray("choices")?.optJSONObject(0)?.optJSONObject("delta") ?: continue
                 val t0 = strOf(d, "reasoning_content").ifBlank { strOf(d, "reasoning") }
                     .ifBlank { strOf(d, "thinking") }
@@ -624,12 +646,16 @@ class AiClient(private val cfg: ProviderConfig) {
                 "hexoraAi",
                 "sse ok text=" + text.length + " think=" + think.length + " tools=" + tools.size
             )
-            return JSONObject().put(
+            val out = JSONObject().put(
                 "choices",
                 JSONArray().put(
                     JSONObject().put("index", 0).put("message", msg).put("finish_reason", "stop")
                 )
-            ).toString()
+            )
+            // 把流里收到的 usage 原样带给 parseOpenAi —— 不带的话 TokenStats 永远记 0，
+            // 用户看到的「token 统计是个假功能」就是这儿断的
+            usage?.let { out.put("usage", it) }
+            return out.toString()
         }
 
         private fun emitProgress(full: String) {
