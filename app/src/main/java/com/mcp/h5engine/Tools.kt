@@ -287,11 +287,13 @@ class EngineTools(private val ui: GameUi, private val root: File) {
             fn("lib_usage", "同 game_libs：查看内置框架清单与引用方式", "{}", emptyList()),
 
             fn("maker_auth",
-                "【云素材必须先授权】管理 TapTap Maker 授权（生图 / 音乐 / 音效 / 配音 / 3D / 视频都要它）。" +
-                    "action=status 先查状态；没授权就用 action=start —— 它会**立刻返回一个授权链接**，" +
+                "【云素材必须先授权 / 支持换号】管理 TapTap Maker 授权（生图 / 音乐 / 音效 / 配音 / 3D / 视频都要它）。" +
+                    "action=status 查状态；没授权用 action=start —— 它**立刻返回一个授权链接**，" +
                     "你把链接单独一行、原样贴进回复，让用户点开、登录、点「创建 token」。" +
+                    "换号 / 换账号用 action=switch（先清旧凭证再出新链接）；" +
+                    "退出登录用 action=logout；用户已经自己在官网建好 token 时用 action=token 并把 token 传进来。" +
                     "不要让用户自己去设置页找入口（App 会在对话里把链接递给他）。",
-                """{"action":{"type":"string","description":"status=查状态；start=开始授权并拿到链接"}}""",
+                """{"action":{"type":"string","description":"status=查状态；start/login=开始授权并拿链接；logout=退出授权；switch=换号（清旧+出新链接）；token=直接写入 token"},"token":{"type":"string","description":"可选。action=token 时要写入的 token 原文"}}""",
                 listOf("action")),
 
             fn("ad_guide",
@@ -619,9 +621,10 @@ class EngineTools(private val ui: GameUi, private val root: File) {
             if (c == null) {
                 ToolResult("App 上下文不可用，重启一次 App 再试")
             } else when (a.optString("action", "status").lowercase()) {
-                "start" -> {
-                    if (MakerCli.hasPat(c)) {
-                        ToolResult("Maker 已经授权过了（pat.json 在），可以直接生成素材。状态：" + MakerAuth.statusText(c))
+                "start", "login" -> {
+                    if (MakerCli.hasPat(c) && a.optString("action").lowercase() != "login") {
+                        ToolResult("Maker 已经授权过了（pat.json 在），可以直接生成素材。状态：" + MakerAuth.statusText(c) +
+                            "\n要给另一个号授权 → 用 maker_auth action=switch。")
                     } else {
                         val u = MakerAuth.start(c)
                         if (u == null) {
@@ -639,9 +642,30 @@ class EngineTools(private val ui: GameUi, private val root: File) {
                         }
                     }
                 }
+                "logout" -> ToolResult(
+                    if (MakerAuth.logout(c)) "已退出 Maker 授权（pat.json 已删除）。要重新授权就用 maker_auth action=start。"
+                    else "退出时删 pat.json 失败，可能被占用，稍后再试一次。"
+                )
+                "switch" -> {
+                    val u = MakerAuth.switch(c)
+                    if (u == null) {
+                        ToolResult(
+                            "已清掉旧授权并开始换号流程，但 15 秒内还没拿到新链接。\n当前状态：" + MakerAuth.statusText(c) +
+                                "\n稍后再用 maker_auth action=status 看一次。"
+                        )
+                    } else {
+                        ToolResult(
+                            "已清掉旧授权、开始换号。请把下面这个链接**单独一行、原样**写进你的回复：\n" + u + "\n\n" +
+                                "并告诉用户：点开链接 → 登录**要换的那个** TapTap 号 → 点「创建 token」→ 回来告诉你一声。\n" +
+                                "（也可以让用户自己在 maker.taptap.cn/pat-tokens 建好 token，用 maker_auth action=token 粘回来。）"
+                        )
+                    }
+                }
+                "token" -> ToolResult(MakerAuth.setToken(c, a.optString("token")))
                 else -> ToolResult(
                     "Maker 授权状态：" + MakerAuth.statusText(c) +
-                        (MakerAuth.url?.let { "\n当前授权链接：" + it } ?: "")
+                        (MakerAuth.url?.let { "\n当前授权链接：" + it } ?: "") +
+                        "\n可用操作：status / start / logout / switch / token=..."
                 )
             }
         }

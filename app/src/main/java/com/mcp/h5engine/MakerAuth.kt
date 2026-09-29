@@ -116,6 +116,59 @@ object MakerAuth {
         return url
     }
 
+    // ==================== 换号 / 退出 / 直存 token ====================
+
+    /**
+     * 退出授权：掐断在跑的 login、删掉 pat.json、状态复位。
+     * 返回是否删干净（没文件也算干净）。
+     */
+    fun logout(ctx: Context): Boolean {
+        cancel()
+        val ok = runCatching {
+            val f = MakerCli.patFile(ctx)
+            if (f.exists()) f.delete() else true
+        }.getOrDefault(false)
+        url = null
+        lastError = ""
+        fire("idle", null)
+        return ok
+    }
+
+    /**
+     * 换号：先清掉旧凭证，再立刻开一轮全新授权，返回新链接。
+     *
+     * 用户场景：手上有多个 TapTap 号，要给不同号 / 不同 Maker 账号授权。
+     * 旧版只会「已授权就别再授权」，于是换不了号 —— 这里先 logout 再 start。
+     */
+    fun switch(ctx: Context, waitMs: Long = 15_000): String? {
+        logout(ctx)
+        return start(ctx, waitMs)
+    }
+
+    /**
+     * 直接写入 token（用户在 maker.taptap.cn 生成后把整串粘进来），不走浏览器回跳。
+     *
+     * 为什么需要：浏览器回跳那条路依赖内置浏览器 + 服务端轮询，遇到网络/版本问题很容易卡住；
+     * 让用户去官网手动建 token 再粘回来，是最稳的兜底。
+     */
+    fun setToken(ctx: Context, token: String): String {
+        val t = token.trim()
+        if (t.length <= 8 || !t.contains("token")) {
+            return "token 看起来不对（长度≤8 或缺少 token 字样）。请到 https://maker.taptap.cn/pat-tokens " +
+                "登录后「创建 token」，把完整一串复制过来。"
+        }
+        return runCatching {
+            val f = MakerCli.patFile(ctx)
+            f.parentFile?.mkdirs()
+            val esc = t.replace("\\", "\\\\").replace("\"", "\\\"")
+            f.writeText("{\"token\":\"$esc\"}")
+            url = null
+            lastError = ""
+            fire("idle", null)
+            "已写入 Maker 授权（pat.json）。现在可以直接生图 / 生音乐 / 生音效了，不用重启。"
+        }.getOrElse { "写入失败：${it.message}" }
+    }
+
     /** 给 AI / 设置页看的一句话状态 */
     fun statusText(ctx: Context): String = when {
         MakerCli.hasPat(ctx) -> "已授权（pat.json 已存在）"

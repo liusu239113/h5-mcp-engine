@@ -115,10 +115,16 @@ object McpRt {
         if (ready(ctx)) return null
         return try {
             val dir = rtDir(ctx)
+            // 重建运行时**绝不能连 home/ 一起删**：pat.json（Maker 授权）、koukoutu.json（抠图 Key）
+            // 都住在 <rt>/home 下，被 deleteRecursively 带走的话，已装设备每次升版本都要重新授权。
+            // 做法：删之前把 home 挪到 cache 备份，解包 + 写 stamp 之后再挪回来。
             val __home = File(dir, "home")
-val __bak = File(ctx.cacheDir, "rt_home_bak")
-if (__home.isDirectory) { __bak.deleteRecursively(); if (!__home.renameTo(__bak)) __home.copyRecursively(__bak, overwrite = true) }
-dir.deleteRecursively()
+            val __bak = File(ctx.cacheDir, "rt_home_bak")
+            if (__home.isDirectory) {
+                __bak.deleteRecursively()
+                if (!__home.renameTo(__bak)) __home.copyRecursively(__bak, overwrite = true)
+            }
+            dir.deleteRecursively()
             dir.mkdirs()
             val tar = File(dir, "rt.tar")
             log("首次运行：正在释放运行时（约 60MB，只做一次）…")
@@ -129,7 +135,10 @@ dir.deleteRecursively()
             extractTar(tar, dir)
             tar.delete()
             stampFile(ctx).writeText(STAMP)
-if (__bak.isDirectory) { __home.deleteRecursively(); if (!__bak.renameTo(__home)) __bak.copyRecursively(__home, overwrite = true) }
+            if (__bak.isDirectory) {
+                __home.deleteRecursively()
+                if (!__bak.renameTo(__home)) __bak.copyRecursively(__home, overwrite = true)
+            }
             File(dir, "node").setExecutable(true, false)
             ensureGitrt(ctx, dir)
             log("运行时就绪")

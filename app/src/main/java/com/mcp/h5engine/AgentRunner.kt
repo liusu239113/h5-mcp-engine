@@ -92,7 +92,11 @@ class AgentRunner(
   更不要把这些接口的 OAuth 授权链接当作「Maker 授权」发给用户 —— 用户会当成你在乱搞。
 - 只有当用户明确在做 H5 游戏上架 / 开放平台数据这类事时，才用 mcp_ 工具。
 - Maker 相关失败时，不要立刻推给用户点链接：先确认是不是该用 maker_list_apps 之类的本地工具，
-  以及 Maker 子进程是否在跑（工具会返回明确原因）。""".trimIndent()
+  以及 Maker 子进程是否在跑（工具会返回明确原因）。
+- 用户要「换号 / 换个 TapTap 账号授权 / 退出当前 Maker 登录」→ 用 maker_auth action=switch
+  （先清掉旧凭证、再出一个新授权链接）；只想退出用 action=logout；
+  用户自己已经在 maker.taptap.cn/pat-tokens 建好 token → 用 action=token 把它粘进来。
+  **不要**回答「换不了号」，也不要把用户支使去设置页。""".trimIndent()
             )
 
             // ===== 工程类型（H5 / Maker），两类处理方式完全不同 =====
