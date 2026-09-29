@@ -317,8 +317,18 @@ class AgentRunner(
                 // 把「动的是哪个文件」一起报给界面：对话里那行就能显示成「修改 main.js」，
                 // 而不是光秃秃一个 game_write —— 用户要看得见 AI 正在改哪份文件。
                 onEvent("TOOLRUN:[${tc.name}]" + toolTarget(tc.name, tc.argsJson))
-                val res = runCatching { tools.call(tc.name, tc.argsJson) }
-                    .getOrElse { t -> EngineTools.ToolResult("工具执行出错：${t.javaClass.simpleName}: ${t.message}") }
+                // 参数是半截 JSON（上一次流被掐断留下的）：**别拿去执行**。
+                // 直接执行的话工具会报「缺少参数」，模型很容易以为是它自己写错了、
+                // 转头去改代码；如实说「参数没接收完整，重调一次」它才会走对路。
+                val res = if (!isJsonObject(tc.argsJson)) {
+                    EngineTools.ToolResult(
+                        "这次调用的参数没有接收完整（上一次可能被中断了）。" +
+                            "请重新调用一次 ${tc.name}，并确保参数是完整的 JSON。"
+                    )
+                } else {
+                    runCatching { tools.call(tc.name, tc.argsJson) }
+                        .getOrElse { t -> EngineTools.ToolResult("工具执行出错：${t.javaClass.simpleName}: ${t.message}") }
+                }
                 val images = if (cfg.vision) res.images else emptyList()
                 var text = res.text
                 if (res.images.isNotEmpty() && !cfg.vision && visionFallback) {
@@ -426,6 +436,13 @@ class AgentRunner(
             "let me", "i'll ", "i will ", "let's ", "next i", "now i"
         )
         return actCues.any { s.contains(it) }
+    }
+
+    /** 这个字符串是不是一个合法的 JSON 对象串（用来挡住被掐断的半截参数） */
+    private fun isJsonObject(s: String): Boolean {
+        val t = s.trim()
+        if (!t.startsWith("{")) return false
+        return runCatching { org.json.JSONObject(t); true }.getOrDefault(false)
     }
 
     /**

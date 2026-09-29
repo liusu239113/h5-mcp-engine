@@ -92,6 +92,37 @@ class AiClient(private val cfg: ProviderConfig) {
      * 鉴权、模型名这种硬错误会立刻返回，不做无意义重试。
      */
     /**
+     * 修掉「被掐断的工具参数」。
+     *
+     * tool_calls 的 arguments 必须是**合法 JSON 字符串**，否则服务商直接 400：
+     *   「Assistant tool call ... arguments must be valid JSON.」（Agnes 实测报过这条）
+     *
+     * 什么时候会不合法：流式返回被中途掐断（点停止 / 切后台 / 网络断），
+     * 参数只拼到一半 —— `{"path":"js/sc` 这种残串会被原样存进历史。
+     * 而它**不是一次性故障**：只要这条消息还在历史窗口里，之后每一条请求都会被拒，
+     * 用户看到的就是「AI 老是中断，然后一直报错」。这比报一次错严重得多。
+     *
+     * 修法：参数不合法就换成 `{}` —— 保住 tool_calls 与 tool 的配对关系
+     * （比把整轮拆掉安全）。真执行时会拿到一个空参数调用，工具层如实报错、模型自己会重调。
+     */
+    private fun repairToolArgs(src: List<ChatMsg>): List<ChatMsg> {
+        if (src.none { it.toolCalls.isNotEmpty() }) return src
+        return src.map { m ->
+            if (m.toolCalls.isEmpty()) return@map m
+            m.copy(toolCalls = m.toolCalls.map { tc ->
+                if (isJsonObject(tc.argsJson)) tc else ToolCall(tc.id, tc.name, "{}")
+            })
+        }
+    }
+
+    /** arguments 得是个合法的 JSON **对象**串（`{}` 起步、能被 JSONObject 解析） */
+    private fun isJsonObject(s: String): Boolean {
+        val t = s.trim()
+        if (!t.startsWith("{")) return false
+        return runCatching { JSONObject(t); true }.getOrDefault(false)
+    }
+
+    /**
      * 历史清洗：保证 tool_calls / tool 消息严格成对。
      *
      * 触发场景：会话落盘时旧版本只存了 role+text，assistant 的 tool_calls 丢了，
@@ -146,7 +177,9 @@ class AiClient(private val cfg: ProviderConfig) {
         //   ① 按条数裁窗口 → ② 清洗 tool 配对（裁剪会把某个 assistant(tool_calls) 的响应截到
         //   窗口外，不洗的话服务商直接 400）→ ③ 长工具结果压占位 → ④ 旧截图清掉。
         // ③④ 只改消息**内容**、不动条数也不动配对关系，所以放最后，不会破坏 ② 的成果。
-        val history = trimImages(compactToolResults(sanitizeHistory(limitHistory(rawHistory))))
+        val history = trimImages(
+            compactToolResults(sanitizeHistory(repairToolArgs(limitHistory(rawHistory))))
+        )
         // 设置里可以直接关掉工具定义：50+ 个工具的 JSON 是 token 大头，
         // 免费档模型（Groq 8000 TPM 这类）关掉立刻就能用。
         val toolsUse = if (cfg.sendTools) tools else emptyList()
