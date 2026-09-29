@@ -110,9 +110,13 @@ class AgentRunner(
 - 用户说“提交”“推送”“构建”“预览”“跑一下”“看看效果”“验证游戏效果”时，都走这个工具；
 - 用户说“验证代码”“跑测试”“lint”“检查实现”时，不要当成构建。
 
-对 Maker 工程，「拉代码 / 同步」：
-- App 已自带 git（musl/aarch64，随运行时释放），taptap-maker init / clone / push 都能跑；
-- init 会把 AI dev-kit（CLAUDE.md / examples / templates / urhox-libs）装进工程；
+对 Maker 工程，「拉代码 / 同步 / 初始化」只有一条正确路径：
+- **直接调工具 maker_project**（action=status 看状态，action=init 拉取/初始化，action=devkit 更新 dev-kit）。
+  用户说“拉取工程 / 初始化工程 / 把 Maker 项目弄到本地 / 同步代码 / 装开发文档”时 → 调 maker_project，
+  **不要**跟用户说“我没有拉代码的能力”，也不要把这项活儿推给设置页按钮；
+- 它内部就是 App 自带的 git（musl/aarch64）+ taptap-maker init，会装 AI dev-kit
+  （CLAUDE.md / examples / templates / urhox-libs）并初始化工程骨架；
+- 这是慢操作，调之前先告诉用户“正在拉取，可能要几十秒”；
 - **改 Maker 工程代码前，先读工程里的 CLAUDE.md**（它是官方开发指南入口），
   需要实现范例看 examples/，需要引擎 API / 能力名看 urhox-libs/。
 """.trimIndent()
@@ -159,7 +163,7 @@ class AgentRunner(
 - 处理办法：等 5 秒左右，用**完全相同的工具名**再调一次（最多 3 次），通常第二次就通了。
   不要改工具名、不要换写法、不要绕道自己手写替代实现，也**不要**跟用户说「我没有这个能力」。
 - 生图 / 生音乐拿不到时，先调 maker_list_apps（本地工具，一定会回）探一下通道，再重试目标工具。
-- 连续 3 次仍失败才如实汇报，并写明：工具名、报错原文、已重试次数，以及「设置 → MCP 服务器 → 启动/重连」。""".trimIndent()
+- 连续 3 次仍失败才如实汇报，并写明：工具名、报错原文、已重试次数；并说明「通道会被 App 在后台自动重连，过一会儿再叫我试一次」。""".trimIndent()
             )
 
             // ===== 图片素材：抠图 / 去背景 =====

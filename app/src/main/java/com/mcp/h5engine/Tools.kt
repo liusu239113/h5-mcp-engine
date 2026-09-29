@@ -335,8 +335,13 @@ class EngineTools(private val ui: GameUi, private val root: File) {
         // MCP 工具（TapTap / Maker）转给对应服务器。
         // 只读类常驻；写 / 发布类要用户放行 —— 模型可能凭记忆猜工具名，猜中就等于绕过闸门，
         // 所以这里也要拦，并且把「为什么不能调」直说给它，免得它转头跟用户说「我没有这个能力」。
+        // 【本地优先】maker_project / maker_auth 这些是 App 自己实现的本地工具，
+        // 但它们同样以 maker_ 开头。早先的写法会把它们一并丢给 MCP hub，
+        // hub 清单里没有 → 回「未知的 MCP 工具：maker_project」，本地实现永远轮不到。
+        // 所以先判断是不是本地工具名；是本地就绝不外卖。
+        val isLocal = names().contains(name)
         mcp?.let { hub ->
-            if (hub.handles(name)) {
+            if (!isLocal && hub.handles(name)) {
                 if (mcpAllowed || !isWriteTool(name)) {
                     return ToolResult(hub.call(name, argsJson))
                 }
@@ -350,7 +355,7 @@ class EngineTools(private val ui: GameUi, private val root: File) {
             // 而是「服务刚起、工具还没注册完」。交给 McpHub：它会先自动重抓一次清单（抓到就直接执行），
             // 实在还没有才回一段带「必须重试」指引的话。
             // 以前这里直接掉到 exec，回「未知工具: xxx」，模型就乖乖放弃了。
-            if (name.startsWith("maker_") || name.startsWith("mcp_")) {
+            if (!isLocal && (name.startsWith("maker_") || name.startsWith("mcp_"))) {
                 return ToolResult(hub.call(name, argsJson))
             }
         }

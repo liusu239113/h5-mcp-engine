@@ -28,7 +28,7 @@ object McpRt {
      *   2 → 官方 MCP
      *   3 → 追加 @taptap/maker（本地制造开发）+ bridge.js（stdio→HTTP 桥）
      */
-    private const val STAMP = "3"
+    private const val STAMP = "4"
     const val PORT = 3000
     const val URL_BASE = "http://127.0.0.1:3000/"
 
@@ -147,8 +147,11 @@ object McpRt {
      */
     fun ensureGitrt(ctx: Context, dir: File): String? {
         val g = File(dir, "gitrt/git")
-        if (g.isFile) return null
+        // 老设备上可能已经解过一遍，但解包器没还原执行位（EACCES），
+        // 所以「存在」不等于「能用」：必须可执行才跳过，否则整目录重来。
+        if (g.isFile && g.canExecute()) return null
         return try {
+            File(dir, "gitrt").deleteRecursively()
             val tar = File(dir, "gitrt.tar")
             ctx.assets.open("gitrt.tar").use { ins ->
                 FileOutputStream(tar).use { ins.copyTo(it, 1 shl 16) }
@@ -459,6 +462,7 @@ object McpRt {
                 val rawName = str(header, 0, 100)
                 val sizeStr = str(header, 124, 12).trim()
                 val flag = header[156].toInt().toChar()
+                val fmode = str(header, 100, 8).trim().toIntOrNull(8) ?: 0
                 val prefix = str(header, 345, 155)
                 val linkName = str(header, 157, 100)
                 val size = sizeStr.toLongOrNull(8) ?: 0L
@@ -483,7 +487,7 @@ object McpRt {
                 }
                 val target = File(outDir, full)
                 when (flag) {
-                    '5' -> target.mkdirs()
+                    '5' -> { target.mkdirs(); target.setExecutable(true, false) }
                     '2' -> {
                         target.parentFile?.mkdirs()
                         if (!target.exists()) runCatching { Os.symlink(linkName, target.absolutePath) }
@@ -499,6 +503,12 @@ object McpRt {
                                 out.write(buf, 0, n)
                                 left -= n
                             }
+                        }
+                        // 还原权限位：tar 里的可执行位如果丢了，
+                        // git / git.bin 就会变成不可执行（spawnSync git EACCES）。
+                        if (fmode and 0b001_001_001 != 0) {
+                            target.setReadable(true, false)
+                            target.setExecutable(true, false)
                         }
                         if (pad > 0) raf.skipBytes(pad)
                     }

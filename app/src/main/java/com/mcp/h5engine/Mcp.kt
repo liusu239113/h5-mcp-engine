@@ -107,7 +107,7 @@ class McpClient(private val url: String) {
             JSONObject()
                 .put("protocolVersion", "2024-11-05")
                 .put("capabilities", JSONObject())
-                .put("clientInfo", JSONObject().put("name", "hexora").put("version", "1.9"))
+                .put("clientInfo", JSONObject().put("name", "hexora").put("version", "1.10"))
         )
         serverName = r?.optJSONObject("serverInfo")?.optString("name", "") ?: ""
         runCatching { rpc("notifications/initialized", JSONObject(), notify = true, timeoutMs = 10_000) }
@@ -334,8 +334,7 @@ class McpHub {
             return "未知的 MCP 工具：$name$why\n" +
                 "【重要】不要就此放弃，也不要跟用户说「我没有这个能力 / 工具不存在」。" +
                 "这是工具清单的注册时序问题，正确做法是：**等 5 秒左右，用完全相同的工具名再调用一次**" +
-                "（最多重试 3 次）。三次都失败，再告诉用户「Maker 工具通道还没注册好，" +
-                "可到 设置 → MCP 服务器 点『启动 / 重连』」。\n" +
+                "（最多重试 3 次）。三次都失败，就告诉用户「Maker 工具通道还在注册，请稍等片刻再让我试一次」。" +
                 "当前清单里可用的工具：${availableNames()}"
         }
         return try {
@@ -344,7 +343,7 @@ class McpHub {
             // 本地 node 被系统冻结/杀掉是常态：让守护逻辑把它拉回来，再重试一次
             val ok = runCatching { onEnsure?.invoke() == true }.getOrDefault(false)
             if (!ok) {
-                "[MCP 调用失败] ${t.message}（本地服务可能已退出，可到设置 → MCP 服务器点「启动 / 重连」）" +
+                "[MCP 调用失败] ${t.message}（本地服务可能已退出，App 正在后台自动重连，过几秒再试一次）" +
                     authOwnershipHint(t.message, name)
             } else {
                 runCatching { direct(name, argsJson) }
