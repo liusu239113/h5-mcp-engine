@@ -582,33 +582,21 @@ class EngineTools(private val ui: GameUi, private val root: File) {
                             val r = MakerCli.run(c, cmd, null, 300_000, proj)
                             ToolResult(
                                 (if (r.ok) "✅ " else "❌ ") + "taptap-maker " + cmd.joinToString(" ") +
-                                    "
-工程：" + proj.absolutePath + "
-
-" + r.output.takeLast(3000)
+                                    "\n工程：" + proj.absolutePath + "\n\n" + r.output.takeLast(3000)
                             )
                         }
                     }
                     else -> {
                         val sb = StringBuilder()
-                        sb.append("工程目录：").append(proj.absolutePath).append("
-")
-                        sb.append("自带 git：").append(if (gitBin.isFile) "已就绪" else "未释放（重启 App 后自动释放）").append("
-")
-                        sb.append(".project/project.json：").append(File(proj, ".project/project.json").isFile).append("
-")
-                        sb.append(".maker-mcp/：").append(File(proj, ".maker-mcp").isDirectory).append("
-")
-                        sb.append("urhox-libs/（dev-kit）：").append(File(proj, "urhox-libs").isDirectory).append("
-")
-                        sb.append("CLAUDE.md：").append(File(proj, "CLAUDE.md").isFile).append("
-")
-                        sb.append("scripts/：").append(File(proj, "scripts").isDirectory).append("
-")
-                        sb.append("index.html：").append(File(proj, "index.html").isFile).append("
-")
-                        sb.append("是 git 仓库：").append(File(proj, ".git").isDirectory).append("
-")
+                        sb.append("工程目录：").append(proj.absolutePath).append("\n")
+                        sb.append("自带 git：").append(if (gitBin.isFile) "已就绪" else "未释放").append("\n")
+                        sb.append(".project/project.json：").append(File(proj, ".project/project.json").isFile).append("\n")
+                        sb.append(".maker-mcp/：").append(File(proj, ".maker-mcp").isDirectory).append("\n")
+                        sb.append("urhox-libs（dev-kit）：").append(File(proj, "urhox-libs").isDirectory).append("\n")
+                        sb.append("CLAUDE.md：").append(File(proj, "CLAUDE.md").isFile).append("\n")
+                        sb.append("scripts/：").append(File(proj, "scripts").isDirectory).append("\n")
+                        sb.append("index.html：").append(File(proj, "index.html").isFile).append("\n")
+                        sb.append("是 git 仓库：").append(File(proj, ".git").isDirectory).append("\n")
                         ToolResult(sb.toString())
                     }
                 }
