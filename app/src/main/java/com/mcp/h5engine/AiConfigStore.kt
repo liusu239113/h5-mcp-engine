@@ -161,11 +161,21 @@ class AiConfigStore(ctx: Context) {
             sp.edit().putInt("max_out", v.coerceIn(0, 65536)).apply()
         }
 
-    /** 历史最多保留多少条消息（system 除外）。工具往返很占 token，默认 40 */
+    /**
+     * 历史最多保留多少条消息（system 除外）。
+     *
+     * 默认 400，不是 40。40 条 ≈ 十几轮工具往返 —— 而一轮任务动不动几十轮，
+     * 于是**开头那段（用户最初的需求、定过的方案）早就被截掉了**，
+     * AI 会表现得像「聊两句就断片、开始自言自语」（用户报的正是这个）。
+     *
+     * 之所以敢放开到 400：长工具结果已经会压成占位（keepToolResults），
+     * 真正占体积的那部分被砍掉了，多带几十条消息的成本已经很低。
+     * 老装机里存的 40 顺手迁移到 400（和 maxSteps 那处同样的处理）。
+     */
     var historyLimit: Int
-        get() = sp.getInt("hist_limit", 40)
+        get() = sp.getInt("hist_limit", 400).let { if (it == 40) 400 else it }
         set(v) {
-            sp.edit().putInt("hist_limit", v.coerceIn(4, 500)).apply()
+            sp.edit().putInt("hist_limit", v.coerceIn(4, 2000)).apply()
         }
 
     /** 是否把工具定义发给模型（50+ 个工具 JSON 是 token 大头） */

@@ -464,6 +464,17 @@ class MainActivity : AppCompatActivity(), GameUi {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
+        // 开 WebView 调试通道。**必须在任何 WebView 被 new 出来之前调用**，否则对已建好的不生效。
+        //
+        // 用途只有一个：让 AI 在用户停在「对话」页时也能看到游戏的真实画面
+        // （见 shootViaCdp）。这是唯一「不切页 + 不改页面 + 拿到完整画面」的路子 ——
+        // web.draw 拿不到硬件加速图层，PixelCopy 要求页面在屏幕上（那就是翻页，用户不许）。
+        //
+        // 代价（用户已知情并选择开启）：本机会多一个调试 socket
+        // （webview_devtools_remote_<pid>），同机其他 App 理论上能连上读取网页内容。
+        // 它只在 App 运行期间存在，App 一退出就没了。
+        runCatching { WebView.setWebContentsDebuggingEnabled(true) }
+
         gameRoot = pickProjectRoot().apply { mkdirs() }
         migrateProjectsIfNeeded()
         seedBundledGames()
@@ -6211,7 +6222,9 @@ makerRow1.addView(ghostBtnOf(ctx, pal, "扫码登录").apply {
             cfgStore.historyLimit.toString(), true
         )
         col.addView(TextView(ctx).apply {
-            text = "调小省 token，但 AI 会「忘事」—— 之前读过的文件、定过的方案可能就不记得了。"
+            text = "⚠ 别调太小：一轮任务动不动几十轮工具往返，条数不够会把**开头那段**" +
+                "（你最初的需求、定过的方案）挤出去，AI 就表现得像「聊两句就断片」。" +
+                "默认 400；除非模型上下文特别小，不建议低于 100。"
             textSize = 11.5f
             setTextColor(pal.faint)
             setPadding(dp(2), dp(4), dp(2), 0)
@@ -6814,11 +6827,14 @@ makerRow1.addView(ghostBtnOf(ctx, pal, "扫码登录").apply {
     override fun snapshotGameOffscreen(maxWidth: Int): ByteArray? {
         if (!::web.isInitialized) return null
         if (Looper.myLooper() == Looper.getMainLooper()) return null
-        // ① 先从**页面内部**截（见 shootFromPage）：不碰窗口、不改可见性、不打断用户。
-        //    这是唯一既拿得到真画面、又不动用户屏幕的路子。
+        // ① CDP：最完整（DOM + canvas + WebGL 全在），连「卡在加载页」都抓得到，
+        //    而且同样不碰用户的屏幕 —— 用户选的就是这条。
+        shootViaCdp()?.let { if (it.size > 1024) return scaleJpeg(it, maxWidth) }
+        // ② 退一步：直接从页面里取 canvas。更轻，但只有 canvas 类游戏有，
+        //    加载页 / 纯 DOM 排版那种拿不到。
         shootFromPage()?.let { if (it.size > 1024) return scaleJpeg(it, maxWidth) }
-        // ② 退一步试 web.draw —— 便宜，但硬件加速的 WebView 基本抓不到（拿不到就算了，
-        //    绝不为了截图去翻页：用户明确不许动他正在看的屏幕）
+        // ③ 最后的兜底 web.draw —— 硬件加速的 WebView 基本抓不到。
+        //    三条都失败就如实返回 null：**绝不为了截图去翻页**（用户明确不许动他的屏幕）。
         val dm = resources.displayMetrics
         val w = dm.widthPixels.coerceAtLeast(1)
         val h = dm.heightPixels.coerceAtLeast(1)
@@ -6869,6 +6885,113 @@ makerRow1.addView(ghostBtnOf(ctx, pal, "扫码登录").apply {
             b.recycle()
             baos.toByteArray()
         }.getOrNull()
+    }
+
+    /**
+     * 通过 Chrome DevTools 协议（CDP）抓一张游戏页面的**真实渲染**。
+     *
+     * 这是三条路里最完整的一条：DOM、canvas、WebGL 全都在图里，
+     * 连「还卡在加载页」那种也能抓到 —— 而它同样**不碰用户的屏幕**。
+     *
+     * 为什么另外两条都不行：
+     *   · `web.draw()`：WebView 是硬件加速的，画面在 Chromium 自己的图层里，不在 View 的 Canvas 上；
+     *   · PixelCopy：能拿到，但要求页面**在屏幕上可见**（那就是翻页，用户已明确否决）。
+     * CDP 的 Page.captureScreenshot 走的是**浏览器自己的合成器**，页面在不在屏幕上都能出图。
+     *
+     * 通道：开了调试开关之后，WebView 会在本机监听一个抽象 unix socket
+     * `webview_devtools_remote_<本进程 pid>`。报文格式：一条 JSON + 一个 '\0' 结束符。
+     * 抓图要走三步（这个端点先是**浏览器级**的，得先挂到具体的页面 target 上）：
+     * Target.getTargets → Target.attachToTarget(flatten) → Page.captureScreenshot。
+     */
+    private fun shootViaCdp(timeoutMs: Int = 3500): ByteArray? {
+        val name = "webview_devtools_remote_" + android.os.Process.myPid()
+        val s = android.net.LocalSocket()
+        return try {
+            s.connect(
+                android.net.LocalSocketAddress(name, android.net.LocalSocketAddress.Namespace.ABSTRACT),
+                timeoutMs
+            )
+            s.soTimeout = timeoutMs
+            val out = s.outputStream
+            val ins = s.inputStream
+
+            // ① 找一个页面 target
+            val targets = cdpCall(out, ins, 1, "Target.getTargets", null)
+            val list = targets?.optJSONObject("result")?.optJSONArray("targetInfo")
+            var pageId = ""
+            if (list != null) {
+                for (i in 0 until list.length()) {
+                    val t = list.optJSONObject(i) ?: continue
+                    if (t.optString("type") == "page") {
+                        pageId = t.optString("targetId")
+                        break
+                    }
+                }
+            }
+            if (pageId.isEmpty()) return null
+
+            // ② 挂到它上面（flatten = 后续指令带上 sessionId，走同一条连接）
+            val att = cdpCall(
+                out, ins, 2, "Target.attachToTarget",
+                JSONObject().put("targetId", pageId).put("flatten", true)
+            )
+            val sid = att?.optJSONObject("result")?.optString("sessionId", "").orEmpty()
+            if (sid.isEmpty()) return null
+
+            // ③ 抓图。fromSurface=false：不依赖「当前有没有合成面」，
+            //    页面不在屏幕上、甚至被 GONE 掉，也一样出图
+            val shot = cdpCall(
+                out, ins, 3, "Page.captureScreenshot",
+                JSONObject().put("format", "jpeg").put("quality", 75).put("fromSurface", false),
+                sid
+            )
+            val d = shot?.optJSONObject("result")?.optString("data", "").orEmpty()
+            if (d.isEmpty()) return null
+            android.util.Base64.decode(d, android.util.Base64.DEFAULT)
+        } catch (t: Throwable) {
+            null
+        } finally {
+            runCatching { s.close() }
+        }
+    }
+
+    /**
+     * 发一条 CDP 指令并等它的响应。
+     *
+     * 同一条连接上会夹着各种事件（还有别的 id 的响应），所以按 id 挑 ——
+     * 直接把第一条可解析的消息当答案，会拿错。
+     */
+    private fun cdpCall(
+        out: java.io.OutputStream,
+        ins: java.io.InputStream,
+        id: Int,
+        method: String,
+        params: JSONObject?,
+        sessionId: String? = null
+    ): JSONObject? {
+        val req = JSONObject().put("id", id).put("method", method)
+        params?.let { req.put("params", it) }
+        sessionId?.let { req.put("sessionId", it) }
+        out.write((req.toString() + "\u0000").toByteArray(Charsets.UTF_8))
+        out.flush()
+
+        val buf = StringBuilder()
+        val tmp = ByteArray(16 * 1024)
+        val deadline = System.currentTimeMillis() + 3500
+        while (System.currentTimeMillis() < deadline) {
+            var end = buf.indexOf("\u0000")
+            while (end >= 0) {
+                val msg = buf.substring(0, end)
+                buf.delete(0, end + 1)
+                val o = runCatching { JSONObject(msg) }.getOrNull()
+                if (o != null && o.optInt("id", -1) == id) return o
+                end = buf.indexOf("\u0000")
+            }
+            val n = runCatching { ins.read(tmp) }.getOrDefault(-1)
+            if (n <= 0) return null
+            buf.append(String(tmp, 0, n, Charsets.UTF_8))
+        }
+        return null
     }
 
     /**
