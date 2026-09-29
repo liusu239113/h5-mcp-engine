@@ -194,6 +194,17 @@ class EngineTools(private val ui: GameUi, private val root: File) {
          */
         @Volatile
         var ctxRef: Context? = null
+        /**
+         * Maker「构建过一次」钩子（MainActivity 注入）。
+         *
+         * 判型最忌讳看「目录里有什么文件」—— 占位 index.html 骗过一次、
+         * .maker-mcp 骗过一次，而它们都是 AI 自己写进去的。
+         * 唯一骗不了的信号是：**这个工程到底有没有真构建过 Maker**。
+         * 所以直接在「构建」这个动作上下手：maker_build_current_directory
+         * 成功返回一次，就把工程钉成 Maker。
+         */
+        @Volatile
+        var onMakerBuiltProject: (() -> Unit)? = null
     }
 
     // ==================== 工具声明 ====================

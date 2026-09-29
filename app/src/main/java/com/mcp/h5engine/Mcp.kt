@@ -373,6 +373,13 @@ class McpHub {
     private fun direct(name: String, argsJson: String): String {
         val e = index[name] ?: throw IllegalStateException("工具未注册：$name")
         val c = clients[e.server.url] ?: throw IllegalStateException("服务器未连接：${e.server.name}")
-        return c.callTool(e.tool.name, argsJson)
+        val out = c.callTool(e.tool.name, argsJson)
+        // 「构建过 Maker」是判型唯一骗不了人的事实：构建成功就把当前工程钉成 Maker
+        // （写 .hexora-kind，projKind() 优先读它）。按「去前缀后的真名」判，
+        // H5 开放平台那个同名工具不会被误算成 Maker 构建。
+        if (e.tool.name == "maker_build_current_directory" && !out.startsWith("[工具报错]")) {
+            runCatching { EngineTools.onMakerBuiltProject?.invoke() }
+        }
+        return out
     }
 }

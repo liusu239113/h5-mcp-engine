@@ -108,13 +108,13 @@ class AgentRunner(
                 """
 【工程类型：H5 和 Maker（UrhoX）完全是两种东西，处理方式不同】
 - H5 工程：目录里有 index.html，WebView 直接跑 → 预览页能看，用 game_shot / screenshot 验证。
-- Maker（UrhoX）工程：目录里有 .project/project.json（或 .maker-mcp/），是原生引擎项目。
-  **手机上跑不了本地预览**（官方引擎只有 win/mac/linux-x86_64），不要尝试用 WebView 打开它，
-  也不要拿 screenshot / game_shot 去“看游戏画面”—— 那截到的只会是对话页，对 Maker 工程没意义。
+- Maker（UrhoX）工程：真构建过一次就定类型（App 会写 .hexora-kind，也可点预览页标题手动切），是原生引擎项目。
+  预览已经内置：App 的预览页用 GeckoView 打开 maker.taptap.cn 控制台（那就是真机效果），所以「看效果」= 看那个预览页；
+  不要用 WebView 直接开它，也不要拿 screenshot / game_shot 去“看游戏画面”—— 那截到的只会是对话页，对 Maker 工程没意义。
 
 对 Maker 工程，「看效果 / 验证游戏」只有一条正确路径：
-- 调 maker_build_current_directory（它自己会提交 -> 推到 Maker -> 云端构建）；
-- 把返回文本里的 Maker URL / 构建状态 **原样**给用户，让他到 TapTap 里看真机效果；
+- 构建已在每轮改完代码后由 App **自动触发**，你不用每次手动再调一遍；只有自动构建没走通、或用户明确说「现在就构建」时，才手动调 maker_build_current_directory；
+- **别只丢一个链接**：构建成功后 App 会自动把预览页切过去，汇报时要说清「已切到预览页，直接看就是真机效果」，链接只是备选（他没登录 / 要分享时用）；
 - 用户说“提交”“推送”“构建”“预览”“跑一下”“看看效果”“验证游戏效果”时，都走这个工具；
 - 用户说“验证代码”“跑测试”“lint”“检查实现”时，不要当成构建。
 

@@ -319,6 +319,10 @@ class MainActivity : AppCompatActivity(), GameUi {
     private var userCollapsedThinking = false
     private var runSeq = 0
     private var runWrote = false
+    /** 本轮是否摸过 maker_ 工具（保证「第一次做 Maker」也能自动构建） */
+    private var makerTouched = false
+    /** 本轮 AI 自己调过构建没 —— 调过就不要再重复自动构建 */
+    private var builtThisRun = false
 
     /** 事件批量合并用的缓冲：忙的时候一秒几十条，逐条建 View 会明显卡 */
     private val pendingEvents = mutableListOf<String>()
@@ -394,6 +398,9 @@ class MainActivity : AppCompatActivity(), GameUi {
         // Maker 的授权 / 凭据检查要跑 CLI、读 pat.json，需要 Context。
         // AI 通过内置工具 maker_auth 触发（不受 MCP 准入开关限制）。
         EngineTools.ctxRef = applicationContext
+        // 构建钩子：maker_build_current_directory 成功 → 把当前工程钉成 Maker。
+        // 判型不靠「目录里有什么文件」（能被 AI 写的东西骗），只认「真构建过」这个动作。
+        EngineTools.onMakerBuiltProject = { markCurrentProjectAsMaker(currentGame) }
 
         rootView = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -1957,6 +1964,8 @@ class MainActivity : AppCompatActivity(), GameUi {
         running = true
         runSteps = 0
         runWrote = false
+        makerTouched = false
+        builtThisRun = false
         stopBtn.visibleIf(true)
         startRunCard()
 
@@ -2000,6 +2009,9 @@ class MainActivity : AppCompatActivity(), GameUi {
                     // 工具开始执行：先插一张「运行中」卡（灰图标），结果回来再改成绿/红
                     val nm = ev.removePrefix("TOOLRUN:").trim().removePrefix("[").substringBefore("]")
                     addToolCardRunning(nm)
+                    // 记录「这轮碰过 Maker」：哪怕判型还没转成 maker，也说明这是 Maker 工程
+                    if (nm.startsWith("maker_")) makerTouched = true
+                    if (nm == "maker_build_current_directory") builtThisRun = true
                 }
                 ev.startsWith("TOOLFAIL:") -> {
                     val l = ev.removePrefix("TOOLFAIL:").trim()
@@ -2217,6 +2229,9 @@ class MainActivity : AppCompatActivity(), GameUi {
         // 期间若被杀进程 / 覆盖安装，这段记录就没了（用户反馈的「更新后记录消失」）。
         runCatching { persistSessions() }
         if (runWrote) ensurePreviewFresh()
+        // Maker 工程：这轮真改过代码，跑完就直接提交 + 云端构建（不用用户再催一句「构建一下」）。
+        // 已经自己调过构建的不重复；H5 工程不动。
+        if (runWrote && !builtThisRun && (isMakerProject() || makerTouched)) autoBuildMaker()
         // 运行期间排队的消息：这轮结束后自动发下一条（一次只发一条，避免连环堆积）
         if (msgQueue.isNotEmpty()) {
             val next = msgQueue.removeFirst()
@@ -2509,30 +2524,115 @@ class MainActivity : AppCompatActivity(), GameUi {
     /**
      * 当前项目到底是什么工程。
      *
-     * H5：有 index.html，WebView 直接跑；
-     * Maker：UrhoX 工程（有 .project/project.json 或 .maker-mcp/），
-     * WebView 跑不了（引擎是桌面端的），预览改为「提交构建 -> Maker 链接 / 二维码」。
+     * 判型顺序：手动覆盖（.hexora-kind；Maker 构建成功会自动写 maker）→
+     * scripts/main.lua / urhox-libs 强信号 → 非占位的 index.html → .project/project.json。
+     * 特意**不看 .maker-mcp**（H5 工程被 Maker CLI 碰过一次就会长出来，正是误判的老毛病）。
+     *
+     * H5：index.html，WebView 直接跑；
+     * Maker：UrhoX 工程，WebView 跑不了 —— 预览走预览页里的 GeckoView 打开 maker.taptap.cn 控制台。
      */
     private fun projKind(name: String): String {
-        val d = File(gameRoot, name)
-        // 第一条准则：根目录有 index.html 的一律按 H5 走。
-        // 理由：UrhoX / Maker 工程的入口是 scripts/main.lua，根目录不会放 index.html；
-        // 反过来，H5 工程只要被 Maker CLI 碰过一次，就会留下 .maker-mcp / .project 目录，
-        // 老判定会因此把它误认成 Maker，于是「H5 项目的预览被丢进 Maker 控制台」，
-        // 看起来就像预览没跟着项目切换。
-        if (File(d, "index.html").isFile) return "h5"
-        return when {
-            File(d, "scripts/main.lua").isFile -> "maker"
-            File(d, ".project/project.json").isFile -> "maker"
-            File(d, ".maker-mcp").isDirectory -> "maker"
-            File(d, "urhox-libs").isDirectory -> "maker"
-            else -> "h5"
+            val d = File(gameRoot, name)
+
+            // 0) 手动覆盖优先：项目里放了 .hexora-kind（内容 h5 / maker）就听它的。
+            //    自动识别终究是猜；留一个「用户说了算」的出口，猜错不用等下一版。
+            val ov = runCatching { File(d, ".hexora-kind").readText().trim().lowercase() }.getOrNull()
+            if (ov == "h5" || ov == "maker") return ov
+
+            // 1) Maker / UrhoX 的强信号：入口脚本 + 引擎运行时目录。
+            //    这两个是真做过 Maker 工程才会出现的，H5 工程不会凭空长出来。
+            if (File(d, "scripts/main.lua").isFile) return "maker"
+            if (File(d, "urhox-libs").isDirectory) return "maker"
+
+            // 2) 网页游戏：根目录有 index.html，而且它**不是占位说明页**。
+            //    踩过的坑：AI 会往 Maker 工程里写一个 index.html 占位页（内容带
+            //    「URHOX PROJECT / 入口脚本 scripts/main.lua / 手机端无法本地跑预览」），
+            //    只看「有没有 index.html」会把真 Maker 工程判成 H5。
+            val idx = File(d, "index.html")
+            if (idx.isFile && !isPlaceholderHtml(idx)) return "h5"
+
+            // 3) 兜底：Maker 的工程描述文件（做过 Maker 工程才会有）。
+            //    注意：**不再把 .maker-mcp 当信号** —— 它只是 MCP 的配置目录，
+            //    H5 工程被 Maker CLI 碰过一次就会留下，这正是之前「全被标成 Maker」的原因。
+            if (File(d, ".project/project.json").isFile) return "maker"
+
+            return "h5"
         }
-    }
+
+        /**
+         * 是不是「占位说明页」。
+         *
+         * 这类 index.html 是 AI 为了让引擎把「当前工程」切到本目录而写的，
+         * 内容很短、带固定字样，不能拿它当「这是个网页游戏」的证据。
+         * 真游戏页面都比较大，所以先卡体积，再认关键词，开销可忽略。
+         */
+        private fun isPlaceholderHtml(f: File): Boolean = runCatching {
+            if (f.length() > 60000) return@runCatching false
+            val t = f.readText()
+            t.contains("占位") || t.contains("URHOX PROJECT") || t.contains("无法本地跑预览") ||
+                t.contains("maker_build_current_directory")
+        }.getOrDefault(false)
 
     /** 预览模式的显示名：H5 / Maker，放在预览页标题里，一眼能看出走的哪条路 */
     private fun kindLabel(name: String): String =
         if (projKind(name) == "maker") "Maker" else "H5"
+
+    /**
+     * 把某个项目钉成 Maker（写 .hexora-kind，projKind() 优先读它）。
+     *
+     * 触发点：maker_build_current_directory 成功返回（含 App 自动构建）。
+     * 这是整套判型里唯一骗不了的依据 —— 不看目录里有什么文件，只看「真构建过」。
+     */
+    private fun markCurrentProjectAsMaker(id: String = currentGame) {
+        if (id.isBlank()) return
+        val d = File(gameRoot, id)
+        val cur = runCatching { File(d, ".hexora-kind").readText().trim().lowercase() }.getOrDefault("")
+        runCatching { File(d, ".hexora-kind").writeText("maker") }
+        if (cur == "maker") return
+        main.post {
+            if (id == currentGame) {
+                lastLoadedGame = ""
+                refreshHeader()
+            }
+            toast("已构建过 Maker：「$id」按 Maker 预览")
+        }
+    }
+
+    /**
+     * 一轮任务结束后，自动提交 + 触发 Maker 云端构建。
+     *
+     * 以前构建全看 AI 想不想得起来调 maker_build_current_directory —— 它经常想不起来，
+     * 用户就得每次补一句「构建一下」。现在：这轮真写过文件、且当前是 Maker 工程
+     * （或这轮摸过 maker_ 工具），跑完就直接构建。
+     *
+     * 这条是 App 主动发起，不经过「写工具准入」那道闸（那道闸是防 AI 擅自发布上线的）。
+     */
+    private fun autoBuildMaker() {
+        val id = currentGame
+        val hub = EngineTools.mcp
+        if (hub == null || !hub.handles("maker_build_current_directory")) {
+            toast("Maker 通道还没就绪，这轮先不自动构建")
+            return
+        }
+        addSystemLine("检测到 Maker 工程改动：正在自动提交 + 云端构建…")
+        Thread {
+            val out = runCatching { hub.call("maker_build_current_directory", "{}") }
+                .getOrElse { "[构建失败] " + it.message }
+            main.post {
+                val bad = out.startsWith("[工具报错]") || out.startsWith("[构建失败]")
+                if (bad) {
+                    addSystemLine("自动构建没走通：\n" + out.take(600))
+                } else {
+                    addSystemLine("已自动构建：Maker 云端正在出包，预览页刷新后即可见")
+                    markCurrentProjectAsMaker(id)
+                    // 构建完不能只丢个链接让用户自己找：直接把预览页切过去。
+                    // （Maker 走 GeckoView 控制台，reloadGame 会 reload 出最新构建）
+                    showTab(1)
+                    reloadGame()
+                }
+            }
+        }.apply { isDaemon = true; name = "maker-autobuild" }.start()
+    }
 
     /** 当前项目是不是 Maker / UrhoX 工程 */
     private fun isMakerProject(): Boolean = projKind(currentGame) == "maker"
@@ -3031,6 +3131,18 @@ class MainActivity : AppCompatActivity(), GameUi {
     /** 切到预览页时调用：项目换了或文件变了才重载，不再每次进来都白一下 */
     private fun ensurePreviewFresh(immediate: Boolean = false) {
         val dir = File(gameRoot, currentGame)
+        // Maker 工程没有「有 index.html 才算能跑」这回事：它的预览是 GeckoView
+        // 打开 maker.taptap.cn 控制台。所以单独走一条，别被下面那句拦住。
+        if (isMakerProject()) {
+            if (activeTab != 1) {
+                previewDirty = true
+                return
+            }
+            lastLoadedGame = currentGame
+            lastLoadedStamp = dirStamp(dir)
+            reloadGame()
+            return
+        }
         val idx = File(dir, "index.html")
         val stamp = dirStamp(dir)
         if (currentGame == lastLoadedGame && stamp == lastLoadedStamp && !previewDirty) return
@@ -3097,6 +3209,55 @@ class MainActivity : AppCompatActivity(), GameUi {
         bos.toByteArray()
     }.getOrNull()
 
+    /**
+     * 按项目类型把预览切到对应通道。
+     *
+     * H5    -> 原来的 WebView（appassets 拦截到项目目录）
+     * Maker -> GeckoView 打开 maker.taptap.cn 控制台
+     * 判型统一走 projKind()，所以手动覆盖（.hexora-kind）在这里自动生效。
+     */
+    private fun loadPreviewFor(dir: File, id: String) {
+        if (projKind(id) == "maker") {
+            showMakerPreview(dir, id)
+            return
+        }
+        val idx = File(dir, "index.html")
+        if (idx.isFile) {
+            hideMakerPreview()
+            previewLabel.text = "项目：$id · H5 ⟳"
+            web.loadUrl("https://appassets.androidplatform.net/games/$id/index.html")
+        } else {
+            hideMakerPreview()
+            previewLabel.text = "项目：$id · H5 ⟳"
+            web.loadDataWithBaseURL(
+                null,
+                "<html><body style='background:#0F1011;color:#9A9A9A;font-family:sans-serif;padding:40px;line-height:1.8'>" +
+                    "<h3 style='color:#EDEDED;font-weight:500'>「" + id + "」还没有 index.html</h3>" +
+                    "<p>回到「对话」页告诉 AI 你想做什么，它会构建到这个目录：</p>" +
+                    "<p style='color:#4FCFB4;word-break:break-all'>" + dir.absolutePath + "</p>" +
+                    "</body></html>",
+                "text/html", "utf-8", null
+            )
+        }
+    }
+
+    /**
+     * 预览模式手动切换（点预览页标题就切）。
+     *
+     * 自动判型（H5 / Maker）总有猜错的时候：与其来回改代码，不如让你一点就改。
+     * 结果写进项目里的 .hexora-kind（h5 / maker），之后一直按它走。
+     */
+    private fun toggleProjKind() {
+        val toMaker = projKind(currentGame) != "maker"
+        val next = if (toMaker) "maker" else "h5"
+        runCatching { File(File(gameRoot, currentGame), ".hexora-kind").writeText(next) }
+        lastLoadedGame = ""
+        refreshHeader()
+        loadPreviewFor(File(gameRoot, currentGame), currentGame)
+        toast("已把「$currentGame」按 " + (if (toMaker) "Maker" else "H5") + " 预览（再点标题可切回）")
+    }
+
+
     // ==================== Maker 预览（GeckoView 通道） ====================
 
     private var makerView: GeckoView? = null
@@ -3146,7 +3307,7 @@ class MainActivity : AppCompatActivity(), GameUi {
         } else {
             runCatching { gv.session?.reload() }
         }
-        previewLabel.text = "项目：$id · Maker"
+        previewLabel.text = "项目：$id · Maker ⟳"
     }
 
     /** 切回 H5 工程时把 GeckoView 收起来，别让它盖在网页上面 */
@@ -3193,6 +3354,9 @@ class MainActivity : AppCompatActivity(), GameUi {
             textSize = 13f
             setTextColor(pal.text)
             typeface = Typeface.DEFAULT_BOLD
+            // 标题上的 ⟳ 不是装饰：点一下就把预览切到另一种模式（H5 <-> Maker）
+            isClickable = true
+            setOnClickListener { toggleProjKind() }
         }
         val reload = chipOf(this, pal, "重载", false).apply {
             setOnClickListener {
@@ -5147,7 +5311,7 @@ makerRow1.addView(ghostBtnOf(ctx, pal, "扫码登录").apply {
         }
         modelBtn.text = "${cfg.provider.label} / ${cfg.model} ▾"
         projBtn.text = "$currentGame ▾"
-        previewLabel.text = "项目：$currentGame · ${kindLabel(currentGame)}"
+        previewLabel.text = "项目：$currentGame · ${kindLabel(currentGame)} ⟳"
     }
 
     // ==================== 小工具 ====================
@@ -5307,28 +5471,7 @@ makerRow1.addView(ghostBtnOf(ctx, pal, "扫码登录").apply {
             logs.add("[system] 打开项目 $id")
             // 该项目的对话历史重新装载（项目之间绝不共享上下文）
             reloadSessionsForProject()
-            if (projKind(id) == "maker") {
-                // Maker（UrhoX）工程：走 GeckoView 通道。
-                // 系统 WebView 缺站点隔离 -> SharedArrayBuffer 不可用 -> WASM 多线程引擎起不来（白屏）；
-                // 这里换成 Firefox 内核（GeckoView）跑 maker.taptap.cn —— 构建完直接就能看见画面。
-                showMakerPreview(dir, id)
-            } else if (File(dir, "index.html").exists()) {
-                hideMakerPreview()
-                previewLabel.text = "项目：$id · H5"
-                web.loadUrl(url)
-            } else {
-                hideMakerPreview()
-                // 没有 index.html 时给个说明页，而不是白屏
-                web.loadDataWithBaseURL(
-                    null,
-                    "<html><body style='background:#0F1011;color:#9A9A9A;font-family:sans-serif;padding:40px;line-height:1.8'>" +
-                        "<h3 style='color:#EDEDED;font-weight:500'>「" + id + "」还没有 index.html</h3>" +
-                        "<p>回到「对话」页告诉 AI 你想做什么，它会构建到这个目录：</p>" +
-                        "<p style='color:#4FCFB4;word-break:break-all'>" + dir.absolutePath + "</p>" +
-                        "</body></html>",
-                    "text/html", "utf-8", null
-                )
-            }
+            loadPreviewFor(dir, id)
         }
     }
 
