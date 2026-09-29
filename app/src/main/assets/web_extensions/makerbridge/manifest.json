@@ -1,0 +1,21 @@
+{
+  "manifest_version": 2,
+  "name": "MakerBridge",
+  "version": "1.1.0",
+  "description": "Android bridge for TapTap Maker",
+  "content_scripts": [
+    {
+      "matches": [
+        "*://maker.taptap.cn/*",
+        "*://www.taptap.cn/*",
+        "*://*.spark.xd.com/*",
+        "*://spark.xd.com/*"
+      ],
+      "js": ["content.js"],
+      "run_at": "document_start",
+      "all_frames": true,
+      "world": "MAIN",
+      "match_about_blank": true
+    }
+  ]
+}

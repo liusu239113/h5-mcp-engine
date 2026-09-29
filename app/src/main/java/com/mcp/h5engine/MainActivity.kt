@@ -50,6 +50,7 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.appcompat.view.ContextThemeWrapper
 import androidx.core.content.FileProvider
 import androidx.webkit.WebViewAssetLoader
+import org.mozilla.geckoview.GeckoView
 import androidx.webkit.WebViewCompat
 import androidx.webkit.WebViewFeature
 import org.json.JSONObject
@@ -730,7 +731,7 @@ class MainActivity : AppCompatActivity(), GameUi {
         // 补一刀：游戏可能在「切页瞬间」刚起了一段音（定时器 / 场景切换），
         // 单次静音会漏掉这一声，350ms 后再对一次表。
         if (tab != 1) main.postDelayed({ if (activeTab != 1) applyPreviewMute(true) }, 350)
-        if (tab == 1) ensurePreviewFresh()
+        if (tab == 1) ensurePreviewFresh(true)
         if (tab == 2) refreshExportRow()
     }
 
@@ -3007,7 +3008,7 @@ class MainActivity : AppCompatActivity(), GameUi {
     private val previewReloadTask = Runnable { runCatching { reloadGame() } }
 
     /** 切到预览页时调用：项目换了或文件变了才重载，不再每次进来都白一下 */
-    private fun ensurePreviewFresh() {
+    private fun ensurePreviewFresh(immediate: Boolean = false) {
         val dir = File(gameRoot, currentGame)
         val idx = File(dir, "index.html")
         val stamp = dirStamp(dir)
@@ -3026,7 +3027,7 @@ class MainActivity : AppCompatActivity(), GameUi {
         }
         lastLoadedGame = currentGame
         lastLoadedStamp = stamp
-        schedulePreviewReload()
+        schedulePreviewReload(immediate)
     }
 
     /**
@@ -3036,10 +3037,12 @@ class MainActivity : AppCompatActivity(), GameUi {
      * 「白一下、再白一下」——看着疯狂闪屏。合并成「最后一次改动后 900ms 再刷」，
      * 一轮最多闪一次，而且刷出来的是最终结果，正好就是「构建完能在预览里看见」。
      */
-    private fun schedulePreviewReload() {
+    private fun schedulePreviewReload(immediate: Boolean = false) {
         previewDirty = false
         main.removeCallbacks(previewReloadTask)
-        main.postDelayed(previewReloadTask, 900)
+        // 切到预览页要立刻看到东西；去抖只用于「AI 边写边刷」这种连发场景
+        if (immediate) main.post(previewReloadTask)
+        else main.postDelayed(previewReloadTask, 900)
     }
 
     private fun attachScreenshot() {
@@ -3072,6 +3075,82 @@ class MainActivity : AppCompatActivity(), GameUi {
         bmp.recycle()
         bos.toByteArray()
     }.getOrNull()
+
+    // ==================== Maker 预览（GeckoView 通道） ====================
+
+    private var makerView: GeckoView? = null
+    private var makerLoadedUrl: String? = null
+
+    /**
+     * Maker（UrhoX）工程的预览。
+     *
+     * 用 GeckoView 打开 maker.taptap.cn（官方控制台，?tab=preview 就是实时预览页）。
+     * 系统 WebView 打不开是内核能力问题，不是网络问题，详见 MakerPreview 的注释。
+     */
+    private fun showMakerPreview(dir: File, id: String) {
+        if (!::previewWrapHolder.isInitialized) return
+        val existing = makerView
+        val gv: GeckoView
+        if (existing != null) {
+            gv = existing
+        } else {
+            val made = runCatching { MakerPreview.newView(this) }
+                .onFailure { android.util.Log.w("MakerPreview", "GeckoView 初始化失败", it) }
+                .getOrNull()
+            if (made == null) {
+                // 内核起不来也别白屏，给一句人话
+                web.visibleIf(true)
+                web.loadDataWithBaseURL(
+                    null,
+                    "<html><body style='background:#0F1011;color:#9A9A9A;font-family:sans-serif;padding:36px;line-height:1.9'>" +
+                        "<h3 style='color:#EDEDED;font-weight:500'>Maker 预览内核启动失败</h3>" +
+                        "<p>GeckoView 没能初始化（多半是这台机器的 ABI 不是 arm64-v8a）。</p>" +
+                        "<p>仍然可以回「对话」页说一句 <b style='color:#4FCFB4'>提交构建</b>，用构建产出的链接 / 二维码看效果。</p>" +
+                        "</body></html>",
+                    "text/html", "utf-8", null
+                )
+                return
+            }
+            makerView = made
+            previewWrapHolder.addView(made, FrameLayout.LayoutParams(-1, -1))
+            gv = made
+        }
+        web.visibleIf(false)
+        gv.visibleIf(true)
+        gv.bringToFront()
+        val url = makerConsoleUrl(dir)
+        if (makerLoadedUrl != url) {
+            makerLoadedUrl = url
+            runCatching { gv.session?.loadUri(url) }
+        } else {
+            runCatching { gv.session?.reload() }
+        }
+        previewLabel.text = "Maker 预览 · $id"
+    }
+
+    /** 切回 H5 工程时把 GeckoView 收起来，别让它盖在网页上面 */
+    private fun hideMakerPreview() {
+        makerView?.visibleIf(false)
+        web.visibleIf(true)
+    }
+
+    /**
+     * 预览地址。
+     *
+     * 能从工程的 .project/project.json 里认出 appId，就直接深链到
+     * maker.taptap.cn/app/<id>?tab=preview（打开即预览）；认不出就退回控制台首页，
+     * 用户在里面自己点进项目 → 预览，同样能用。
+     */
+    private fun makerConsoleUrl(dir: File): String {
+        val id = runCatching {
+            val txt = File(dir, ".project/project.json").readText()
+            Regex("\"[A-Za-z_]*[Aa]pp_?[Ii]d\"\\s*:\\s*\"([0-9a-fA-F-]{36})\"")
+                .find(txt)?.groupValues?.get(1)
+        }.getOrNull()
+        return if (id.isNullOrBlank()) MakerPreview.CONSOLE
+        else "https://maker.taptap.cn/app/$id?tab=preview"
+    }
+
 
     // ==================== 预览页 ====================
 
@@ -5203,23 +5282,15 @@ makerRow1.addView(ghostBtnOf(ctx, pal, "扫码登录").apply {
             // 该项目的对话历史重新装载（项目之间绝不共享上下文）
             reloadSessionsForProject()
             if (projKind(id) == "maker") {
-                // UrhoX 工程：引擎哥是桌面端的（win/mac/linux-x86_64），手机上跑不起来，
-                // 硬塞 WebView 只会白屏。这里说清「怎么看效果」。
-                web.loadDataWithBaseURL(
-                    null,
-                    "<html><body style='background:#0F1011;color:#9A9A9A;font-family:sans-serif;padding:36px;line-height:1.9'>" +
-                        "<h3 style='color:#EDEDED;font-weight:500'>" + id + " 是 Maker（UrhoX）工程</h3>" +
-                        "<p>它不是网页游戏，本地预览跑不了原生引擎。<b style='color:#4FCFB4'>看效果的正确路径</b>：</p>" +
-                        "<p>回到「对话」页说一句 <b style='color:#4FCFB4'>提交构建</b>，AI 会推到 Maker 云端构建，" +
-                        "然后给你<b>链接 / 二维码</b>，在 TapTap 里就能看真机效果。</p>" +
-                        "<p style='color:#6E6E6E'>工程目录：</p>" +
-                        "<p style='color:#4FCFB4;word-break:break-all'>" + dir.absolutePath + "</p>" +
-                        "</body></html>",
-                    "text/html", "utf-8", null
-                )
+                // Maker（UrhoX）工程：走 GeckoView 通道。
+                // 系统 WebView 缺站点隔离 -> SharedArrayBuffer 不可用 -> WASM 多线程引擎起不来（白屏）；
+                // 这里换成 Firefox 内核（GeckoView）跑 maker.taptap.cn —— 构建完直接就能看见画面。
+                showMakerPreview(dir, id)
             } else if (File(dir, "index.html").exists()) {
+                hideMakerPreview()
                 web.loadUrl(url)
             } else {
+                hideMakerPreview()
                 // 没有 index.html 时给个说明页，而不是白屏
                 web.loadDataWithBaseURL(
                     null,
@@ -5235,7 +5306,15 @@ makerRow1.addView(ghostBtnOf(ctx, pal, "扫码登录").apply {
     }
 
     override fun reloadGame() {
-        main.post { web.reload() }
+        main.post {
+            // Maker 工程只能走 GeckoView（系统 WebView 跑不了 UrhoX 引擎）
+            if (isMakerProject()) {
+                showMakerPreview(File(gameRoot, currentGame), currentGame)
+            } else {
+                hideMakerPreview()
+                web.reload()
+            }
+        }
     }
 
     override fun runJsSync(code: String, timeoutMs: Int): String {

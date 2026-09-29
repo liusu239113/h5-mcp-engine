@@ -19,8 +19,8 @@ android {
         applicationId = "com.mcp.h5engine"
         minSdk = 24
         targetSdk = 34
-        versionCode = 21
-        versionName = "1.20"
+        versionCode = 22
+        versionName = "1.21"
     }
 
     signingConfigs {
@@ -77,6 +77,10 @@ dependencies {
     implementation("androidx.core:core-ktx:1.12.0")
     implementation("androidx.appcompat:appcompat:1.6.1")
     implementation("androidx.webkit:webkit:1.10.0")
+    // Maker 预览通道：GeckoView（Firefox 内核）。
+    // 系统 WebView 没有站点隔离（Fission）→ crossOriginIsolated=false → SharedArrayBuffer 不可用
+    // → UrhoX 的 WASM 多线程引擎起不来（白屏）；GeckoView 默认开 Fission，原生支持。
+    implementation("org.mozilla.geckoview:geckoview-arm64-v8a:153.0.20260715202819")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     // C3 内嵌 JS 引擎：Rhino（纯 JVM 实现，免 native so / 免子进程、无 ABI 问题，也不受
