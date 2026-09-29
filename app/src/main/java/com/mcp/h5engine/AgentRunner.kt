@@ -185,21 +185,22 @@ class AgentRunner(
 - 连续 3 次仍失败才如实汇报，并写明：工具名、报错原文、已重试次数；并说明「通道会被 App 在后台自动重连，过一会儿再叫我试一次」。""".trimIndent()
             )
 
-            // ===== 图片素材：抠图 / 去背景 =====
-            // 用户给的抠抠图站点自带公开同步接口，已在桥里包成本地工具 maker_remove_bg。
-            // 模型以前爱手写 canvas 色键去凑透明底（抠不干净），这里明确改成走工具。
+            // ===== 图片素材：透明底 =====
+            // 生图工具自带 transparent=true，生成即透明 —— 这是主路径，不花钱、不要 Key。
+            // maker_remove_bg 只是「存量白底图补救 / 想另存一份」的兜底。
             append(
                 """
 
-【要去背景（抠图）就用 maker_remove_bg，别自己抠】
-- 需要透明底立绘 / 图标 / 道具图时，调 maker_remove_bg：
-  image=项目内原图相对路径；out=输出相对路径（默认 <原名>-nobg.png，**不要覆盖原图**）；
-  format=png（要透明底选它，多花 1 积分）；border=1 留一圈描边；crop=1 先裁剪。
-- 拿到结果把 <img> 指向输出文件即可。**不要**用 canvas 色键 / mix-blend-mode 硬凑背景。
-- 它返回「需要先在 设置 → 图片工具（抠图） 里粘一次 API Key」：如实告诉用户去哪配
-  （https://www.koukoutu.com/user/dev），并说明配完立刻可用、不用重启。
-- 返回积分不足：说明 1 积分/张（png 再 +1）与充值地址，**别反复重试**白烧额度。
-- 一次一张（同步接口并发上限 5）；要批量就逐张调。""".trimIndent()
+【透明底：生图时就传 transparent=true，别等生成完再抠】
+- **图标 / logo / 角色 / 道具 / UI 元件这类素材默认就要透明底**：调 generate_image /
+  batch_generate_images 时**显式传 `transparent=true`**（这是**工具参数**，和 prompt 里写
+  「透明背景」是两码事）——生成出来直接是透明 PNG，**不花积分、不用任何 Key**。
+- 场景 / 大地图 / Tile 这类**不要**透明：传 `transparent=false`。
+- ⚠️ 只在 prompt 里写「透明背景」、却没传 `transparent=true`，结果就是一张白底图 —— 这是最常见的坑。
+- 别手写 canvas 色键 / mix-blend-mode 去凑透明底（抠不干净、边缘毛边）。
+- maker_remove_bg 只在**补救**时用：① 项目里已有白底素材要救；② 需要另存一份透明图。
+  它要先在 设置 → 图片工具（抠图） 配一次 Key（https://www.koukoutu.com/user/dev，
+  1 积分/张、png 再 +1）；返回「没配 Key」就如实告诉用户去哪配，别反复重试白烧额度。""".trimIndent()
             )
         }
 
