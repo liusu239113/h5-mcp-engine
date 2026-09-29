@@ -2515,13 +2515,24 @@ class MainActivity : AppCompatActivity(), GameUi {
      */
     private fun projKind(name: String): String {
         val d = File(gameRoot, name)
+        // 第一条准则：根目录有 index.html 的一律按 H5 走。
+        // 理由：UrhoX / Maker 工程的入口是 scripts/main.lua，根目录不会放 index.html；
+        // 反过来，H5 工程只要被 Maker CLI 碰过一次，就会留下 .maker-mcp / .project 目录，
+        // 老判定会因此把它误认成 Maker，于是「H5 项目的预览被丢进 Maker 控制台」，
+        // 看起来就像预览没跟着项目切换。
+        if (File(d, "index.html").isFile) return "h5"
         return when {
+            File(d, "scripts/main.lua").isFile -> "maker"
             File(d, ".project/project.json").isFile -> "maker"
             File(d, ".maker-mcp").isDirectory -> "maker"
             File(d, "urhox-libs").isDirectory -> "maker"
             else -> "h5"
         }
     }
+
+    /** 预览模式的显示名：H5 / Maker，放在预览页标题里，一眼能看出走的哪条路 */
+    private fun kindLabel(name: String): String =
+        if (projKind(name) == "maker") "Maker" else "H5"
 
     /** 当前项目是不是 Maker / UrhoX 工程 */
     private fun isMakerProject(): Boolean = projKind(currentGame) == "maker"
@@ -2918,7 +2929,7 @@ class MainActivity : AppCompatActivity(), GameUi {
         openGame(name)
         refreshHeader()
         lastLoadedGame = ""
-        addSystemLine("已打开项目「$name」 · ${File(gameRoot, name).absolutePath}")
+        addSystemLine("已打开项目「$name」（${kindLabel(name)}） · ${File(gameRoot, name).absolutePath}")
         if (activeTab == 1) ensurePreviewFresh()
     }
 
@@ -3125,7 +3136,7 @@ class MainActivity : AppCompatActivity(), GameUi {
         } else {
             runCatching { gv.session?.reload() }
         }
-        previewLabel.text = "Maker 预览 · $id"
+        previewLabel.text = "项目：$id · Maker"
     }
 
     /** 切回 H5 工程时把 GeckoView 收起来，别让它盖在网页上面 */
@@ -5126,7 +5137,7 @@ makerRow1.addView(ghostBtnOf(ctx, pal, "扫码登录").apply {
         }
         modelBtn.text = "${cfg.provider.label} / ${cfg.model} ▾"
         projBtn.text = "$currentGame ▾"
-        previewLabel.text = "项目：$currentGame"
+        previewLabel.text = "项目：$currentGame · ${kindLabel(currentGame)}"
     }
 
     // ==================== 小工具 ====================
@@ -5260,6 +5271,11 @@ makerRow1.addView(ghostBtnOf(ctx, pal, "扫码登录").apply {
     override fun currentGameId(): String = currentGame
 
     override fun openGame(id: String) {
+        // 切项目时先把「挂起的预览重载」取消掉：
+        // 否则上一次切项目排的那个 900ms 任务会在新项目加载完之后才跑，
+        // 把画面又带回旧状态（用户看到的就是「预览没跟着切」）。
+        main.removeCallbacks(previewReloadTask)
+        previewDirty = false
         if (id != currentGame) {
             // 切项目 = 换一份会话库：先把旧项目这轮对话落盘，再切新库
             runCatching { persistSessions() }
@@ -5288,6 +5304,7 @@ makerRow1.addView(ghostBtnOf(ctx, pal, "扫码登录").apply {
                 showMakerPreview(dir, id)
             } else if (File(dir, "index.html").exists()) {
                 hideMakerPreview()
+                previewLabel.text = "项目：$id · H5"
                 web.loadUrl(url)
             } else {
                 hideMakerPreview()
