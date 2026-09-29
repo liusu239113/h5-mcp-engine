@@ -1167,11 +1167,17 @@ class MainActivity : AppCompatActivity(), GameUi {
 
     private fun addBubble(text: String, fromUser: Boolean, thumbs: List<ByteArray> = emptyList()) {
         // 一条消息 = 一个气泡；内部按空行切段，每段自带「复制」，含链接的段落多一个「复制链接」
+        // 用户消息保留气泡（自己的话要能和 AI 的分开）；
+        // **AI 的正文不再套卡片** —— 一屏几十个白框会让人分不清「正文」和「插进来的卡片」，
+        // 观感也偏表单。正文就老老实实当正文排版，靠留白和字号分层。
         val card = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(13), dp(10), dp(13), dp(8))
-            background = if (fromUser) roundCard(this@MainActivity, pal.userBubble, pal.userBubble, 16, 0)
-            else roundCard(this@MainActivity, pal.aiBubble, pal.border, 16)
+            if (fromUser) {
+                setPadding(dp(13), dp(10), dp(13), dp(8))
+                background = roundCard(this@MainActivity, pal.userBubble, pal.userBubble, 16, 0)
+            } else {
+                setPadding(0, dp(4), 0, dp(6))
+            }
         }
         // 用户发的图：直接把缩略图放进气泡里（以前只在下面挂一行「[附件] xx.jpg」文字，等于看不到图）
         if (thumbs.isNotEmpty()) bubbleThumbRow(card, thumbs)
@@ -1207,11 +1213,13 @@ class MainActivity : AppCompatActivity(), GameUi {
                 addView(iconOp("doc", "复制整条对话（全文）") { copyToClip(text, "全文") })
             }, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(2) })
         }
-        chatList.addView(card, LinearLayout.LayoutParams(-2, -2).apply {
+        // AI 正文要占满整行（-1）才能正常折行、和组卡左对齐；
+        // 用户气泡按内容宽（-2）贴右边。
+        chatList.addView(card, LinearLayout.LayoutParams(if (fromUser) -2 else -1, -2).apply {
             gravity = if (fromUser) Gravity.END else Gravity.START
             topMargin = dp(5)
             bottomMargin = dp(5)
-            if (fromUser) leftMargin = dp(46) else rightMargin = dp(30)
+            if (fromUser) leftMargin = dp(46)
         })
         // 自己发的消息永远贴底；AI 的消息在用户没主动上滑时，也一路贴着底部向下长。
         if (fromUser) { stickBottom = true; userPinned = false }
@@ -1733,6 +1741,9 @@ class MainActivity : AppCompatActivity(), GameUi {
         toolTotal++
         toolVerbCount[verb] = (toolVerbCount[verb] ?: 0) + 1
         updateWorkStat("")
+        // 组体是展开的，新行会把它撑高 —— 跟着往下滚，让「正在改谁」始终在视野里。
+        // （用户自己上滑了就不会被拽走，scrollChatToBottom 内部认这个）
+        scrollChatToBottom()
     }
 
     /**
@@ -1801,6 +1812,44 @@ class MainActivity : AppCompatActivity(), GameUi {
         pendingStatus = null
         pendingSpinView = null
         pendingMarkView = null
+    }
+
+    /**
+     * 过程自述行：AI 干活途中说的话（「我先看一下这个文件」这类）。
+     *
+     * 缩进折进「已工作」组里当一行 ✎，**不单独占一张气泡** ——
+     * 一句一张白卡正是用户说的「还是卡片那种」。过程归过程，结论归结论。
+     */
+    private fun addNoteRow(text: String) {
+        val t = text.trim().replace('\n', ' ')
+        if (t.isEmpty()) return
+        val rows = toolWrap
+        if (rows == null) {
+            // 组还没建起来（理论上不该发生）：退回气泡，至少别把内容丢了
+            addBubble(text.trim(), false)
+            return
+        }
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(0, dp(4), 0, dp(4))
+            isClickable = true
+        }
+        row.addView(TextView(this).apply {
+            text = "✎"
+            textSize = 11f
+            setTextColor(pal.accent)
+        }, LinearLayout.LayoutParams(-2, -2).apply { rightMargin = dp(7) })
+        row.addView(TextView(this).apply {
+            text = t
+            textSize = 11.5f
+            setTextColor(pal.text)
+            maxLines = 2
+            ellipsize = android.text.TextUtils.TruncateAt.END
+        }, LinearLayout.LayoutParams(0, -2, 1f))
+        // 点一下看全文（复用工具详情的弹窗，能选中、能复制）
+        row.setOnClickListener { showTextDetail("过程自述", text.trim(), true) }
+        rows.addView(row, LinearLayout.LayoutParams(-1, -2))
+        scrollChatToBottom()
     }
 
     /** 工具全文详情弹窗：可滚动 + 可选中 + 一键复制 */
@@ -2250,9 +2299,15 @@ class MainActivity : AppCompatActivity(), GameUi {
     private fun onAgentEvent(ev: String) {
         main.post {
             when {
-                ev.startsWith("AI: ") -> {
+                ev.startsWith("AIFINAL: ") -> {
+                    // 这一轮的最终交付：当正文排（普通文字，不套卡片）
                     flushNow()
-                    addBubble(ev.removePrefix("AI: "), false)
+                    addBubble(ev.removePrefix("AIFINAL: "), false)
+                }
+                ev.startsWith("AI: ") -> {
+                    // 干活途中的过程自述：缩进折进「已工作」组里当一行，不单独占一张卡
+                    flushNow()
+                    addNoteRow(ev.removePrefix("AI: "))
                 }
                 ev.startsWith("[失败]") -> {
                     flushNow()
@@ -2349,7 +2404,7 @@ class MainActivity : AppCompatActivity(), GameUi {
             setPadding(dp(8), 0, dp(8), 0)
         }
         val toggle = TextView(this).apply {
-            text = "›"
+            text = "⌄"
             textSize = 14f
             setTextColor(pal.faint)
         }
@@ -2363,11 +2418,17 @@ class MainActivity : AppCompatActivity(), GameUi {
             isClickable = true
         }
 
-        // ===== 组体（默认收起）=====
+        // ===== 组体（默认**展开**）=====
+        // 展开是有意的：用户要看的正是「现在在改哪个文件、改了多少」，
+        // 收起来等于把这些信息藏了。闪不闪由别的机制保证（见下）：
+        //   · 组体里只放**工具行**，一行只在「工具开始 / 结束」时增改，不是每收一个字就动
+        //   · 流式文字不进这里（它走底部状态行），所以不会每 200ms 撑高卡片一次
+        //   · 所有 setText 都过 setTextIf，同样的文字不重复写
         val think = TextView(this).apply {
             textSize = 11.5f
             setTextColor(pal.sub)
-            // 思考文字是用来「读」的：行距松一点、颜色灰一档，不抢正文的注意力
+            // 思考文字是用来「读」的：行距松一点、颜色灰一档，不抢正文的注意力。
+            // 默认收起，等本轮跑完再一次性显示（见 paintThink 的说明）。
             setLineSpacing(dp(4).toFloat(), 1.0f)
             setTextIsSelectable(true)
             visibility = View.GONE
@@ -2378,7 +2439,7 @@ class MainActivity : AppCompatActivity(), GameUi {
             setPadding(dp(11), 0, dp(11), dp(9))
             addView(think)
             addView(rows)
-            visibility = View.GONE
+            visibility = View.VISIBLE
         }
 
         val card = LinearLayout(this).apply {
@@ -2397,9 +2458,10 @@ class MainActivity : AppCompatActivity(), GameUi {
         runBody = think
         runToggle = toggle
 
-        // 本轮从「收起」开始。展开状态下的流式文字会一直撑高对话区，
-        // 那正是老版本「边输出边闪」的来源；要看的时候点一下组头就行。
-        bodyExpanded = false
+        // 本轮从「展开」开始：用户要一眼看见「在改哪个文件、跑了多久」。
+        // 展开不再意味着闪 —— 流式文字不走组体（走底部状态行），组体只在
+        // 「工具开始 / 工具结束」时动一两行，频率从每秒几十次降到每轮几次。
+        bodyExpanded = true
         userCollapsedThinking = false
         latestActivity = ""
         lastWorkStat = ""
@@ -2427,8 +2489,8 @@ class MainActivity : AppCompatActivity(), GameUi {
             // 记住用户的手动选择：他自己收起了，流式进度就不要再强行摊开
             userCollapsedThinking = !bodyExpanded
             if (bodyExpanded) {
-                // 收起期间思考文字是只攒不画的，摊开这一下把它补上
-                paintThink()
+                // 运行期间思考文字是只攒不画的；用户主动点开这一下，强制补上
+                paintThink(force = true)
                 scrollChatToBottom()
             }
         }
@@ -2513,7 +2575,6 @@ class MainActivity : AppCompatActivity(), GameUi {
     }
 
     private var lastProgressAt = 0L
-    private var lastAutoScrollAt = 0L
 
     /**
      * 把流式进度画出来。
@@ -2538,16 +2599,14 @@ class MainActivity : AppCompatActivity(), GameUi {
         val tail = text.replace('\n', ' ').trim().takeLast(90)
         if (tail != lastTail) lastTail = tail
 
-        // 流式全文只往 thinkLog 里攒；画不画由 paintThink 按「组体是否摊开」决定
-        thinkLog = (if (kind == "think") "思考中…" else "正在写回答…") + "\n" + text.takeLast(2400)
-        if (bodyExpanded) {
-            paintThink()
-            // 自动滚动也要节流，且只在用户本来就贴着底部时才滚 —— 别和上滑阅读的手打架
-            if (now - lastAutoScrollAt > 450 && stickBottom && !userPinned) {
-                lastAutoScrollAt = now
-                scrollChatToBottom()
-            }
-        }
+        // 只攒「思考」这一路，而且只攒不画：
+        //   · 运行期间一个字都不往组体里写 —— 每 200ms 往 ScrollView 里的 TextView
+        //     灌一次几千字 = 整棵对话树重排一次，那就是老版本「边输出边闪」的根子。
+        //     实时反馈交给底部状态行（它不在 ScrollView 里，怎么刷都不牵动对话区）。
+        //   · 最终回答（kind = "text"）**不进组体** —— 它马上会作为正文显示一次，
+        //     再在组体里存一份就是同一段话出现两遍。
+        // 攒下的思考等本轮跑完一次性补上（见 paintThink）。
+        if (kind == "think") thinkLog = "思考中…\n" + text.takeLast(2400)
     }
 
     /**
@@ -2754,6 +2813,8 @@ class MainActivity : AppCompatActivity(), GameUi {
         setTextIf(statusRun, "待命")
         latestActivity = ""
         lastTail = ""
+        // 收尾把攒了一整轮的思考全文一次性补上（运行期间故意不画，见 paintThink）
+        paintThink(force = true)
         lastNotiSec = -1L
         stopGuard()
         // 本轮一结束就把会话落盘：否则 AI 的回复只在下次发送 / 退后台时才保存，
@@ -3428,9 +3489,19 @@ class MainActivity : AppCompatActivity(), GameUi {
         paintThink()
     }
 
-    /** 把 thinkLog 画进组体。收起时直接返回，一个字都不写 */
-    private fun paintThink() {
+    /**
+     * 把 thinkLog 画进组体。
+     *
+     * @param force true = 无视「运行中不画」这条限制，本轮收尾 / 用户主动点开时用。
+     *
+     * 运行期间刻意不画：每 200ms 重写一段几千字的文本 = 整棵对话树重排一次，
+     * 正是老版本「边输出边闪」的来源。实时内容由底部状态行滚动播放，
+     * 全文等跑完再一次性补上 —— 看起来一样，代价差两个数量级。
+     */
+    private fun paintThink(force: Boolean = false) {
+        if (running && !force) return
         if (!bodyExpanded) return
+        if (thinkLog.isBlank()) return
         val tv = runBody ?: return
         setTextIf(tv, thinkLog)
         if (tv.visibility != View.VISIBLE) tv.visibleIf(true)

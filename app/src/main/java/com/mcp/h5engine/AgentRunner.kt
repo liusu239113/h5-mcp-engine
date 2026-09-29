@@ -9,7 +9,8 @@ import java.io.File
  * 事件协议（界面靠前缀分流，别改前缀）：
  *   STEP:n            第 n 轮开始
  *   THINK:xxx         模型的思维链（deepseek-reasoner 之类）
- *   AI:xxx            模型说出来的一段话
+ *   AI:xxx            干活途中的过程自述（界面折进「已工作」组当一行 ✎）
+ *   AIFINAL:xxx       本轮不再调工具了，这段是交付结果（界面当正文排）
  *   TOOLRUN:[名字] 文件 一次工具调用开始（文件可空，见 toolTarget）
  *   TOOL:[名字] 摘要   一次工具调用成功
  *   TOOLFAIL:[名字] 摘要 一次工具调用失败
@@ -256,7 +257,15 @@ class AgentRunner(
             reply.reasoning?.let { onEvent("THINK:" + it) }
 
             history += ChatMsg("assistant", reply.text, toolCalls = reply.toolCalls)
-            if (!reply.text.isNullOrBlank()) onEvent("AI: ${reply.text}")
+            if (!reply.text.isNullOrBlank()) {
+                // 分开报两类文本：
+                //   AIFINAL = 这一轮不再调工具了，这就是交付给用户的结果 → 界面当正文排
+                //   AI      = 干活途中顺口说的过程，比如「我先看一下这个文件」→ 界面缩进折进
+                //             「已工作」组里当一行过程
+                // 不分开的话，中间每一句话都会变成一张独立白卡 ——
+                // 用户看到的对话就是「一句一张卡片」，而不是干活的过程。
+                onEvent(if (reply.toolCalls.isEmpty()) "AIFINAL: ${reply.text}" else "AI: ${reply.text}")
+            }
 
             if (reply.toolCalls.isEmpty()) {
                 if (wrote) onEvent("RELOAD")
