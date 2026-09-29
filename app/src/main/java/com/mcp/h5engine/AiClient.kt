@@ -926,7 +926,17 @@ class AiClient(private val cfg: ProviderConfig) {
             val blank = c == null || c === JSONObject.NULL ||
                 c.toString().replace("null", "").isBlank()
             if (!hasTc && blank) {
-                m.put("content", "（上一步的工具记录不完整，这里省略）")
+                // 兜底文案必须**可执行**。
+                // 原来写的是「（上一步的工具记录不完整，这里省略）」—— 模型读到这句话
+                // 只知道自己缺了东西，但不知道该怎么办，通常就停在这儿不动了
+                // （用户报的「老是中断任务、一两句就停」）。
+                // 现在直接告诉它：缺了就重新调一次，别停。
+                m.put(
+                    "content",
+                    "（上一步的工具调用没有拿到完整结果，可能是被中断了。" +
+                        "如果你还需要那份信息，请重新调用一次对应工具；" +
+                        "不要因为这段缺失就停止推进任务。）"
+                )
             }
         }
         return msgs

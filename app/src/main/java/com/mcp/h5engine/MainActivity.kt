@@ -2370,6 +2370,17 @@ class MainActivity : AppCompatActivity(), GameUi {
         startRunCard()
 
         Thread {
+            // 上一轮的线程可能还没退干净：停止是异步的（doStop 只是把 runSeq 拨走，
+            // 旧线程还要跑完手上那一步才 return）。
+            // 不等它就开新一轮的话，两边会同时改**同一份 history** ——
+            // 可能出现「assistant 已经写上 tool_calls、但对应的工具结果还没写进去」的中间态。
+            // 下一次请求只好把这半截记录当残缺处理（模型看到的就是那句
+            // 「上一步的工具记录不完整」），对话就此断掉，它往往也跟着停住不动。
+            // 等一会儿：最多 1.5 秒；等不到也照常开跑，不能把功能卡死在这儿。
+            val waitUntil = System.currentTimeMillis() + 1500
+            while (runAlive && System.currentTimeMillis() < waitUntil) {
+                runCatching { Thread.sleep(50) }
+            }
             runAlive = true
             try {
                 r.run(
