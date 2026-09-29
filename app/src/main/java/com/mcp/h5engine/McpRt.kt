@@ -160,6 +160,8 @@ object McpRt {
      */
     fun ensureGitrt(ctx: Context, dir: File): String? {
         val g = File(dir, "gitrt/git")
+        // 每次进入都确保 git 依赖库在 <rt> 根可见（幂等，已存在设备也补齐）
+        linkGitLibs(dir)
         // 「存在」不等于「能用」：Android 10+ 起，untrusted_app 对私有目录
         // （app_data_file）里的文件一律禁止 execve（avc denied execute_no_trans），
         // 旧版那种「脚本直接放在 gitrt 里」的做法在真机上必然 EACCES。
@@ -175,6 +177,7 @@ object McpRt {
             extractTar(tar, dir)
             tar.delete()
             linkGit(ctx, dir)
+            linkGitLibs(dir)
             null
         } catch (t: Throwable) {
             "git 释放失败：${t.message}"
@@ -204,8 +207,31 @@ object McpRt {
         val ok = runCatching { Os.symlink(launcher.absolutePath, link.absolutePath) }.isSuccess
         if (!ok) throw IllegalStateException("git 软链创建失败: " + link.absolutePath)
     }
+/**
+     * 让 git 的依赖库在 <rt> 根可见（幂等）。
+     *
+     * libhexgit.so 转交 libmuslrt.so 跑 git.bin 时，--library-path 只给了 <rt>
+     * （不含 <rt>/gitrt），而 git.bin 的依赖（libpcre2-8.so.0 / libcurl / libssl /
+     * libz / libzstd …）全躺在 <rt>/gitrt 下 —— 于是 git 一启动就报
+     * “Error loading shared library libpcre2-8.so.0: No such file or directory”。
+     *
+     * 这里把 <rt>/gitrt 下的 .so 在 <rt> 根建软链（同名已存在则跳过），musl 加载器
+     * 即可命中；不改 libhexgit.so 二进制，也不动 library-path。
+     */
+    private fun linkGitLibs(dir: File) {
+        val gitDir = File(dir, "gitrt")
+        if (!gitDir.isDirectory) return
+        gitDir.listFiles()?.forEach { f ->
+            if (f.isFile && f.name.contains(".so")) {
+                val link = File(dir, f.name)
+                if (!link.exists()) runCatching { Os.symlink(f.absolutePath, link.absolutePath) }
+            }
+        }
+    }
 
-    /** 拉起服务；返回 null 表示成功（阻塞，放子线程） */
+    /**
+     * 拉起服务；返回 null 表示成功（阻塞，放子线程）
+     */
     fun start(ctx: Context, log: (String) -> Unit): String? {
         if (running() && health()) return null
         if (!busy.compareAndSet(false, true)) return "启动中，请稍候"
