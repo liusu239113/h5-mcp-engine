@@ -3621,8 +3621,11 @@ class MainActivity : AppCompatActivity(), GameUi {
         }
     }
 
-    /** 本轮收尾小结卡：带边框，和「已工作」组同一套观感 */
-    private fun addRunDoneCard(text: String) {
+    // ⚠️ 参数不能叫 text：`TextView(this).apply { text = ... }` 里的简单名 `text`
+    // 会先命中**函数参数**（局部作用域优先于隐式接收者），而参数是 val ——
+    // 编译器直接报 Val cannot be reassigned。（addNoteRow 踩过一次，这里又踩了一次。）
+    // 规矩定死：凡是在 apply 块里给 TextView 赋值，一律用 setText(...)。
+    private fun addRunDoneCard(raw: String) {
         val card = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -3630,14 +3633,14 @@ class MainActivity : AppCompatActivity(), GameUi {
             background = roundCard(this@MainActivity, pal.card, pal.border, 10)
         }
         card.addView(TextView(this).apply {
-            text = text
+            setText(raw)
             textSize = 11.5f
             typeface = MONO
             setTextColor(pal.sub)
             maxLines = 3
             ellipsize = android.text.TextUtils.TruncateAt.END
         }, LinearLayout.LayoutParams(0, -2, 1f))
-        card.addView(iconOp("copy", "复制本轮小结") { copyToClip(text, "本轮小结") })
+        card.addView(iconOp("copy", "复制本轮小结") { copyToClip(raw, "本轮小结") })
         chatList.addView(card, LinearLayout.LayoutParams(-1, -2).apply {
             topMargin = dp(4)
             bottomMargin = dp(4)
