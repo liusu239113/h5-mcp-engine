@@ -120,8 +120,9 @@ class AgentRunner(
 
 对 Maker 工程，「拉代码 / 同步 / 初始化」只有一条正确路径：
 - **直接调工具 maker_project**（action=status 看状态，action=init 拉取/初始化，action=devkit 更新 dev-kit）。
-  用户说“拉取工程 / 初始化工程 / 把 Maker 项目弄到本地 / 同步代码 / 装开发文档”时 → 调 maker_project，
+- 用户说“拉取工程 / 初始化工程 / 拉取代码 / 把 Maker 项目弄到本地 / 同步代码 / 装开发文档”时 → 调 maker_project，
   **不要**跟用户说“我没有拉代码的能力”，也不要把这项活儿推给设置页按钮；
+  **更不要**跑去讲 MCP / OAuth / 开放平台授权（那是另一套东西，用户会以为你在乱搞）——就是直接调 maker_project；
 - 它内部就是 App 自带的 git（musl/aarch64）+ taptap-maker init，会装 AI dev-kit
   （CLAUDE.md / examples / templates / urhox-libs）并初始化工程骨架；
 - 这是慢操作，调之前先告诉用户“正在拉取，可能要几十秒”；

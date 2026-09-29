@@ -1489,6 +1489,9 @@ class MainActivity : AppCompatActivity(), GameUi {
 
     private val TOOL_OK = 0xFF3BA55D.toInt()
     private val TOOL_FAIL = 0xFFD9534F.toInt()
+    /** 给颜色套透明度（对齐 Operit 的 color.copy(alpha=…)） */
+    private fun tintA(c: Int, a: Float): Int =
+        android.graphics.Color.argb((a * 255).toInt(), android.graphics.Color.red(c), android.graphics.Color.green(c), android.graphics.Color.blue(c))
 
     /** 按工具名给图标（照 Operit 的 getToolIcon 思路：不同工具给不同图标） */
     private fun toolIconKind(name: String): String {
@@ -1517,82 +1520,131 @@ class MainActivity : AppCompatActivity(), GameUi {
     private fun addToolCardRunning(name: String) {
         val nm = if (name.isBlank()) "工具" else name
         val kind = toolIconKind(nm)
+        // 1:1 对齐 Operit CanvasToolSummaryRow：无边框、前置图标(16dp 主色0.7α) + 工具名(主色)
         val icon = ImageView(this).apply {
-            setImageDrawable(LineIcon(kind, pal.sub, dp(2).toFloat()))
+            setImageDrawable(LineIcon(kind, tintA(pal.accent, 0.7f), dp(1.6f).toFloat()))
         }
         val title = TextView(this).apply {
             text = nm
             textSize = 12.5f
-            setTextColor(pal.text)
-            typeface = Typeface.DEFAULT_BOLD
-            setPadding(dp(6), 0, 0, 0)
-        }
-        val body = TextView(this).apply {
-            text = "运行中…"
-            textSize = 11.5f
-            setTextColor(pal.faint)
-            setPadding(dp(6), 0, 0, 0)
+            setTextColor(pal.accent)
+            typeface = MEDIUM
             maxLines = 1
         }
         val row = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(12), dp(7), dp(12), dp(7))
-            background = roundCard(this@MainActivity, pal.cardAlt, pal.border, 12)
+            setPadding(dp(4), dp(3), dp(16), dp(3))
             addView(icon, LinearLayout.LayoutParams(dp(16), dp(16)))
-            addView(title)
-            addView(body, LinearLayout.LayoutParams(0, -2, 1f))
+            addView(title, LinearLayout.LayoutParams(-2, -2).apply { leftMargin = dp(8) })
         }
         chatList.addView(row, LinearLayout.LayoutParams(-2, -2).apply {
-            topMargin = dp(3)
-            leftMargin = dp(6)
-            rightMargin = dp(40)
+            topMargin = dp(2)
+            leftMargin = dp(8)
         })
         scrollChatToBottom()
         curToolCard = row
         curToolIcon = icon
         curToolIconKind = kind
-        curToolText = body
     }
 
     /** 工具结束：图标转绿/红，摘要取前 200 字；点卡片看全文详情（可复制）——对齐 Operit 的 ToolResultDisplay */
     private fun updateToolCard(ok: Boolean, name: String, head: String, full: String) {
-        val c = if (ok) TOOL_OK else TOOL_FAIL
-        runCatching { curToolIcon?.setImageDrawable(LineIcon(curToolIconKind, c, dp(2).toFloat())) }
+        val t = if (name.isBlank()) "工具" else name
         val summary = when {
-            head.isNotBlank() -> head.take(200)
+            head.isNotBlank() -> head
             ok -> "执行成功"
             else -> "执行失败"
+        }.replace("\n", " ").trim()
+        // 1:1 对齐 Operit CanvasToolResultRow：缩进24dp、└箭头(主色0.7α) + 状态图标 + 单行摘要 + 复制
+        val arrow = TextView(this).apply {
+            text = "└"
+            textSize = 13f
+            setTextColor(tintA(pal.accent, 0.7f))
+            typeface = MEDIUM
         }
-        runCatching {
-            curToolText?.text = summary
-            curToolText?.setTextColor(if (ok) pal.faint else TOOL_FAIL)
+        val status = TextView(this).apply {
+            text = if (ok) "✓" else "✕"
+            textSize = 12f
+            setTextColor(if (ok) TOOL_OK else TOOL_FAIL)
+            typeface = Typeface.DEFAULT_BOLD
         }
-        val card = curToolCard
-        val t = if (name.isBlank()) "工具" else name
-        if (card != null) card.setOnClickListener {
-            showTextDetail(t + if (ok) " · 结果" else " · 失败", full.ifBlank { summary })
+        val body = TextView(this).apply {
+            text = summary
+            textSize = 11.5f
+            setTextColor(if (ok) pal.text else pal.errText)
+            maxLines = 1
+            ellipsize = android.text.TextUtils.TruncateAt.END
         }
+        val copy = ImageView(this).apply {
+            setImageDrawable(LineIcon("copy", tintA(pal.accent, 0.6f), dp(1.4f).toFloat()))
+            setOnClickListener { copyToClip(full.ifBlank { summary }, "$t 结果") }
+        }
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(24), dp(2), dp(16), dp(2))
+            addView(arrow, LinearLayout.LayoutParams(-2, -2).apply { rightMargin = dp(6) })
+            addView(status, LinearLayout.LayoutParams(-2, -2).apply { rightMargin = dp(8) })
+            addView(body, LinearLayout.LayoutParams(0, -2, 1f))
+            addView(copy, LinearLayout.LayoutParams(dp(14), dp(14)).apply { leftMargin = dp(8) })
+        }
+        row.setOnClickListener { showTextDetail(t, full.ifBlank { summary }, ok) }
+        chatList.addView(row, LinearLayout.LayoutParams(-1, -2).apply {
+            topMargin = dp(1)
+            leftMargin = dp(6)
+        })
+        scrollChatToBottom()
         curToolCard = null
         curToolIcon = null
-        curToolText = null
     }
 
     /** 工具全文详情弹窗：可滚动 + 可选中 + 一键复制 */
-    private fun showTextDetail(title: String, content: String) {
+    private fun showTextDetail(title: String, content: String, ok: Boolean = true) {
+        val t = if (title.isBlank()) "工具" else title
+        // 1:1 对齐 Operit ToolResultDetailDialog：标题行(状态图标+名称+复制) / 分隔线 / 圆角可滚内容区
+        val root = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(16), dp(14), dp(16), dp(12))
+        }
+        val head = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        head.addView(TextView(this).apply {
+            setText(if (ok) "✓" else "✕")
+            textSize = 16f
+            setTextColor(if (ok) TOOL_OK else TOOL_FAIL)
+            typeface = Typeface.DEFAULT_BOLD
+        }, LinearLayout.LayoutParams(-2, -2).apply { rightMargin = dp(10) })
+        head.addView(TextView(this).apply {
+            setText(t + if (ok) "执行成功" else "执行失败")
+            textSize = 15f
+            setTextColor(pal.text)
+            typeface = Typeface.DEFAULT_BOLD
+        }, LinearLayout.LayoutParams(0, -2, 1f))
+        head.addView(ImageView(this).apply {
+            setImageDrawable(LineIcon("copy", pal.accent, dp(1.6f).toFloat()))
+            setOnClickListener { copyToClip(content, "工具结果") }
+        }, LinearLayout.LayoutParams(dp(20), dp(20)))
+        root.addView(head)
+        root.addView(android.view.View(this).apply { setBackgroundColor(pal.border) },
+            LinearLayout.LayoutParams(-1, dp(1)).apply { topMargin = dp(12); bottomMargin = dp(12) })
         val tv = TextView(this).apply {
             setText(content)
             textSize = 12.5f
             setTextColor(pal.text)
             setTextIsSelectable(true)
-            setPadding(dp(16), dp(10), dp(16), dp(10))
+            setPadding(dp(12), dp(12), dp(12), dp(12))
         }
-        val sv = ScrollView(this).apply { addView(tv) }
+        val sv = ScrollView(this).apply {
+            background = roundCard(this@MainActivity, pal.cardAlt, pal.cardAlt, 8, 0)
+            addView(tv)
+        }
+        root.addView(sv, LinearLayout.LayoutParams(-1, dp(300)))
         AlertDialog.Builder(themed())
-            .setTitle(title)
-            .setView(sv)
-            .setPositiveButton("复制") { _, _ -> copyToClip(content, "工具结果") }
-            .setNegativeButton("关闭", null)
+            .setView(root)
+            .setPositiveButton("关闭", null)
             .show()
     }
 
