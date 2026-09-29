@@ -326,6 +326,8 @@ class MainActivity : AppCompatActivity(), GameUi {
 
     /** 是否跟随到底部：用户往上翻就停下（免得边看边被拽走），滑回底部附近自动恢复 */
     private var stickBottom = true
+    /** 用户主动上滑阅读：为 true 时忽略一切自动滚动，直到他回到底部或点「回到底部」。 */
+    private var userPinned = false
     private var scrollBtn: ImageView? = null
     private var chatWrap: FrameLayout? = null
 
@@ -834,6 +836,18 @@ class MainActivity : AppCompatActivity(), GameUi {
             addView(chatList)
             // 手指滑动时实时判断「还在不在底部」
             setOnScrollChangeListener { _, _, _, _, _ -> updateScrollBtn() }
+            // 用户一碰、且不在最底，就立刻「钉住」：此后流式刷新不再自动拽底，
+            // 直到他滑回底部或点右下角「回到底部」。这样边看历史边被拉走的问题消失。
+            setOnTouchListener { _, e ->
+                when (e.actionMasked) {
+                    android.view.MotionEvent.ACTION_DOWN,
+                    android.view.MotionEvent.ACTION_MOVE -> {
+                        val gap = chatList.height - height - scrollY
+                        if (gap > dp(8)) { userPinned = true; stickBottom = false }
+                    }
+                }
+                false
+            }
         }
 
         // 对话区外面套一层 FrameLayout：用来把「回到底部」悬浮按钮叠在右下角
@@ -847,6 +861,7 @@ class MainActivity : AppCompatActivity(), GameUi {
                 visibility = View.GONE
                 setOnClickListener {
                     stickBottom = true
+                    userPinned = false
                     scrollChatToBottom(true)
                 }
             }
@@ -1057,7 +1072,7 @@ class MainActivity : AppCompatActivity(), GameUi {
             if (fromUser) leftMargin = dp(46) else rightMargin = dp(30)
         })
         // 自己发的消息永远贴底；AI 的消息只在用户本来就在底部时跟随（免得看一半被拽走）
-        if (fromUser) stickBottom = true
+        if (fromUser) { stickBottom = true; userPinned = false }
         scrollChatToBottom(fromUser)
     }
 
@@ -1691,7 +1706,8 @@ class MainActivity : AppCompatActivity(), GameUi {
      */
     private fun scrollChatToBottom(force: Boolean = false) {
         if (!::chatList.isInitialized || !::chatScroll.isInitialized) return
-        if (!force && !stickBottom) return
+        if (force) userPinned = false
+        if (!force && (userPinned || !stickBottom)) return
         if (scrollPending) return
         scrollPending = true
         chatList.post {
@@ -1709,6 +1725,8 @@ class MainActivity : AppCompatActivity(), GameUi {
         if (!::chatList.isInitialized || !::chatScroll.isInitialized) return
         val gap = chatList.height - chatScroll.height - chatScroll.scrollY
         stickBottom = gap <= dp(80)
+        // 真正回到底部（8dp 内）才解除「用户钉住」——避免只上滑一点点就被重新拽下去。
+        if (gap <= dp(8)) userPinned = false
         scrollBtn?.visibility = if (stickBottom) View.GONE else View.VISIBLE
     }
 
@@ -2124,7 +2142,7 @@ class MainActivity : AppCompatActivity(), GameUi {
         }
         // 自动滚动也要节流：原来每 120ms 滚一次 → 屏幕「一闪一闪」。
         // 现在最多 450ms 一次，且只在用户本来就贴着底部时才滚。
-        if (now - lastAutoScrollAt > 450 && stickBottom) {
+        if (now - lastAutoScrollAt > 450 && stickBottom && !userPinned) {
             lastAutoScrollAt = now
             scrollChatToBottom()
         }
@@ -2172,6 +2190,9 @@ class MainActivity : AppCompatActivity(), GameUi {
         latestActivity = ""
         lastNotiSec = -1L
         stopGuard()
+        // 本轮一结束就把会话落盘：否则 AI 的回复只在下次发送 / 退后台时才保存，
+        // 期间若被杀进程 / 覆盖安装，这段记录就没了（用户反馈的「更新后记录消失」）。
+        runCatching { persistSessions() }
         if (runWrote) ensurePreviewFresh()
         // 运行期间排队的消息：这轮结束后自动发下一条（一次只发一条，避免连环堆积）
         if (msgQueue.isNotEmpty()) {
