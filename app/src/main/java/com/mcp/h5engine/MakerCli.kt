@@ -74,8 +74,16 @@ object MakerCli {
         val env = pb.environment()
         env["HOME"] = h.absolutePath
         env["TMPDIR"] = h.absolutePath
-        env["PATH"] = dir.absolutePath
+        env["PATH"] = dir.absolutePath + ":" + File(dir, "gitrt").absolutePath
         env["TAPTAP_MAKER_HOME"] = home(ctx).absolutePath
+        // ---- 自带 git（见 gitrt/git 的 wrapper）：Maker 的 init / clone / push 都要真 git ----
+        env["HEXORA_RT"] = dir.absolutePath
+        env["HEXORA_LD"] = ld.absolutePath
+        env["GIT_EXEC_PATH"] = File(dir, "gitrt/git-core").absolutePath
+        env["GIT_SSL_CAINFO"] = File(dir, "gitrt/cacert.pem").absolutePath
+        env["GIT_TEMPLATE_DIR"] = File(dir, "gitrt/templates").absolutePath
+        env["GIT_TERMINAL_PROMPT"] = "0"
+        env["GIT_CONFIG_NOSYSTEM"] = "1"
 
         val p = pb.start()
         runCatching {

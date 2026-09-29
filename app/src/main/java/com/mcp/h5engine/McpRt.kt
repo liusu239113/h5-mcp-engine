@@ -122,10 +122,38 @@ object McpRt {
             tar.delete()
             stampFile(ctx).writeText(STAMP)
             File(dir, "node").setExecutable(true, false)
+            ensureGitrt(ctx, dir)
             log("运行时就绪")
             null
         } catch (t: Throwable) {
             "解包失败：${t.message}"
+        }
+    }
+
+    /**
+     * 确保「自带 git」已释放到 <rt>/gitrt。
+     *
+     * 为什么这么做：Maker CLI 的 init / clone / push 全是 spawnSync("git", …)，
+     * 而手机上根本没有 git。这里塞的是一套 Alpine 的 musl/aarch64 git，
+     * 由 libmuslrt.so 加载（Android 上没有 /lib/ld-musl-aarch64.so.1），
+     * 外面套一层 shell wrapper（gitrt/git），所以能被当成普通 git 直接调用。
+     *
+     * 返回 null 表示就绪。
+     */
+    fun ensureGitrt(ctx: Context, dir: File): String? {
+        val g = File(dir, "gitrt/git")
+        if (g.isFile) return null
+        return try {
+            val tar = File(dir, "gitrt.tar")
+            ctx.assets.open("gitrt.tar").use { ins ->
+                FileOutputStream(tar).use { ins.copyTo(it, 1 shl 16) }
+            }
+            extractTar(tar, dir)
+            tar.delete()
+            g.setExecutable(true, false)
+            null
+        } catch (t: Throwable) {
+            "git 释放失败：${t.message}"
         }
     }
 
@@ -307,7 +335,16 @@ object McpRt {
             val env = pb.environment()
             env["HOME"] = home.absolutePath
             env["TMPDIR"] = home.absolutePath
-            env["PATH"] = dir.absolutePath
+            env["PATH"] = dir.absolutePath + ":" + File(dir, "gitrt").absolutePath
+            // ---- 自带 git（musl/aarch64）：Maker 的 init / clone / push 全是 spawnSync("git") ----
+            // 手机上没有 git，靠 <rt>/gitrt 那套「loader 前缀 + shell wrapper」顶上。
+            env["HEXORA_RT"] = dir.absolutePath
+            env["HEXORA_LD"] = ld.absolutePath
+            env["GIT_EXEC_PATH"] = File(dir, "gitrt/git-core").absolutePath
+            env["GIT_SSL_CAINFO"] = File(dir, "gitrt/cacert.pem").absolutePath
+            env["GIT_TEMPLATE_DIR"] = File(dir, "gitrt/templates").absolutePath
+            env["GIT_TERMINAL_PROMPT"] = "0"
+            env["GIT_CONFIG_NOSYSTEM"] = "1"
             // Maker 自己的家目录也塞私有目录，免得它往沙箱外写
             env["TAPTAP_MAKER_HOME"] = File(home, "maker").apply { mkdirs() }.absolutePath
             // UI 风格包（预制主题）：每次启动从 assets 同步一份到 rt 目录 —— 主题改了，
