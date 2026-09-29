@@ -1820,34 +1820,38 @@ class MainActivity : AppCompatActivity(), GameUi {
      * 缩进折进「已工作」组里当一行 ✎，**不单独占一张气泡** ——
      * 一句一张白卡正是用户说的「还是卡片那种」。过程归过程，结论归结论。
      */
-    private fun addNoteRow(text: String) {
-        val t = text.trim().replace('\n', ' ')
-        if (t.isEmpty()) return
+    // ⚠️ 参数不能叫 text：在 `TextView(this).apply { text = ... }` 里，简单名 `text`
+    // 会先命中**函数参数**（局部作用域优先于隐式接收者），而参数是 val ——
+    // 编译器直接报 Val cannot be reassigned。所以这里用 setText(...) 且参数改名。
+    private fun addNoteRow(raw: String) {
+        val full = raw.trim()
+        if (full.isEmpty()) return
         val rows = toolWrap
         if (rows == null) {
             // 组还没建起来（理论上不该发生）：退回气泡，至少别把内容丢了
-            addBubble(text.trim(), false)
+            addBubble(full, false)
             return
         }
+        val oneLine = full.replace('\n', ' ')
         val row = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             setPadding(0, dp(4), 0, dp(4))
             isClickable = true
         }
         row.addView(TextView(this).apply {
-            text = "✎"
+            setText("✎")
             textSize = 11f
             setTextColor(pal.accent)
         }, LinearLayout.LayoutParams(-2, -2).apply { rightMargin = dp(7) })
         row.addView(TextView(this).apply {
-            text = t
+            setText(oneLine)
             textSize = 11.5f
             setTextColor(pal.text)
             maxLines = 2
             ellipsize = android.text.TextUtils.TruncateAt.END
         }, LinearLayout.LayoutParams(0, -2, 1f))
         // 点一下看全文（复用工具详情的弹窗，能选中、能复制）
-        row.setOnClickListener { showTextDetail("过程自述", text.trim(), true) }
+        row.setOnClickListener { showTextDetail("过程自述", full, true) }
         rows.addView(row, LinearLayout.LayoutParams(-1, -2))
         scrollChatToBottom()
     }
