@@ -1071,9 +1071,9 @@ class MainActivity : AppCompatActivity(), GameUi {
             bottomMargin = dp(5)
             if (fromUser) leftMargin = dp(46) else rightMargin = dp(30)
         })
-        // 自己发的消息永远贴底；AI 的消息只在用户本来就在底部时跟随（免得看一半被拽走）
+        // 自己发的消息永远贴底；AI 的消息在用户没主动上滑时，也一路贴着底部向下长。
         if (fromUser) { stickBottom = true; userPinned = false }
-        scrollChatToBottom(fromUser)
+        scrollChatToBottom(fromUser || !userPinned)
     }
 
     /**
@@ -1712,12 +1712,26 @@ class MainActivity : AppCompatActivity(), GameUi {
         scrollPending = true
         chatList.post {
             scrollPending = false
-            chatScroll.fullScroll(View.FOCUS_DOWN)
+            scrollChatToBottomNow()
+            // 新加的 View / 长文本这一帧可能还没测量完，下一帧再对一次；
+            // 但只在「用户没主动上滑」时补，避免和用户的手打架。
             chatList.post {
-                chatScroll.fullScroll(View.FOCUS_DOWN)
-                updateScrollBtn()
+                if (!userPinned && stickBottom) scrollChatToBottomNow()
             }
         }
+    }
+
+    /**
+     * 真正滚到底。
+     *
+     * 原来用 fullScroll(FOCUS_DOWN)：它会改焦点、触发整棵视图树重新测量，
+     * 而流式输出时每秒要被调好几次 —— 表现出来就是「屏幕一闪一闪」。
+     * 现在直接算目标偏移 scrollTo，稳定、不闪，也不会被焦点策略带偏。
+     */
+    private fun scrollChatToBottomNow() {
+        val target = (chatList.height - chatScroll.height).coerceAtLeast(0)
+        if (chatScroll.scrollY != target) chatScroll.scrollTo(0, target)
+        updateScrollBtn()
     }
 
     /** 离底 80dp 内算「贴底」；据此决定新消息是否自动跟随、以及悬浮按钮是否出现 */
@@ -1727,7 +1741,11 @@ class MainActivity : AppCompatActivity(), GameUi {
         stickBottom = gap <= dp(80)
         // 真正回到底部（8dp 内）才解除「用户钉住」——避免只上滑一点点就被重新拽下去。
         if (gap <= dp(8)) userPinned = false
-        scrollBtn?.visibility = if (stickBottom) View.GONE else View.VISIBLE
+        val sb = scrollBtn
+        val want = if (stickBottom) View.GONE else View.VISIBLE
+        // 只在真的要变的时候才改可见性：每次滚动都设一遍会触发布局，
+        // 表现出来就是右下角按钮和内容一起「闪」。
+        if (sb != null && sb.visibility != want) sb.visibility = want
     }
 
     private fun updateAttachInfo() {
@@ -2087,6 +2105,8 @@ class MainActivity : AppCompatActivity(), GameUi {
         bodyExpanded = true
         userCollapsedThinking = false
         latestActivity = ""
+        // 新一轮开始：用户没主动上滑的话，内容默认贴着底部往下长
+        if (!userPinned) stickBottom = true
         curToolCard = null
         curToolIcon = null
         curToolText = null
@@ -2124,11 +2144,13 @@ class MainActivity : AppCompatActivity(), GameUi {
         val b = runBody ?: return
         if (text.isEmpty()) return
         val now = SystemClock.elapsedRealtime()
-        if (now - lastProgressAt < 120) return
+        // 刷新频率从 120ms 放宽到 200ms，并且只保留尾部 2400 字：
+        // 每次 setText 都会让这个 TextView 重新排版，字越多越贵，越快越像「闪」。
+        if (now - lastProgressAt < 200) return
         lastProgressAt = now
         val head = if (kind == "think") "思考中…" else "正在写回答…"
         // 内容没变就别重新 setText —— TextView 被设成同样的文本也会重排，看着就是闪
-        val painted = head + "\n" + text.takeLast(6000)
+        val painted = head + "\n" + text.takeLast(2400)
         if (painted != b.text?.toString()) b.text = painted
         latestActivity = if (kind == "think") "思考中（已 " + text.length + " 字）"
         else "写回答中（已 " + text.length + " 字）"
@@ -2746,7 +2768,7 @@ class MainActivity : AppCompatActivity(), GameUi {
         val tv = runBody ?: return
         val cur = tv.text.toString()
         val next = if (cur.isEmpty()) line else "$cur\n$line"
-        tv.text = if (next.length > 6000) next.takeLast(6000) else next
+        tv.text = if (next.length > 3000) next.takeLast(3000) else next
     }
 
     private fun scheduleFlush() {
@@ -2981,16 +3003,43 @@ class MainActivity : AppCompatActivity(), GameUi {
         return st
     }
 
+    private var previewDirty = false
+    private val previewReloadTask = Runnable { runCatching { reloadGame() } }
+
     /** 切到预览页时调用：项目换了或文件变了才重载，不再每次进来都白一下 */
     private fun ensurePreviewFresh() {
         val dir = File(gameRoot, currentGame)
         val idx = File(dir, "index.html")
         val stamp = dirStamp(dir)
-        if (currentGame == lastLoadedGame && stamp == lastLoadedStamp) return
+        if (currentGame == lastLoadedGame && stamp == lastLoadedStamp && !previewDirty) return
+        if (!idx.exists()) {
+            lastLoadedGame = currentGame
+            lastLoadedStamp = stamp
+            addSystemLine("「$currentGame」还没有 index.html，先让 AI 构建一次")
+            return
+        }
+        // 人不在预览页就别重载：藏起来的 WebView 一样会白屏重载，纯属浪费。
+        // 记个脏标记，切回预览页时再刷。
+        if (activeTab != 1) {
+            previewDirty = true
+            return
+        }
         lastLoadedGame = currentGame
         lastLoadedStamp = stamp
-        if (!idx.exists()) addSystemLine("「$currentGame」还没有 index.html，先让 AI 构建一次")
-        reloadGame()
+        schedulePreviewReload()
+    }
+
+    /**
+     * 预览重载去抖。
+     *
+     * AI 一轮里可能写好几个文件，每写一次就 reload() 的话，画面就是
+     * 「白一下、再白一下」——看着疯狂闪屏。合并成「最后一次改动后 900ms 再刷」，
+     * 一轮最多闪一次，而且刷出来的是最终结果，正好就是「构建完能在预览里看见」。
+     */
+    private fun schedulePreviewReload() {
+        previewDirty = false
+        main.removeCallbacks(previewReloadTask)
+        main.postDelayed(previewReloadTask, 900)
     }
 
     private fun attachScreenshot() {
