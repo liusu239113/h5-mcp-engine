@@ -107,6 +107,11 @@ object McpRt {
 
     /** 解包运行时（阻塞，必须放子线程）。返回 null 表示成功 */
     fun extract(ctx: Context, log: (String) -> Unit): String? {
+        val gdir = rtDir(ctx)
+        // git（musl/aarch64）是后加的：老设备 hexrt 早就解包过（ready=true），
+        // ensureGitrt 挂在下面「首次解压」分支里就永远轮不到 —— 症状就是
+        // init 一直报 spawnSync git ENOENT。所以这里先单独补一步（幂等）。
+        if (gdir.isDirectory) ensureGitrt(ctx, gdir)
         if (ready(ctx)) return null
         return try {
             val dir = rtDir(ctx)
@@ -317,6 +322,8 @@ object McpRt {
                 }
             }
             stopMaker()
+            // 兜底：每次起 Maker 都确认 git 已释放（幂等，存在就直接返回）。
+            runCatching { ensureGitrt(ctx, dir) }
             val home = File(dir, "home").apply { mkdirs() }
             writeDnsMap(ctx)
             val pb = ProcessBuilder(

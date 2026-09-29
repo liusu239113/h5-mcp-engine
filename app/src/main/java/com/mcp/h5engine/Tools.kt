@@ -297,7 +297,17 @@ class EngineTools(private val ui: GameUi, private val root: File) {
             fn("ad_guide",
                 "【接广告必调】一次给全：TapTap 激励视频官方契约 + adkit.js 模板位置 + 八条硬纪律 + 验收清单。" +
                     "用户只要提到广告 / 激励视频 / 发奖 / 变现，先调它，别凭印象写，更不许用「模拟广告」糊过去",
-                "{}", emptyList())
+                "{}", emptyList()),
+            fn("maker_project",
+                "【Maker（UrhoX）工程必调】管理本地 Maker 工程，不用用户去设置页点任何按钮。" +
+                    "action=status 先看状态（会告诉你自带 git 是否就绪、工程里到底有什么）；" +
+                    "action=init 拉取/初始化工程（会装 AI dev-kit：CLAUDE.md / examples / templates / urhox-libs，" +
+                    "并 clone 远端工程；远端为空时就得到一个可开发的骨架）；" +
+                    "action=devkit 更新 dev-kit。" +
+                    "用户说「拉取工程 / 初始化工程 / 把 Maker 项目弄到本地 / 装开发文档」时用它。" +
+                    "注意：这是个较慢的操作（可能要几十秒到几分钟），调用前先告诉用户你在干什么。",
+                """{"action":{"type":"string","description":"status=看状态；init=拉取/初始化工程（装dev-kit）；devkit=更新dev-kit"},"app_id":{"type":"string","description":"可选。Maker app id；不填则让 CLI 列出应用"}}""",
+                listOf("action"))
         )
     }
 
@@ -545,6 +555,65 @@ class EngineTools(private val ui: GameUi, private val root: File) {
             }
         }
 
+        // Maker 工程：拉取 / 初始化 / dev-kit。全走 App 本体的 MakerCli（AI 自己没有 exec 通道），
+        // 自带 git 随运行时释放，所以 taptap-maker init 能真正跑起来。
+        "maker_project" -> {
+            val c = ctxRef
+            if (c == null) {
+                ToolResult("App 上下文不可用，重启一次 App 再试")
+            } else {
+                val act = a.optString("action", "status").lowercase()
+                val proj = root
+                val dir = McpRt.rtDir(c)
+                val gitBin = File(dir, "gitrt/git")
+                when (act) {
+                    "init", "devkit" -> {
+                        runCatching { McpRt.ensureGitrt(c, dir) }
+                        if (!gitBin.isFile) {
+                            ToolResult("❌ 自带 git 还没释放（" + gitBin.absolutePath + "）。重启一次 App 会自动释放，然后再让我拉取。")
+                        } else {
+                            val cmd = if (act == "init") {
+                                val id = a.optString("app_id", "").trim()
+                                if (id.isEmpty()) listOf("init", "--target-dir", proj.absolutePath, "--skip-mcp-install")
+                                else listOf("init", "--target-dir", proj.absolutePath, "--skip-mcp-install", "--app-id", id)
+                            } else {
+                                listOf("dev-kit", "update", "--target-dir", proj.absolutePath)
+                            }
+                            val r = MakerCli.run(c, cmd, null, 300_000, proj)
+                            ToolResult(
+                                (if (r.ok) "✅ " else "❌ ") + "taptap-maker " + cmd.joinToString(" ") +
+                                    "
+工程：" + proj.absolutePath + "
+
+" + r.output.takeLast(3000)
+                            )
+                        }
+                    }
+                    else -> {
+                        val sb = StringBuilder()
+                        sb.append("工程目录：").append(proj.absolutePath).append("
+")
+                        sb.append("自带 git：").append(if (gitBin.isFile) "已就绪" else "未释放（重启 App 后自动释放）").append("
+")
+                        sb.append(".project/project.json：").append(File(proj, ".project/project.json").isFile).append("
+")
+                        sb.append(".maker-mcp/：").append(File(proj, ".maker-mcp").isDirectory).append("
+")
+                        sb.append("urhox-libs/（dev-kit）：").append(File(proj, "urhox-libs").isDirectory).append("
+")
+                        sb.append("CLAUDE.md：").append(File(proj, "CLAUDE.md").isFile).append("
+")
+                        sb.append("scripts/：").append(File(proj, "scripts").isDirectory).append("
+")
+                        sb.append("index.html：").append(File(proj, "index.html").isFile).append("
+")
+                        sb.append("是 git 仓库：").append(File(proj, ".git").isDirectory).append("
+")
+                        ToolResult(sb.toString())
+                    }
+                }
+            }
+        }
         // Maker 云能力授权：AI 自己就能把授权链接递给用户，不用用户去设置页翻。
         // 这是内置工具，不受 MCP 准入开关限制 —— 否则「需要授权」这件事它连说都说不出来。
         "maker_auth" -> {

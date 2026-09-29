@@ -30,6 +30,9 @@ object McpBoot {
             null
         } else {
             var ok = true
+            // git（musl/aarch64）是后加的：老设备 hexrt 早就解包过（ready=true），
+            // McpRt.extract 整段会被跳过 —— 所以这里单独补一步（幂等，存在就直接返回）。
+            runCatching { McpRt.ensureGitrt(ctx, McpRt.rtDir(ctx)) }
             if (!McpRt.ready(ctx)) {
                 log("MCP：首次运行，正在释放内置运行时（约 60MB，只做一次）…")
                 ok = McpRt.extract(ctx, log) == null

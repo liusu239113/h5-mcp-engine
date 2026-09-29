@@ -4274,43 +4274,7 @@ makerRow1.addView(ghostBtnOf(ctx, pal, "扫码登录").apply {
         }, LinearLayout.LayoutParams(-2, -2))
         col.addView(makerRow2, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(8) })
 
-        // ---- Maker （UrhoX）工程：初始化 / 拉取 / AI dev-kit ----
-        // 这一排以前是**不可能成功**的：Maker CLI 的 init 第一件事就是 ensureGitAvailable()，
-        // 而安卓沙箱里根本没有 git。现在 App 自带了 musl/aarch64 git（随运行时释放到 <rt>/gitrt），
-        // init 能真正跑起来 —— 也就能把 Maker 工程 clone 到本地了。
-        val makerRow3 = LinearLayout(ctx).apply { orientation = LinearLayout.HORIZONTAL }
-        makerRow3.addView(ghostBtnOf(ctx, pal, "初始化/拉取工程").apply {
-            setOnClickListener {
-                val et = input("Maker app-id（留空 = 让 CLI 列出应用让你选）", "")
-                val box = LinearLayout(ctx).apply {
-                    orientation = LinearLayout.VERTICAL
-                    setPadding(dp(16), dp(6), dp(16), 0)
-                }
-                box.addView(et)
-                android.app.AlertDialog.Builder(this@MainActivity)
-                    .setTitle("拉取 Maker 工程（当前：" + currentGame + "）")
-                    .setView(box)
-                    .setPositiveButton("开始") { _, _ ->
-                        val id = et.text.toString().trim()
-                        val proj = File(gameRoot, currentGame).absolutePath
-                        val cmd = if (id.isEmpty()) {
-                            listOf("init", "--target-dir", proj, "--skip-mcp-install")
-                        } else {
-                            listOf("init", "--target-dir", proj, "--skip-mcp-install", "--app-id", id)
-                        }
-                        makerRun(cmd, null, "初始化 / 拉取 Maker 工程")
-                    }
-                    .setNegativeButton("取消", null)
-                    .show()
-            }
-        }, LinearLayout.LayoutParams(-2, -2).apply { rightMargin = dp(8) })
-        makerRow3.addView(ghostBtnOf(ctx, pal, "更新 AI dev-kit").apply {
-            setOnClickListener {
-                val proj = File(gameRoot, currentGame).absolutePath
-                makerRun(listOf("dev-kit", "update", "--target-dir", proj), null, "更新 AI dev-kit")
-            }
-        }, LinearLayout.LayoutParams(-2, -2))
-        col.addView(makerRow3, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(8) })
+
 
         col.addView(makerOut, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(8) })
 
