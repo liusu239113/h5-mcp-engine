@@ -18,6 +18,12 @@ enum class ThemeMode { LIGHT, DARK, AUTO }
 val MEDIUM: Typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
 
 /**
+ * 等宽字体：模型名、路径、轮数、token 这类「技术信息」用它。
+ * 编辑器观感有一半来自这个 —— 数字对齐、宽度固定，一眼就知道这是「工程视图」而不是聊天 App。
+ */
+val MONO: Typeface = Typeface.create("monospace", Typeface.NORMAL)
+
+/**
  * 配色口径：中性纸感底 + 纯白卡面 + 一道发丝级描边 + 唯一强调色（深松石绿）。
  * 不用渐变、不用高饱和色块、不用表情符号：
  * 质感靠字距、留白、细描边和克制的对比度来做。
@@ -44,7 +50,15 @@ data class Palette(
     val codeText: Int,
     val navBg: Int,
     val navActive: Int,
-    val navIdle: Int
+    val navIdle: Int,
+    /** 底部状态栏（对齐游戏编辑器 / IDE 底部那条）：底色 + 文字 */
+    val statusBg: Int,
+    val statusFg: Int,
+    /** 次强调色：只给「技术信息」用（模型名、路径、轮数），和主强调色区分开 */
+    val accent2: Int,
+    /** 工具调用组卡的底色 / 描边（比普通卡片再低一档，不抢正文） */
+    val groupBg: Int,
+    val groupBorder: Int
 ) {
     companion object {
         val LIGHT = Palette(
@@ -69,7 +83,12 @@ data class Palette(
             codeText = 0xFF5A5A57.toInt(),
             navBg = 0xFFFFFFFF.toInt(),
             navActive = 0xFF12695C.toInt(),
-            navIdle = 0xFF8E8E8A.toInt()
+            navIdle = 0xFF8E8E8A.toInt(),
+            statusBg = 0xFF12695C.toInt(),
+            statusFg = 0xFFEAF4F2.toInt(),
+            accent2 = 0xFF2E6BE6.toInt(),
+            groupBg = 0xFFF7F8F7.toInt(),
+            groupBorder = 0xFFE7E8E6.toInt()
         )
 
         val DARK = Palette(
@@ -94,7 +113,12 @@ data class Palette(
             codeText = 0xFFAEB0B2.toInt(),
             navBg = 0xFF141516.toInt(),
             navActive = 0xFF4FCFB4.toInt(),
-            navIdle = 0xFF85858A.toInt()
+            navIdle = 0xFF85858A.toInt(),
+            statusBg = 0xFF14302C.toInt(),
+            statusFg = 0xFF7FE3CD.toInt(),
+            accent2 = 0xFF6FA8FF.toInt(),
+            groupBg = 0xFF141516.toInt(),
+            groupBorder = 0xFF232527.toInt()
         )
     }
 }

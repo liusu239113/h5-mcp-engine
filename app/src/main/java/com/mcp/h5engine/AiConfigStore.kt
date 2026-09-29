@@ -61,6 +61,62 @@ class AiConfigStore(ctx: Context) {
             sp.edit().putString("provider", v).apply()
         }
 
+    // ==================== 默认配置 ====================
+
+    /**
+     * 「默认配置」= 冷启动时用哪家 + 哪个模型。
+     *
+     * 和 providerId 是两件事：providerId 是**当下**在用的（底部胶囊随手切，切了就一直用），
+     * 默认配置是**下次打开**用哪个。用户要的就是这个 —— 随手换来换去试模型，
+     * 但每次开 App 都从自己认准的那个开始，而不是停在昨天试错的那个上。
+     *
+     * 空串表示用户还没显式设过：这时默认配置 = 当前配置，行为跟老版本一致。
+     */
+    var defaultProviderId: String
+        get() = sp.getString("def_provider", "") ?: ""
+        set(v) {
+            sp.edit().putString("def_provider", v.trim()).apply()
+        }
+
+    var defaultModel: String
+        get() = sp.getString("def_model", "") ?: ""
+        set(v) {
+            sp.edit().putString("def_model", v.trim()).apply()
+        }
+
+    /** 用户显式设过默认配置没有 */
+    fun hasDefault(): Boolean = defaultProviderId.isNotBlank()
+
+    /** 把「这家 + 这个模型」钉成默认配置 */
+    fun markAsDefault(pid: String, model: String) {
+        defaultProviderId = pid
+        defaultModel = model
+    }
+
+    /** 这一对是不是当前的默认配置（底部列表里打钩用） */
+    fun isDefaultPair(pid: String, model: String): Boolean =
+        defaultProviderId == pid && defaultModel == model
+
+    /** 展示用：默认配置指向的那家厂商 / 那个模型（没设过就跟着当前走） */
+    fun defaultProviderOrCurrent(): String = defaultProviderId.ifBlank { providerId }
+
+    fun defaultModelOrCurrent(): String {
+        val pid = defaultProviderOrCurrent()
+        return defaultModel.ifBlank { modelOf(pid) }
+    }
+
+    /**
+     * 冷启动时把「当前配置」拉回默认配置。
+     * 只改指针，不动各家的 Key / Base URL —— 那些是用户辛苦填的，永远保留。
+     */
+    fun applyDefaultOnStartup() {
+        val pid = defaultProviderId
+        if (pid.isBlank()) return
+        if (AiProviders.ALL.none { it.id == pid }) return
+        providerId = pid
+        if (defaultModel.isNotBlank()) setModel(pid, defaultModel)
+    }
+
     var temperature: Double
         get() = (sp.getString("temp", "0.4") ?: "0.4").toDoubleOrNull() ?: 0.4
         set(v) {

@@ -1,5 +1,7 @@
 package com.mcp.h5engine
 
+import android.animation.ObjectAnimator
+import android.animation.ValueAnimator
 import android.annotation.SuppressLint
 import android.content.ClipData
 import android.content.ClipboardManager
@@ -29,6 +31,7 @@ import android.view.Gravity
 import android.view.PixelCopy
 import android.view.View
 import android.view.ViewGroup
+import android.view.animation.LinearInterpolator
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
@@ -249,6 +252,13 @@ class MainActivity : AppCompatActivity(), GameUi {
     private lateinit var pubScroll: LinearLayout
     private lateinit var lastExportTv: TextView
 
+    // ---------- 底部状态栏（对齐游戏编辑器 / IDE 底部那条） ----------
+    private lateinit var statusProj: TextView
+    private lateinit var statusModel: TextView
+    private lateinit var statusRun: TextView
+    /** 顶栏的模式徽标：H5 / Maker —— 编辑器里最基本的一条信息：我现在在什么模式的工程里 */
+    private lateinit var modeBadge: TextView
+
     private val main = Handler(Looper.getMainLooper())
     private val logs = LogBuffer()
     /** 当前会话的消息（切会话时整体替换） */
@@ -307,11 +317,30 @@ class MainActivity : AppCompatActivity(), GameUi {
     private var runSteps = 0
     private var bodyExpanded = false
     private var latestActivity = ""
-    // ===== 工具卡片（Operit 那种可视化）：每调一个工具，对话里出一张卡，运行中→成功绿点/失败红点 =====
-    private var curToolCard: LinearLayout? = null
-    private var curToolIcon: ImageView? = null
-    private var curToolIconKind = "layers"
-    private var curToolText: TextView? = null
+    // ===== 工具调用组（对齐 Maker）：一轮只出一张「已工作」卡，工具行折进组体里 =====
+    //
+    // 为什么不像以前那样「每调一个工具就往对话里插一行」：
+    //   对话区是个 ScrollView，每插一行 = 整棵视图树重新测量 + 滚动位置重算。
+    //   一轮任务动辄几十次工具调用，插几十行就是几十次重排 —— 用户看到的就是「一直闪」。
+    // 现在的做法：一轮只建一张卡，工具行全部塞进**默认收起**的组体里。
+    // 收起状态下，内容高度完全不变，屏幕上只有组头那一个 TextView 在变字。
+    /** 组体里专门装工具行的容器（行只往这里加，不碰组头） */
+    private var toolWrap: LinearLayout? = null
+    /** 本轮工具调用统计：总数 / 每类次数（用来生成「读取 2 次」） */
+    private var toolTotal = 0
+    private val toolVerbCount = LinkedHashMap<String, Int>()
+    /** 正在跑的那一行（TOOLRUN 先插行，TOOL/TOOLFAIL 回来再把它定型） */
+    private var pendingRow: LinearLayout? = null
+    private var pendingStatus: TextView? = null
+    private var pendingSummary: TextView? = null
+    /** 运行中的转圈动画 + 它落脚的两个视图（转圈 ↔ ✓/✕ 在同一个槽位里换） */
+    private var pendingSpin: ObjectAnimator? = null
+    private var pendingSpinView: ImageView? = null
+    private var pendingMarkView: TextView? = null
+    /** 组头文案节流：只在字符串真的变了才 setText */
+    private var lastWorkStat = ""
+    /** 流式文字预览（runBar 第二行）上一次画的内容，避免重复 setText */
+    private var lastTail = ""
     /** 运行中用户又发的消息：排队，等这轮结束自动发出去（而不是粗暴掐断上一轮） */
     private val msgQueue = ArrayDeque<String>()
     private var runToggle: TextView? = null
@@ -405,6 +434,10 @@ class MainActivity : AppCompatActivity(), GameUi {
 
         pal = paletteOf(this, themeModeOf(cfgStore.themeMode))
 
+        // 冷启动回到「默认配置」：用户试过别的模型没关系，下次打开还是从自己认准的那个开始。
+        // 必须在 refreshHeader / AgentRunner 取配置之前执行，否则第一条请求就用错了模型。
+        cfgStore.applyDefaultOnStartup()
+
         // Maker 的授权 / 凭据检查要跑 CLI、读 pat.json，需要 Context。
         // AI 通过内置工具 maker_auth 触发（不受 MCP 准入开关限制）。
         EngineTools.ctxRef = applicationContext
@@ -424,6 +457,8 @@ class MainActivity : AppCompatActivity(), GameUi {
         rootView.addView(topHolder!!, LinearLayout.LayoutParams(-1, -2))
         rootView.addView(stage, LinearLayout.LayoutParams(-1, 0, 1f))
         rootView.addView(navHolder!!, LinearLayout.LayoutParams(-1, -2))
+        // 状态栏放在最底下：底栏之下的那一条，和 IDE / 游戏编辑器一致。
+        rootView.addView(buildStatusBar(), LinearLayout.LayoutParams(-1, -2))
 
         setContentView(rootView)
         applySystemBars()
@@ -590,8 +625,18 @@ class MainActivity : AppCompatActivity(), GameUi {
             typeface = MEDIUM
         }
 
+        // 模式徽标：编辑器里第一眼要看到的东西 —— 这个工程是 H5 还是 Maker。
+        // 用等宽字 + 次级强调色，和「标题」拉开层级。
+        modeBadge = TextView(this).apply {
+            textSize = 10.5f
+            typeface = MONO
+            setPadding(dp(7), dp(3), dp(7), dp(3))
+            setTextColor(pal.accent2)
+            background = roundCard(this@MainActivity, pal.cardAlt, pal.groupBorder, 6)
+        }
+
         val settings = TextView(this).apply {
-            text = "设置"
+            text = "⚙ 设置"
             textSize = 12.5f
             letterSpacing = 0.06f
             setTextColor(pal.sub)
@@ -600,16 +645,19 @@ class MainActivity : AppCompatActivity(), GameUi {
             setOnClickListener { showSettings() }
         }
 
+        // 项目名用等宽：路径 / 工程名属于「技术信息」，而且换名时宽度抖动更小
         projBtn = TextView(this).apply {
-            textSize = 13f
-            letterSpacing = 0.04f
+            textSize = 12.5f
+            typeface = MONO
             setTextColor(pal.text)
             setPadding(dp(12), dp(7), dp(12), dp(7))
             background = pressable(roundCard(this@MainActivity, pal.cardAlt, pal.border, 10), 0x14000000)
             setOnClickListener { showProjects() }
         }
         row.addView(projBtn, LinearLayout.LayoutParams(-2, -2).apply { rightMargin = dp(10) })
-        row.addView(titleTv, LinearLayout.LayoutParams(0, -2, 1f))
+        row.addView(titleTv)
+        row.addView(modeBadge, LinearLayout.LayoutParams(-2, -2).apply { leftMargin = dp(8) })
+        row.addView(TextView(this), LinearLayout.LayoutParams(0, -2, 1f))
         row.addView(settings)
         top.addView(row)
 
@@ -664,26 +712,37 @@ class MainActivity : AppCompatActivity(), GameUi {
 
     // ==================== 底栏 ====================
 
-    private fun navItemView(label: String): LinearLayout {
+    /**
+     * 一个底栏页签：图标 + 文字 + 选中指示条。
+     *
+     * 图标是「游戏编辑器 / IDE」观感里最直接的一环 —— 纯文字的底栏看着像文档 App，
+     * 带上图标才像工具。图标用 LineIcon 现描，颜色跟着主题走。
+     */
+    private fun navItemView(icon: String, label: String): LinearLayout {
         val box = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER
-            setPadding(0, dp(12), 0, dp(8))
+            setPadding(0, dp(9), 0, dp(6))
             background = pressable(roundCard(this@MainActivity, pal.navBg, pal.navBg, 0, 0), 0x14000000)
         }
+        box.addView(ImageView(this).apply {
+            tag = icon
+            setImageDrawable(LineIcon(icon, pal.navIdle, dp(17).toFloat()))
+        }, LinearLayout.LayoutParams(dp(19), dp(19)))
         box.addView(TextView(this).apply {
             text = label
-            textSize = 12.5f
+            textSize = 11.5f
             letterSpacing = 0.12f
             gravity = Gravity.CENTER
             setTextColor(pal.navIdle)
+            setPadding(0, dp(4), 0, 0)
         })
         // 2dp 细下划线做选中指示，比「加粗变色」更克制
         box.addView(View(this).apply {
             visibility = View.INVISIBLE
             setBackgroundColor(pal.navActive)
-        }, LinearLayout.LayoutParams(dp(20), dp(2)).apply {
-            topMargin = dp(8)
+        }, LinearLayout.LayoutParams(dp(18), dp(2)).apply {
+            topMargin = dp(5)
             gravity = Gravity.CENTER_HORIZONTAL
         })
         return box
@@ -698,9 +757,9 @@ class MainActivity : AppCompatActivity(), GameUi {
         holder.addView(View(this).apply { setBackgroundColor(pal.border) },
             LinearLayout.LayoutParams(-1, dp(1)))
         val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        navChat = navItemView("对话")
-        navPreview = navItemView("预览")
-        navPub = navItemView("发布")
+        navChat = navItemView("chat", "对话")
+        navPreview = navItemView("fullscreen", "预览")
+        navPub = navItemView("upload", "发布")
         row.addView(navChat, LinearLayout.LayoutParams(0, -2, 1f))
         row.addView(navPreview, LinearLayout.LayoutParams(0, -2, 1f))
         row.addView(navPub, LinearLayout.LayoutParams(0, -2, 1f))
@@ -717,13 +776,48 @@ class MainActivity : AppCompatActivity(), GameUi {
         val color = if (active) pal.navActive else pal.navIdle
         for (i in 0 until box.childCount) {
             val c = box.getChildAt(i)
-            if (c is TextView) {
-                c.setTextColor(color)
-                c.typeface = if (active) MEDIUM else Typeface.DEFAULT
-            } else {
-                c.visibility = if (active) View.VISIBLE else View.INVISIBLE
+            when (c) {
+                is TextView -> {
+                    c.setTextColor(color)
+                    c.typeface = if (active) MEDIUM else Typeface.DEFAULT
+                }
+                // 图标要按新颜色重描一遍：LineIcon 的颜色是构造时烘进 Paint 的，改不了
+                is ImageView -> {
+                    val kind = c.tag as? String ?: "layers"
+                    c.setImageDrawable(LineIcon(kind, color, dp(17).toFloat()))
+                }
+                else -> c.visibility = if (active) View.VISIBLE else View.INVISIBLE
             }
         }
+    }
+
+    /**
+     * 底部状态栏：整条是「IDE / 游戏编辑器」最标志性的元素。
+     * 左到右三格：当前工程（+ 类型） / 当前模型 / 运行状态。都是只读信息。
+     */
+    private fun buildStatusBar(): LinearLayout {
+        val bar = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setBackgroundColor(pal.statusBg)
+            setPadding(dp(12), dp(5), dp(12), dp(5))
+        }
+        fun slot(weight: Float, align: Int): TextView = TextView(this).apply {
+            textSize = 10.5f
+            typeface = MONO
+            setTextColor(pal.statusFg)
+            maxLines = 1
+            ellipsize = android.text.TextUtils.TruncateAt.END
+            gravity = align
+        }.also { bar.addView(it, LinearLayout.LayoutParams(0, -2, weight)) }
+
+        statusProj = slot(1.05f, Gravity.START)
+        statusModel = slot(1.35f, Gravity.CENTER)
+        statusRun = slot(0.9f, Gravity.END)
+        statusProj.setOnClickListener { showProjects() }
+        statusModel.setOnClickListener { showModelSheet() }
+        statusRun.setOnClickListener { if (activeTab != 0) showTab(0) else showConsole() }
+        return bar
     }
 
     /** 多选：素材（图/音/视频）、文档、技能共用一套选择器，按 pickMode 决定 mime 白名单 */
@@ -949,10 +1043,19 @@ class MainActivity : AppCompatActivity(), GameUi {
             setBackgroundColor(pal.navBg)
         }
 
+        // 运行状态行：固定在输入框上方，两行有保证 ——
+        //   第一行是状态（跑了多久 / 第几轮 / 正在干什么），第二行是流式文字的最新一小段。
+        // 关键：它**不在 ScrollView 里**。流式文字放这儿滚动播放，
+        // 对话区的视图树就一帧都不用重排，「边输出边闪」的根子就断了。
+        // minLines = 2 是为了高度恒定：不然 1 行↔2 行来回跳，输入框会跟着上下抽。
         runBar = TextView(this).apply {
-            textSize = 11.5f
+            textSize = 10.5f
+            typeface = MONO
             setTextColor(pal.sub)
             visibility = View.GONE
+            minLines = 2
+            maxLines = 2
+            ellipsize = android.text.TextUtils.TruncateAt.END
             setPadding(dp(4), 0, dp(4), dp(6))
         }
         box.addView(runBar)
@@ -1006,11 +1109,20 @@ class MainActivity : AppCompatActivity(), GameUi {
         val shotBtn = chipOf(this, pal, "当前画面", false).apply {
             setOnClickListener { attachScreenshot() }
         }
+        // 模型胶囊：底部随时可见、随手可切。
+        // 点 = 开模型面板（换模型）；长按 = 直接进设置页（改 Key / 参数）。
         modelBtn = TextView(this).apply {
             textSize = 11.5f
-            setTextColor(pal.sub)
-            setPadding(dp(6), dp(8), dp(6), dp(8))
-            setOnClickListener { showSettings() }
+            typeface = MONO
+            setTextColor(pal.accent)
+            maxLines = 1
+            ellipsize = android.text.TextUtils.TruncateAt.END
+            setPadding(dp(10), dp(7), dp(10), dp(7))
+            background = pressable(
+                roundCard(this@MainActivity, pal.accentSoft, pal.groupBorder, 8), 0x14000000
+            )
+            setOnClickListener { showModelSheet() }
+            setOnLongClickListener { showSettings(); true }
         }
         stopBtn = ghostBtnOf(this, pal, "停止").apply {
             visibility = View.GONE
@@ -1025,7 +1137,10 @@ class MainActivity : AppCompatActivity(), GameUi {
 
         row.addView(attachBtn)
         row.addView(shotBtn, LinearLayout.LayoutParams(-2, -2).apply { leftMargin = dp(6) })
-        row.addView(modelBtn, LinearLayout.LayoutParams(0, -2, 1f))
+        row.addView(modelBtn, LinearLayout.LayoutParams(0, -2, 1f).apply {
+            leftMargin = dp(8)
+            rightMargin = dp(8)
+        })
         row.addView(stopBtn, LinearLayout.LayoutParams(-2, -2).apply { rightMargin = dp(6) })
         row.addView(sendBtn)
         box.addView(row)
@@ -1521,29 +1636,13 @@ class MainActivity : AppCompatActivity(), GameUi {
         scrollChatToBottom()
     }
 
-    // ==================== 工具卡片（Operit 那种可视化） ====================
+    // ==================== 工具行（对齐 Maker 的「已工作」组内行） ====================
 
     private val TOOL_OK = 0xFF3BA55D.toInt()
     private val TOOL_FAIL = 0xFFD9534F.toInt()
     /** 给颜色套透明度（对齐 Operit 的 color.copy(alpha=…)） */
     private fun tintA(c: Int, a: Float): Int =
         android.graphics.Color.argb((a * 255).toInt(), android.graphics.Color.red(c), android.graphics.Color.green(c), android.graphics.Color.blue(c))
-
-    /** 按工具名给图标（照 Operit 的 getToolIcon 思路：不同工具给不同图标） */
-    private fun toolIconKind(name: String): String {
-        val n = name.lowercase()
-        return when {
-            n.contains("search") || n.contains("grep") || n.contains("find") -> "search"
-            n.contains("read") || n.contains("doc") || n.contains("usage") -> "doc"
-            n.contains("write") || n.contains("patch") || n.contains("edit") || n.contains("code") -> "code"
-            n.contains("shot") || n.contains("image") || n.contains("bg") || n.contains("ui") -> "image"
-            n.contains("music") || n.contains("audio") || n.contains("voice") -> "audio"
-            n.contains("video") -> "video"
-            n.contains("list") || n.contains("status") || n.contains("apps") || n.contains("project") -> "list"
-            n.contains("skill") -> "skill"
-            else -> "layers"
-        }
-    }
 
     /** 从事件载荷里拆出 head（摘要）和 full（详情全文）——见 AgentRunner 的 \u0000 分隔 */
     private fun toolPayload(rest: String): Pair<String, String> {
@@ -1552,87 +1651,150 @@ class MainActivity : AppCompatActivity(), GameUi {
         return head to (if (full.isBlank()) head else full)
     }
 
-    /** 工具开始：插一张「运行中」卡（图标灰 + 工具名 + 运行中…），结果回来由 updateToolCard 定型 */
-    private fun addToolCardRunning(name: String) {
+    /**
+     * 工具开始：在**组体里**加一行「运行中」。
+     *
+     * 关键在「组体里」——组体默认是收起的（View.GONE），
+     * 所以这一行加进去不会改变对话区任何**可见**高度，也不会牵动滚动位置。
+     * 老版本是直接往 chatList 里插行，插一行滚一次，一轮几十次工具调用就是几十次抖动。
+     */
+    private fun addToolCardRunning(name: String, target: String = "") {
         val nm = if (name.isBlank()) "工具" else name
-        val kind = toolIconKind(nm)
-        // 1:1 对齐 Operit CanvasToolSummaryRow：无边框、前置图标(16dp 主色0.7α) + 工具名(主色)
-        val icon = ImageView(this).apply {
-            setImageDrawable(LineIcon(kind, tintA(pal.accent, 0.7f), dp(16).toFloat()))
+        val rows = toolWrap ?: return
+
+        // 运行中：转圈。用旋转的 ImageView 而不是逐帧换字符 ——
+        // 旋转是渲染层的变换，不触发 requestLayout，转得再快也不会把对话布局带着一起动。
+        val spin = ImageView(this).apply {
+            setImageDrawable(LineIcon("refresh", pal.accent, dp(11).toFloat()))
         }
-        val title = TextView(this).apply {
-            text = nm
-            textSize = 12.5f
+        val mark = TextView(this).apply {
+            text = "●"
+            textSize = 9f
             setTextColor(pal.accent)
-            typeface = MEDIUM
+            gravity = Gravity.CENTER
+            visibility = View.GONE
+        }
+        // 固定尺寸的槽位：转圈和 ✓/✕ 互相切换时，行的宽度不会被撑得跳一下
+        val slot = FrameLayout(this).apply {
+            addView(spin, FrameLayout.LayoutParams(-1, -1))
+            addView(mark, FrameLayout.LayoutParams(-1, -1))
+        }
+
+        // 有目标文件就写成「修改 main.js」，没有就退回工具名（如 console_logs）
+        val verb = toolVerb(nm)
+        val label = if (target.isNotBlank()) "$verb $target" else nm
+
+        val tag = TextView(this).apply {
+            text = label
+            textSize = 11f
+            typeface = MONO
+            setTextColor(pal.text)
             maxLines = 1
+        }
+        val summary = TextView(this).apply {
+            text = "运行中…"
+            textSize = 11f
+            setTextColor(pal.faint)
+            maxLines = 1
+            ellipsize = android.text.TextUtils.TruncateAt.END
+            setPadding(dp(8), 0, 0, 0)
         }
         val row = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(4), dp(3), dp(16), dp(3))
-            addView(icon, LinearLayout.LayoutParams(dp(16), dp(16)))
-            addView(title, LinearLayout.LayoutParams(-2, -2).apply { leftMargin = dp(8) })
+            setPadding(0, dp(3), 0, dp(3))
+            addView(slot, LinearLayout.LayoutParams(dp(12), dp(12)).apply { rightMargin = dp(8) })
+            addView(tag, LinearLayout.LayoutParams(-2, -2))
+            addView(summary, LinearLayout.LayoutParams(0, -2, 1f))
         }
-        chatList.addView(row, LinearLayout.LayoutParams(-2, -2).apply {
-            topMargin = dp(2)
-            leftMargin = dp(8)
-        })
-        scrollChatToBottom()
-        curToolCard = row
-        curToolIcon = icon
-        curToolIconKind = kind
+        rows.addView(row, LinearLayout.LayoutParams(-1, -2))
+
+        // 上一行的转圈先停掉：同时只允许一个在转（一轮里也只会有一个工具在跑）
+        pendingSpin?.cancel()
+        pendingSpin = ObjectAnimator.ofFloat(spin, View.ROTATION, 0f, 360f).apply {
+            duration = 900
+            repeatCount = ValueAnimator.INFINITE
+            interpolator = LinearInterpolator()
+            start()
+        }
+
+        pendingRow = row
+        pendingStatus = mark
+        pendingSummary = summary
+        pendingSpinView = spin
+        pendingMarkView = mark
+
+        toolTotal++
+        toolVerbCount[verb] = (toolVerbCount[verb] ?: 0) + 1
+        updateWorkStat("")
     }
 
-    /** 工具结束：图标转绿/红，摘要取前 200 字；点卡片看全文详情（可复制）——对齐 Operit 的 ToolResultDisplay */
+    /**
+     * 工具结束：把刚才那一行**原地定型**（✓/✕ + 摘要），不新增视图。
+     * 点这一行看全文详情（可复制）。
+     */
     private fun updateToolCard(ok: Boolean, name: String, head: String, full: String) {
         val t = if (name.isBlank()) "工具" else name
+        // 兜底：万一 TOOL 事件先到（没配对的 TOOLRUN），补一行出来，别让结果凭空消失
+        if (pendingStatus == null) addToolCardRunning(t)
+
         val summary = when {
             head.isNotBlank() -> head
             ok -> "执行成功"
             else -> "执行失败"
-        }.replace("\n", " ").trim()
-        // 1:1 对齐 Operit CanvasToolResultRow：缩进24dp、└箭头(主色0.7α) + 状态图标 + 单行摘要 + 复制
-        val arrow = TextView(this).apply {
-            text = "└"
-            textSize = 13f
-            setTextColor(tintA(pal.accent, 0.7f))
-            typeface = MEDIUM
+        }.replace('\n', ' ').trim().take(200)
+
+        val st = pendingStatus
+        val sm = pendingSummary
+        val row = pendingRow
+        val spin = pendingSpinView
+        val mark = pendingMarkView
+        pendingStatus = null
+        pendingSummary = null
+        pendingRow = null
+        pendingSpinView = null
+        pendingMarkView = null
+
+        // 转圈收工：动画停掉，槽位换成 ✓ / ✕。
+        // 两个视图同尺寸叠在 FrameLayout 里，所以这一换不会让这一行的宽度跳一下。
+        pendingSpin?.cancel()
+        pendingSpin = null
+        spin?.let { if (it.visibility != View.GONE) it.visibility = View.GONE }
+        mark?.let { if (it.visibility != View.VISIBLE) it.visibility = View.VISIBLE }
+
+        st?.let {
+            setTextIf(it, if (ok) "✓" else "✕")
+            it.setTextColor(if (ok) TOOL_OK else TOOL_FAIL)
         }
-        val status = TextView(this).apply {
-            text = if (ok) "✓" else "✕"
-            textSize = 12f
-            setTextColor(if (ok) TOOL_OK else TOOL_FAIL)
-            typeface = Typeface.DEFAULT_BOLD
+        sm?.let {
+            setTextIf(it, summary)
+            it.setTextColor(if (ok) pal.sub else pal.errText)
         }
-        val body = TextView(this).apply {
-            text = summary
-            textSize = 11.5f
-            setTextColor(if (ok) pal.text else pal.errText)
-            maxLines = 1
-            ellipsize = android.text.TextUtils.TruncateAt.END
+        row?.let {
+            it.isClickable = true
+            it.setOnClickListener { showTextDetail(t, full.ifBlank { summary }, ok) }
         }
-        val copy = ImageView(this).apply {
-            setImageDrawable(LineIcon("copy", tintA(pal.accent, 0.6f), dp(14).toFloat()))
-            setOnClickListener { copyToClip(full.ifBlank { summary }, "$t 结果") }
+        updateWorkStat("")
+    }
+
+    /**
+     * 停掉「还在转的那个圈」。
+     *
+     * 一轮被中断时（用户按停止 / 发新消息打断），最后那个工具永远不会有结果回来，
+     * 不主动收掉的话它会一直转下去 —— 看着像还在干活，其实早停了。
+     */
+    private fun stopPendingSpin() {
+        pendingSpin?.cancel()
+        pendingSpin = null
+        pendingSpinView?.let { if (it.visibility != View.GONE) it.visibility = View.GONE }
+        pendingMarkView?.let {
+            if (it.visibility != View.VISIBLE) it.visibility = View.VISIBLE
+            setTextIf(it, "–")
+            it.setTextColor(pal.faint)
         }
-        val row = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(24), dp(2), dp(16), dp(2))
-            addView(arrow, LinearLayout.LayoutParams(-2, -2).apply { rightMargin = dp(6) })
-            addView(status, LinearLayout.LayoutParams(-2, -2).apply { rightMargin = dp(8) })
-            addView(body, LinearLayout.LayoutParams(0, -2, 1f))
-            addView(copy, LinearLayout.LayoutParams(dp(14), dp(14)).apply { leftMargin = dp(8) })
-        }
-        row.setOnClickListener { showTextDetail(t, full.ifBlank { summary }, ok) }
-        chatList.addView(row, LinearLayout.LayoutParams(-1, -2).apply {
-            topMargin = dp(1)
-            leftMargin = dp(6)
-        })
-        scrollChatToBottom()
-        curToolCard = null
-        curToolIcon = null
+        pendingStatus = null
+        pendingSpinView = null
+        pendingMarkView = null
     }
 
     /** 工具全文详情弹窗：可滚动 + 可选中 + 一键复制 */
@@ -2042,9 +2204,12 @@ class MainActivity : AppCompatActivity(), GameUi {
                     if (t.isNotEmpty()) appendThinking("思考：\n" + t.take(1500))
                 }
                 ev.startsWith("TOOLRUN:") -> {
-                    // 工具开始执行：先插一张「运行中」卡（灰图标），结果回来再改成绿/红
-                    val nm = ev.removePrefix("TOOLRUN:").trim().removePrefix("[").substringBefore("]")
-                    addToolCardRunning(nm)
+                    // 工具开始执行：在「已工作」组里挂一行「修改 main.js ⟳」，结果回来再定成 ✓/✕
+                    val b = ev.removePrefix("TOOLRUN:").trim()
+                    val nm = b.removePrefix("[").substringBefore("]")
+                    // ] 之后是目标文件（可空），由 AgentRunner 从工具参数里解析出来
+                    val target = b.substringAfter("]", "").trim()
+                    addToolCardRunning(nm, target)
                     // 记录「这轮碰过 Maker」：哪怕判型还没转成 maker，也说明这是 Maker 工程
                     if (nm.startsWith("maker_")) makerTouched = true
                     if (nm == "maker_build_current_directory") builtThisRun = true
@@ -2054,7 +2219,8 @@ class MainActivity : AppCompatActivity(), GameUi {
                     val nm = l.substringAfter("[").substringBefore("]")
                     val (head, full) = toolPayload(l.substringAfter("] ").trim())
                     latestActivity = head.take(30)
-                    appendThinking("[$nm] $head")
+                    // 不再往思考面板里追加这一行：工具行本身就是记录，追加反而会把
+                    // 正在流式的思考文字冲掉（两路都写同一段文本，谁后到谁赢）
                     updateToolCard(false, nm, head, full)
                     runCatching { mediaPathsIn(l).forEach { p -> autoCardMedia(p) } }
                 }
@@ -2063,7 +2229,6 @@ class MainActivity : AppCompatActivity(), GameUi {
                     val nm = l.substringAfter("[").substringBefore("]")
                     val (head, full) = toolPayload(l.substringAfter("] ").trim())
                     latestActivity = head.take(30)
-                    appendThinking("[$nm] $head")
                     updateToolCard(true, nm, head, full)
                     // AI 产出的音视频：直接在对话里给一张能点的播放卡。
                     // 用户反馈：只给一个路径 = "发了个听不了的链接"，还得自己去找临时按钮听。
@@ -2096,50 +2261,66 @@ class MainActivity : AppCompatActivity(), GameUi {
 
     // ==================== 运行状态（折叠思考面板 + 计时） ====================
 
-    /** 折叠面板：收起时也能看到「跑了多久 + 第几轮 + 正在干什么」，不会以为它在发呆 */
+    /**
+     * 本轮的工作组卡（对齐 Maker 的「已工作」行）。
+     *
+     *   ▸ 已工作 · 读取 2 次 · 12s          ← 组头（永远只有这一行可见）
+     *     思考中… <流式全文>                ← 组体（默认收起）
+     *     ✓ read_file   README.md
+     *     ✕ bash        command not found
+     *
+     * 一轮只建一张卡；工具行进的是收起着的组体，所以运行过程中
+     * **对话区的可见高度从头到尾不变**，屏幕自然不会闪。
+     */
     private fun startRunCard() {
-        val head = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(12), dp(9), dp(10), dp(9))
-        }
-        val title = TextView(this).apply {
-            text = "思考过程"
-            textSize = 12.5f
-            letterSpacing = 0.06f
-            typeface = MEDIUM
-            setTextColor(pal.text)
+        // ===== 组头 =====
+        val icon = ImageView(this).apply {
+            setImageDrawable(LineIcon("layers", tintA(pal.accent, 0.75f), dp(13).toFloat()))
         }
         val stat = TextView(this).apply {
             textSize = 11.5f
+            typeface = MONO
             setTextColor(pal.sub)
-            setPadding(dp(8), 0, 0, 0)
+            maxLines = 1
+            ellipsize = android.text.TextUtils.TruncateAt.END
+            setPadding(dp(8), 0, dp(8), 0)
         }
         val toggle = TextView(this).apply {
-            text = "▾"
-            textSize = 13f
-            setTextColor(pal.accent)
-            setPadding(0, 0, dp(6), 0)
+            text = "›"
+            textSize = 14f
+            setTextColor(pal.faint)
         }
-        // 观感对齐 Operit：三角在最左，然后是标题，运行信息靠右。
-        // 整行都能点开合，不用去戳右边那个小字。
-        head.addView(toggle)
-        head.addView(title)
-        head.addView(stat, LinearLayout.LayoutParams(0, -2, 1f))
-        head.isClickable = true
+        val head = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(11), dp(9), dp(11), dp(9))
+            addView(icon, LinearLayout.LayoutParams(dp(14), dp(14)))
+            addView(stat, LinearLayout.LayoutParams(0, -2, 1f))
+            addView(toggle)
+            isClickable = true
+        }
 
-        val body = TextView(this).apply {
+        // ===== 组体（默认收起）=====
+        val think = TextView(this).apply {
             textSize = 11.5f
             setTextColor(pal.sub)
-            setPadding(dp(12), 0, dp(12), dp(10))
             // 思考文字是用来「读」的：行距松一点、颜色灰一档，不抢正文的注意力
             setLineSpacing(dp(4).toFloat(), 1.0f)
-            visibility = View.VISIBLE
             setTextIsSelectable(true)
+            visibility = View.GONE
         }
+        val rows = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        val body = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(11), 0, dp(11), dp(9))
+            addView(think)
+            addView(rows)
+            visibility = View.GONE
+        }
+
         val card = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            background = roundCard(this@MainActivity, pal.card, pal.border, 12)
+            background = roundCard(this@MainActivity, pal.groupBg, pal.groupBorder, 10)
         }
         card.addView(head)
         card.addView(body)
@@ -2148,36 +2329,49 @@ class MainActivity : AppCompatActivity(), GameUi {
             bottomMargin = dp(6)
         })
 
+        toolWrap = rows
         runHead = stat
-        runBody = body
+        runBody = think
         runToggle = toggle
-        bodyExpanded = true
+
+        // 本轮从「收起」开始。展开状态下的流式文字会一直撑高对话区，
+        // 那正是老版本「边输出边闪」的来源；要看的时候点一下组头就行。
+        bodyExpanded = false
         userCollapsedThinking = false
         latestActivity = ""
+        lastWorkStat = ""
+        lastTail = ""
+        thinkLog = ""
+        toolTotal = 0
+        toolVerbCount.clear()
+        pendingStatus = null
+        pendingSummary = null
+        pendingRow = null
+
         // 新一轮开始：用户没主动上滑的话，内容默认贴着底部往下长
         if (!userPinned) stickBottom = true
-        curToolCard = null
-        curToolIcon = null
-        curToolText = null
         runStartAt = SystemClock.elapsedRealtime()
-        stat.text = "启动中…"
-        toggle.text = "▾"
+        updateWorkStat("启动中")
         runBar?.visibleIf(true)
-        runBar?.text = "启动中…"
+        setTextIf(runBar, "运行中 · 启动中")
+        setTextIf(statusRun, "运行中")
         askNotiPermission()
         startGuard()
         head.setOnClickListener {
             bodyExpanded = !bodyExpanded
             body.visibleIf(bodyExpanded)
-            toggle.text = if (bodyExpanded) "▾" else "▸"
+            setTextIf(toggle, if (bodyExpanded) "⌄" else "›")
             // 记住用户的手动选择：他自己收起了，流式进度就不要再强行摊开
             userCollapsedThinking = !bodyExpanded
-            if (bodyExpanded) scrollChatToBottom()
+            if (bodyExpanded) {
+                // 收起期间思考文字是只攒不画的，摊开这一下把它补上
+                paintThink()
+                scrollChatToBottom()
+            }
         }
         startTicker()
         // 模型正在流回来的「思考 / 正文」实时打进面板。
-        // 不接这个回调的话，思考版模型长时间推理时面板只有「思考中…」，
-        // 用户只能以为它卡死了。
+        // 不接这个回调的话，思考版模型长时间推理时用户只能以为它卡死了。
         AiClient.onProgress = { kind, text ->
             val s = runSeq
             main.post { if (s == runSeq) paintProgress(kind, text) }
@@ -2185,57 +2379,131 @@ class MainActivity : AppCompatActivity(), GameUi {
         scrollChatToBottom()
     }
 
+    /**
+     * 只在文字真的变了才 setText。
+     *
+     * TextView 被设成**同样的文本**也会走一遍 setText → 请求布局 → 重排，
+     * 流式输出时每秒几十次同样的写入，看起来就是屏幕在闪。这是最省事也最有效的一道闸。
+     */
+    private fun setTextIf(tv: TextView?, s: String) {
+        if (tv != null && tv.text?.toString() != s) tv.text = s
+    }
+
+    /**
+     * 工具 → 「干了什么」的动词。
+     *
+     * 两处都用它：组头要的是「读取 2 次」这种概括，工具行要的是「修改 main.js」这种具体。
+     * 判断顺序有讲究 —— create / write 这类「有副作用」的必须排在 read 前面，
+     * 否则 game_write 里的 "w" 没什么，但像 code_search 会先命中 "code" 而被误判成改码。
+     */
+    private fun toolVerb(name: String): String {
+        val n = name.lowercase()
+        return when {
+            n.contains("create") || n.contains("_new") -> "新建"
+            n.contains("write") || n.contains("patch") || n.contains("edit") -> "修改"
+            n.contains("read") || n.contains("doc") || n.contains("usage") -> "读取"
+            n.contains("search") || n.contains("grep") || n.contains("find") || n.contains("glob") -> "检索"
+            n.contains("shot") || n.contains("image") || n.contains("_bg") -> "出图"
+            n.contains("music") || n.contains("audio") || n.contains("voice") || n.contains("speech") -> "音频"
+            n.contains("video") -> "视频"
+            n.contains("build") -> "构建"
+            n.contains("reload") || n.contains("launch") -> "运行"
+            n.contains("log") -> "日志"
+            n.contains("memory") -> "记忆"
+            n.contains("list") || n.contains("status") || n.contains("apps") || n.contains("project") -> "查询"
+            n.contains("skill") -> "技能"
+            else -> "工具"
+        }
+    }
+
+    /**
+     * 组头文案：「已工作 · 读取 2 次 · 12s」。
+     * 一行说清「干了什么、干了几次、花了多久」——收起状态下一眼就够，
+     * 不必摊开组体去看这一轮到底发生了什么。
+     */
+    private fun updateWorkStat(tail: String) {
+        val verbs = if (toolVerbCount.size == 1) {
+            val e = toolVerbCount.entries.first()
+            e.key + " " + e.value + " 次"
+        } else if (toolTotal > 0) {
+            "调用 $toolTotal 次"
+        } else {
+            ""
+        }
+        val s = buildString {
+            append("已工作")
+            if (verbs.isNotEmpty()) append(" · ").append(verbs)
+            if (tail.isNotEmpty()) append(" · ").append(tail)
+        }
+        if (s != lastWorkStat) {
+            lastWorkStat = s
+            runHead?.text = s
+        }
+    }
+
+    /** 底部状态行：不在 ScrollView 里，所以怎么刷都不会牵动对话区 */
+    private fun paintRunBar() {
+        val ms = if (runStartAt > 0) SystemClock.elapsedRealtime() - runStartAt else 0
+        val head = "运行中 · " + fmtDur(ms) + " · 第 " + runSteps.coerceAtLeast(1) + " 轮 · " +
+            latestActivity.ifEmpty { "思考中" }
+        setTextIf(runBar, if (lastTail.isEmpty()) head else head + "\n" + lastTail)
+    }
+
     private var lastProgressAt = 0L
     private var lastAutoScrollAt = 0L
 
     /**
-     * 把流式进度画到思考面板上。
-     * 节流 120ms：响应的 chunk 可能只有几十字节，每个都刷会拖慢主线程。
+     * 把流式进度画出来。
+     *
+     * 分两路，各走各的代价：
+     *   1) 底部状态行（runBar，**不在 ScrollView 里**）—— 滚动播最新的 90 个字。
+     *      它怎么刷都不会牵动对话区，这是给用户看的「它在动」。
+     *   2) 组体里的全文 —— **只有用户把组展开时才写**。收起时不碰任何对话区视图，
+     *      一次 setText 都不做，滚动位置自然一步都不动。
+     *
+     * 节流 200ms：响应的 chunk 可能只有几十字节，每个都刷会拖慢主线程。
      */
     private fun paintProgress(kind: String, text: String) {
-        val b = runBody ?: return
         if (text.isEmpty()) return
         val now = SystemClock.elapsedRealtime()
-        // 刷新频率从 120ms 放宽到 200ms，并且只保留尾部 2400 字：
-        // 每次 setText 都会让这个 TextView 重新排版，字越多越贵，越快越像「闪」。
         if (now - lastProgressAt < 200) return
         lastProgressAt = now
-        val head = if (kind == "think") "思考中…" else "正在写回答…"
-        // 内容没变就别重新 setText —— TextView 被设成同样的文本也会重排，看着就是闪
-        val painted = head + "\n" + text.takeLast(2400)
-        if (painted != b.text?.toString()) b.text = painted
+
         latestActivity = if (kind == "think") "思考中（已 " + text.length + " 字）"
         else "写回答中（已 " + text.length + " 字）"
-        // 面板若还是收起的，就顺手摊开 —— 让人看得见字在长；
-        // 用户自己点过「收起」的话就尊重他。
-        if (!userCollapsedThinking && !bodyExpanded) {
-            bodyExpanded = true
-            // 已经是 VISIBLE 就别再设：设可见性会触发 requestLayout，闪就是这么来的
-            if (b.visibility != View.VISIBLE) b.visibleIf(true)
-            runToggle?.text = "▾"
-        }
-        // 自动滚动也要节流：原来每 120ms 滚一次 → 屏幕「一闪一闪」。
-        // 现在最多 450ms 一次，且只在用户本来就贴着底部时才滚。
-        if (now - lastAutoScrollAt > 450 && stickBottom && !userPinned) {
-            lastAutoScrollAt = now
-            scrollChatToBottom()
+        // 流式预览：换行压成空格，取尾部一小段。等价的文字不重复写。
+        val tail = text.replace('\n', ' ').trim().takeLast(90)
+        if (tail != lastTail) lastTail = tail
+
+        // 流式全文只往 thinkLog 里攒；画不画由 paintThink 按「组体是否摊开」决定
+        thinkLog = (if (kind == "think") "思考中…" else "正在写回答…") + "\n" + text.takeLast(2400)
+        if (bodyExpanded) {
+            paintThink()
+            // 自动滚动也要节流，且只在用户本来就贴着底部时才滚 —— 别和上滑阅读的手打架
+            if (now - lastAutoScrollAt > 450 && stickBottom && !userPinned) {
+                lastAutoScrollAt = now
+                scrollChatToBottom()
+            }
         }
     }
 
+    /**
+     * 计时器：500ms 一拍。
+     * 拍的是「组头那一个 TextView」和「底部状态行」，**都不在对话内容流里**，
+     * 所以运行期间对话区的高度和滚动位置都是冻住的 —— 想闪都没得闪。
+     */
     private fun startTicker() {
         runTicker?.let { main.removeCallbacks(it) }
         val t = object : Runnable {
             override fun run() {
                 if (!running) return
                 val ms = SystemClock.elapsedRealtime() - runStartAt
-                val line = "${fmtDur(ms)} · 第 ${runSteps.coerceAtLeast(1)} 轮 · " +
-                    latestActivity.ifEmpty { "思考中" }
-                runHead?.text = line
-                runBar?.text = "运行中 · $line"
+                updateWorkStat(fmtDur(ms))
+                paintRunBar()
                 val sec = ms / 1000
                 if (sec != lastNotiSec) {
                     lastNotiSec = sec
-                    updateGuard("正在运行 · $line")
+                    updateGuard("正在运行 · " + fmtDur(ms) + " · " + latestActivity.ifEmpty { "思考中" })
                 }
                 main.postDelayed(this, 500)
             }
@@ -2270,9 +2538,13 @@ class MainActivity : AppCompatActivity(), GameUi {
         AiClient.onProgress = null
         stopBtn.visibleIf(false)
         stopGuard()
+        stopPendingSpin()
         latestActivity = ""
-        runHead?.text = "已中断（$reason）"
-        runBar?.text = "上次运行 · 已中断（$reason）"
+        // 收尾也要走 updateWorkStat：先把它清空，好让「已中断」这一个尾标能落上去
+        lastWorkStat = ""
+        updateWorkStat("已中断（$reason）")
+        setTextIf(runBar, "已中断 · $reason")
+        statusRun?.let { setTextIf(it, "已中断") }
         runCatching { persistSessions() }
         renderQueue()
         drainQueue(immediate = true)
@@ -2409,10 +2681,16 @@ class MainActivity : AppCompatActivity(), GameUi {
         AiClient.onProgress = null
         runTicker?.let { main.removeCallbacks(it) }
         stopBtn.visibleIf(false)
+        stopPendingSpin()
         val ms = SystemClock.elapsedRealtime() - runStartAt
-        runHead?.text = "共用时 ${fmtDur(ms)} · ${runSteps} 轮 · " + TokenStats.summary()
-        runBar?.text = "上次运行 · 共用时 ${fmtDur(ms)} · ${runSteps} 轮 · 已结束"
+        val dur = fmtDur(ms)
+        // 组头收尾：把「跑了多久 / 几轮」钉在上面，展开还能回看这一轮都干了什么
+        lastWorkStat = ""
+        updateWorkStat("$dur · ${runSteps} 轮 · 完成")
+        setTextIf(runBar, "已完成 · $dur · ${runSteps} 轮 · " + TokenStats.summary())
+        setTextIf(statusRun, "待命")
         latestActivity = ""
+        lastTail = ""
         lastNotiSec = -1L
         stopGuard()
         // 本轮一结束就把会话落盘：否则 AI 的回复只在下次发送 / 退后台时才保存，
@@ -3071,11 +3349,28 @@ class MainActivity : AppCompatActivity(), GameUi {
         }
     }
 
+    /**
+     * 组体里那段「思考 / 工具流水」的文字来源。
+     *
+     * 单独攒一份字符串、而不是随写随 setText：组体默认是收起的，
+     * 收起时往一个 GONE 的 TextView 里写字，用户一个字都看不见，
+     * 却要付出一次重新排版的代价 —— 这正是老版本白花的开销。
+     * 现在收起期间只攒不画，用户点开时一次性补上。
+     */
+    private var thinkLog = ""
+
     private fun appendThinking(line: String) {
+        thinkLog = if (thinkLog.isEmpty()) line else thinkLog + "\n" + line
+        if (thinkLog.length > 3000) thinkLog = thinkLog.takeLast(3000)
+        paintThink()
+    }
+
+    /** 把 thinkLog 画进组体。收起时直接返回，一个字都不写 */
+    private fun paintThink() {
+        if (!bodyExpanded) return
         val tv = runBody ?: return
-        val cur = tv.text.toString()
-        val next = if (cur.isEmpty()) line else "$cur\n$line"
-        tv.text = if (next.length > 3000) next.takeLast(3000) else next
+        setTextIf(tv, thinkLog)
+        if (tv.visibility != View.VISIBLE) tv.visibleIf(true)
     }
 
     private fun scheduleFlush() {
@@ -4802,6 +5097,291 @@ class MainActivity : AppCompatActivity(), GameUi {
     private fun themed(): Context =
         ContextThemeWrapper(this, if (pal.dark) R.style.AppThemeDark else R.style.AppTheme)
 
+    // ==================== 模型快速切换（底部面板） ====================
+
+    /** 面板里展开着的那家厂商。手风琴：同时只开一家，否则十几家全摊开会长到滑不到底 */
+    private var sheetOpen: String? = null
+
+    /**
+     * 模型面板：从底部弹出，对齐用户给的参考图。
+     *
+     *   默认配置                  mimo-v2.5-pro      ← 一点就切回默认
+     *   国内
+     *     小米 / DeepSeek 深度求索   deepseek-flash ⌄  ← 点开看这家的模型
+     *     谷歌                      gemini-3-flash
+     *   国外 / 本地
+     *
+     * 两条交互约定：
+     *   点模型   = 立刻切过去（「随手切」就靠这个，不打断、不关面板）
+     *   长按行   = 设为默认配置（下次打开 App 就从它开始）
+     *
+     * 「默认配置」和「当前在用」是两件事，这正是用户要的：
+     * 平时随手换来换去试模型，但每次冷启动都回到自己认准的那一个。
+     */
+    private fun showModelSheet() {
+        val dlg = Dialog(this)
+        // 自绘的底部面板不需要系统标题栏；不关掉的话顶上会多出一条空白带
+        dlg.requestWindowFeature(android.view.Window.FEATURE_NO_TITLE)
+
+        // 顶部圆角的底板。GradientDrawable 的四角是分开设的，只圆上面两个角，
+        // 贴着屏幕底边的那两个角保持直角 —— 弹层的下沿和屏幕边缘齐平才不「飘」。
+        val radius = dp(16).toFloat()
+        val sheetBg = android.graphics.drawable.GradientDrawable().apply {
+            setColor(pal.card)
+            cornerRadii = floatArrayOf(radius, radius, radius, radius, 0f, 0f, 0f, 0f)
+        }
+
+        val root = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = sheetBg
+        }
+
+        // ---------- 标题行 ----------
+        val titleRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(16), dp(14), dp(12), dp(10))
+        }
+        titleRow.addView(TextView(this).apply {
+            text = "模型"
+            textSize = 15f
+            typeface = MEDIUM
+            setTextColor(pal.text)
+        }, LinearLayout.LayoutParams(0, -2, 1f))
+        titleRow.addView(TextView(this).apply {
+            text = "⚙"
+            textSize = 14f
+            setTextColor(pal.sub)
+            setPadding(dp(10), dp(4), dp(12), dp(4))
+            setOnClickListener { dlg.dismiss(); showSettings() }
+        })
+        titleRow.addView(TextView(this).apply {
+            text = "✕"
+            textSize = 14f
+            setTextColor(pal.sub)
+            setPadding(dp(10), dp(4), dp(6), dp(4))
+            setOnClickListener { dlg.dismiss() }
+        })
+        root.addView(titleRow)
+        root.addView(View(this).apply { setBackgroundColor(pal.border) },
+            LinearLayout.LayoutParams(-1, dp(1)))
+
+        // ---------- 列表（每次切换后整体重画：几个 TextView 而已，比做增量更新稳） ----------
+        val list = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        val sc = ScrollView(this).apply {
+            isVerticalScrollBarEnabled = false
+            addView(list)
+        }
+
+        fun rowShell(): LinearLayout = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(16), dp(11), dp(14), dp(11))
+            background = pressable(roundCard(this@MainActivity, pal.card, pal.card, 0, 0), 0x14000000)
+        }
+
+        fun render() {
+            list.removeAllViews()
+            val curPid = cfgStore.providerId
+            val defPid = cfgStore.defaultProviderOrCurrent()
+            val defModel = cfgStore.defaultModelOrCurrent()
+
+            // ===== 默认配置：置顶一行，永远可见 =====
+            val defProv = AiProviders.byId(defPid)
+            val defRow = rowShell().apply {
+                setBackgroundColor(pal.accentSoft)
+                addView(TextView(this@MainActivity).apply {
+                    text = "★"
+                    textSize = 12f
+                    setTextColor(pal.accent)
+                }, LinearLayout.LayoutParams(-2, -2).apply { rightMargin = dp(9) })
+                val col = LinearLayout(this@MainActivity).apply { orientation = LinearLayout.VERTICAL }
+                col.addView(TextView(this@MainActivity).apply {
+                    text = "默认配置"
+                    textSize = 13.5f
+                    typeface = MEDIUM
+                    setTextColor(pal.accent)
+                })
+                col.addView(TextView(this@MainActivity).apply {
+                    text = defProv.label + " · 下次打开用它"
+                    textSize = 10.5f
+                    setTextColor(pal.sub)
+                    setPadding(0, dp(3), 0, 0)
+                })
+                addView(col, LinearLayout.LayoutParams(0, -2, 1f))
+                addView(TextView(this@MainActivity).apply {
+                    text = defModel
+                    textSize = 11.5f
+                    typeface = MONO
+                    setTextColor(pal.accent)
+                    maxLines = 1
+                    ellipsize = android.text.TextUtils.TruncateAt.END
+                }, LinearLayout.LayoutParams(-2, -2))
+            }
+            defRow.setOnClickListener {
+                // 切回默认：当前指针直接对回默认配置那一对
+                cfgStore.providerId = defPid
+                cfgStore.setModel(defPid, defModel)
+                refreshHeader()
+                render()
+                toast("已切回默认配置 · $defModel")
+            }
+            list.addView(defRow, LinearLayout.LayoutParams(-1, -2))
+
+            // ===== 按「国内 / 国外 / 本地」分组，逐家列出来 =====
+            for (g in AiProviders.groupOrder()) {
+                val provs = AiProviders.ALL.filter { it.group == g }
+                if (provs.isEmpty()) continue
+                list.addView(TextView(this@MainActivity).apply {
+                    text = g
+                    textSize = 10.5f
+                    typeface = MONO
+                    setTextColor(pal.faint)
+                    setPadding(dp(16), dp(12), dp(16), dp(5))
+                }, LinearLayout.LayoutParams(-1, -2))
+
+                for (p in provs) {
+                    val hasKey = cfgStore.keyOf(p.id).isNotBlank()
+                    val cur = cfgStore.modelOf(p.id)
+                    val isCurProv = p.id == curPid
+                    val open = sheetOpen == p.id
+
+                    val pr = rowShell()
+                    val col = LinearLayout(this@MainActivity).apply { orientation = LinearLayout.VERTICAL }
+                    col.addView(TextView(this@MainActivity).apply {
+                        text = p.label + if (isCurProv) "  ●" else ""
+                        textSize = 13.5f
+                        // 没填 Key 的厂商压暗一档：一眼能看出哪些是「能直接切的」
+                        setTextColor(if (hasKey || p.id == curPid) pal.text else pal.faint)
+                    })
+                    col.addView(TextView(this@MainActivity).apply {
+                        text = if (hasKey) "已配置 Key" else "未填 Key · 长按设为默认前先去设置里填"
+                        textSize = 10.5f
+                        setTextColor(pal.faint)
+                        setPadding(0, dp(3), 0, 0)
+                    })
+                    pr.addView(col, LinearLayout.LayoutParams(0, -2, 1f))
+                    pr.addView(TextView(this@MainActivity).apply {
+                        text = cur
+                        textSize = 11.5f
+                        typeface = MONO
+                        setTextColor(if (isCurProv) pal.accent else pal.sub)
+                        maxLines = 1
+                        ellipsize = android.text.TextUtils.TruncateAt.END
+                    }, LinearLayout.LayoutParams(-2, -2).apply { rightMargin = dp(8) })
+                    pr.addView(TextView(this@MainActivity).apply {
+                        text = if (open) "⌄" else "›"
+                        textSize = 13f
+                        setTextColor(pal.faint)
+                    })
+                    pr.setOnClickListener {
+                        sheetOpen = if (open) null else p.id
+                        render()
+                    }
+                    // 长按 = 把这家当前选中的模型钉成默认配置
+                    pr.setOnLongClickListener {
+                        cfgStore.markAsDefault(p.id, cur)
+                        render()
+                        toast("已设为默认配置：${p.label} / $cur")
+                        true
+                    }
+                    list.addView(pr, LinearLayout.LayoutParams(-1, -2))
+
+                    if (!open) continue
+
+                    // ---- 展开：这家的模型清单 ----
+                    //
+                    // 名单以预设为准，但**当前在用的那个一定放进来**：用户可能是在设置页
+                    // 手填的名字、或者用「拉取可用模型」从厂商现拉的，那些都不在预设里。
+                    // 不补这一条的话，展开后看不到自己正在用的模型，也就没法切回去了。
+                    val names = LinkedHashSet<String>()
+                    if (cur.isNotBlank()) names += cur
+                    p.models.forEach { names += it.name }
+
+                    for (mn in names) {
+                        val picked = mn == cur
+                        val isDef = cfgStore.isDefaultPair(p.id, mn)
+                        val label = AiProviders.modelLabel(p, mn)
+                        val vision = AiProviders.supportsVision(p, mn) || AiProviders.guessVision(mn)
+                        val mr = LinearLayout(this@MainActivity).apply {
+                            orientation = LinearLayout.HORIZONTAL
+                            gravity = Gravity.CENTER_VERTICAL
+                            setPadding(dp(30), dp(9), dp(14), dp(9))
+                            background = pressable(
+                                roundCard(this@MainActivity, pal.card, pal.card, 0, 0), 0x14000000
+                            )
+                        }
+                        mr.addView(TextView(this@MainActivity).apply {
+                            text = if (picked) "◉" else "○"
+                            textSize = 11f
+                            setTextColor(if (picked) pal.accent else pal.faint)
+                        }, LinearLayout.LayoutParams(-2, -2).apply { rightMargin = dp(9) })
+                        val mcol = LinearLayout(this@MainActivity).apply { orientation = LinearLayout.VERTICAL }
+                        mcol.addView(TextView(this@MainActivity).apply {
+                            text = if (isDef) "★ $mn" else mn
+                            textSize = 12f
+                            typeface = MONO
+                            setTextColor(if (picked) pal.accent else pal.text)
+                        })
+                        if (label != mn) mcol.addView(TextView(this@MainActivity).apply {
+                            text = label
+                            textSize = 10.5f
+                            setTextColor(pal.sub)
+                            setPadding(0, dp(2), 0, 0)
+                        })
+                        mr.addView(mcol, LinearLayout.LayoutParams(0, -2, 1f))
+                        if (vision) mr.addView(TextView(this@MainActivity).apply {
+                            text = "看图"
+                            textSize = 9.5f
+                            setTextColor(pal.accent2)
+                            setPadding(dp(4), dp(2), dp(4), dp(2))
+                            background = roundCard(this@MainActivity, pal.cardAlt, pal.groupBorder, 5)
+                        })
+                        mr.setOnClickListener {
+                            cfgStore.providerId = p.id
+                            cfgStore.setModel(p.id, mn)
+                            refreshHeader()
+                            render()
+                            addSystemLine("已切到 ${p.label} / $mn")
+                        }
+                        mr.setOnLongClickListener {
+                            cfgStore.markAsDefault(p.id, mn)
+                            render()
+                            toast("已设为默认配置：$mn")
+                            true
+                        }
+                        list.addView(mr, LinearLayout.LayoutParams(-1, -2))
+                    }
+                }
+            }
+        }
+        render()
+
+        // 列表高度封顶：超过屏幕一半就自己滚，别把整块屏幕吃掉
+        val cap = (resources.displayMetrics.heightPixels * 0.52f).toInt()
+        sc.layoutParams = LinearLayout.LayoutParams(-1, cap)
+        root.addView(sc)
+
+        root.addView(View(this).apply { setBackgroundColor(pal.border) },
+            LinearLayout.LayoutParams(-1, dp(1)))
+        root.addView(TextView(this).apply {
+            text = "点模型立刻切换 · 长按一行设为默认配置 · 右下角胶囊随时再打开"
+            textSize = 10.5f
+            setTextColor(pal.faint)
+            setPadding(dp(16), dp(9), dp(16), dp(12))
+        })
+
+        dlg.setContentView(root)
+        dlg.window?.let { w ->
+            w.setBackgroundDrawable(android.graphics.drawable.ColorDrawable(0))
+            w.addFlags(android.view.WindowManager.LayoutParams.FLAG_DIM_BEHIND)
+            w.setDimAmount(0.42f)
+            w.setGravity(Gravity.BOTTOM)
+        }
+        dlg.show()
+        dlg.window?.setLayout(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+    }
+
     private fun showSettings() {
         val ctx = this
         val col = LinearLayout(ctx).apply {
@@ -5086,6 +5666,38 @@ makerRow1.addView(ghostBtnOf(ctx, pal, "扫码登录").apply {
         val modelEt = input("模型名（可直接手填最新模型）", cfgStore.modelOf(curProvider.id))
         col.addView(modelEt, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(6) })
 
+        // 设为默认配置：和底部模型面板里的「长按」是同一件事，这里给一个明面入口 ——
+        // 不是所有人都会去长按，但「默认配置」这个概念得让人看得见、点得到。
+        val defRow = LinearLayout(ctx).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(12), dp(9), dp(12), dp(9))
+            background = pressable(roundCard(ctx, pal.cardAlt, pal.border, 12), 0x14000000)
+        }
+        val defText = TextView(ctx).apply {
+            textSize = 13f
+            setTextColor(pal.text)
+            layoutParams = LinearLayout.LayoutParams(0, -2, 1f)
+        }
+        fun formModel(): String =
+            modelEt.text.toString().trim().ifEmpty { cfgStore.modelOf(curProvider.id) }
+
+        fun bindDef() {
+            val isDef = cfgStore.isDefaultPair(curProvider.id, formModel())
+            defText.text = if (isDef) "★ 这就是默认配置（下次打开用它）"
+            else "设为默认配置（下次打开用它）"
+            defText.setTextColor(if (isDef) pal.accent else pal.text)
+        }
+        defRow.addView(defText)
+        defRow.setOnClickListener {
+            val m = formModel()
+            cfgStore.markAsDefault(curProvider.id, m)
+            bindDef()
+            toast("已设为默认配置：${curProvider.label} / $m")
+        }
+        col.addView(defRow, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(6) })
+        bindDef()
+
         // 这个下拉本身就是「拉取可用模型」：点一下就去问厂商现在有哪些模型，
         // 不再依赖写死的预设（预设永远追不上厂商改名/上新）。
         val pickText = TextView(ctx).apply {
@@ -5113,6 +5725,7 @@ makerRow1.addView(ghostBtnOf(ctx, pal, "扫码登录").apply {
                 modelEt.setText(picked)
                 pickText.text = "已选 · $picked"
                 pickText.setTextColor(pal.accent)
+                bindDef()
             }
         }
         col.addView(pickRow, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(6) })
@@ -5230,6 +5843,8 @@ makerRow1.addView(ghostBtnOf(ctx, pal, "扫码登录").apply {
                 testResult.text = ""
                 // 换厂商时把「去哪申请 Key」那一行一起换掉，免得看着还是上一家的地址
                 bindApply()
+                // 「设为默认配置」那一行也要跟着换：换一家之后默认与否的判断就变了
+                bindDef()
             }
 
             override fun onNothingSelected(parent: android.widget.AdapterView<*>?) {}
@@ -5497,16 +6112,30 @@ makerRow1.addView(ghostBtnOf(ctx, pal, "扫码登录").apply {
     private fun refreshHeader() {
         val cfg = cfgStore.active()
         val skill = SkillPresets.byId(cfgStore.skillId)
+        // projKind 要扫目录、还可能读 index.html，一次调用够用，下面都复用这个布尔值
+        // （kindLabel() 内部也是 projKind，别在这儿再调一次）
+        val maker = projKind(currentGame) == "maker"
+        val kind = if (maker) "Maker" else "H5"
+
         titleTv.text = "Hexora"
+        setTextIf(modeBadge, if (maker) "MAKER" else "H5")
         subTv.text = buildString {
             append("项目 $currentGame")
             append("  ·  ${cfg.provider.label} / ${cfg.modelLabel}")
             append(if (cfg.vision) "  ·  视觉开" else "  ·  视觉关")
             append("  ·  ${skill.label}")
         }
-        modelBtn.text = "${cfg.provider.label} / ${cfg.model} ▾"
-        projBtn.text = "$currentGame ▾"
-        previewLabel.text = "项目：$currentGame · ${kindLabel(currentGame)} ⟳"
+
+        // 底部胶囊只放模型名 —— 厂商名塞进来会把胶囊撑爆，厂商在面板和状态栏里看得到。
+        // ★ 表示「这一对就是默认配置」，让用户随时知道默认是哪一只。
+        val star = if (cfgStore.isDefaultPair(cfg.provider.id, cfg.model)) "★ " else ""
+        setTextIf(modelBtn, "$star${cfg.model} ▴")
+        setTextIf(projBtn, currentGame)
+        setTextIf(statusProj, "$currentGame · $kind")
+        setTextIf(statusModel, "${cfg.provider.label} / ${cfg.model}")
+        // 运行中别覆盖状态 —— refreshHeader 也可能在跑的时候被调起来（比如切模型）
+        if (!running) setTextIf(statusRun, "待命")
+        previewLabel.text = "项目：$currentGame · $kind ⟳"
     }
 
     // ==================== 小工具 ====================

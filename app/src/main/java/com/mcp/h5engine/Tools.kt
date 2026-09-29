@@ -607,11 +607,21 @@ class EngineTools(private val ui: GameUi, private val root: File) {
             val rel = a.getString("path")
             val f = resolve(a.optString("game"), rel)
             f.parentFile?.mkdirs()
-            f.writeText(a.getString("content"))
+            // 改之前先量一下行数：写完就能报「行数 120 → 135」这种变化量。
+            // 界面那行「已工作」里显示的就是它 —— 用户要能一眼看出这次改动多大。
+            val oldLines = if (f.isFile) runCatching { f.readLines().size }.getOrDefault(0) else 0
+            val body = a.getString("content")
+            f.writeText(body)
+            val newLines = body.split('\n').size
+            val growth = when {
+                oldLines == 0 -> "新建 $newLines 行"
+                newLines == oldLines -> "仍是 $newLines 行"
+                else -> "行数 $oldLines → $newLines"
+            }
             val isShared = rel.trim().trimStart('/').startsWith("_shared/")
             if (!isShared) ui.reloadGame()
             ToolResult(
-                "已写入 $rel（${f.length()} 字节）" +
+                "已写入 $rel（$growth，${f.length()} 字节）" +
                     if (isShared) "（共享资产，不需要重载）" else "，并已热重载"
             )
         }
@@ -1056,10 +1066,15 @@ class EngineTools(private val ui: GameUi, private val root: File) {
             require(s in 0..lines.size) { "startLine 越界（文件共 ${lines.size} 行）" }
             val to = e.coerceIn(s, lines.size)
             repeat(to - s) { lines.removeAt(s) }
-            lines.addAll(s, a.getString("content").split("\n"))
+            val added = a.getString("content").split("\n")
+            lines.addAll(s, added)
             f.writeText(lines.joinToString("\n"))
             ui.reloadGame()
-            ToolResult("已替换 ${a.getInt("startLine")}-$e 行，文件现在 ${lines.size} 行，并已热重载")
+            // 报出 -删 +增：这是「这次改动多大」最直观的表达，用户和模型都用得上
+            ToolResult(
+                "已替换 ${a.getInt("startLine")}-$e 行（-${to - s} +${added.size}），" +
+                    "文件现在 ${lines.size} 行，并已热重载"
+            )
         }
 
         "game_launch" -> {

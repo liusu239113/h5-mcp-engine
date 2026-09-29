@@ -10,7 +10,9 @@ import java.io.File
  *   STEP:n            第 n 轮开始
  *   THINK:xxx         模型的思维链（deepseek-reasoner 之类）
  *   AI:xxx            模型说出来的一段话
- *   TOOL:[名字] 摘要   一次工具调用
+ *   TOOLRUN:[名字] 文件 一次工具调用开始（文件可空，见 toolTarget）
+ *   TOOL:[名字] 摘要   一次工具调用成功
+ *   TOOLFAIL:[名字] 摘要 一次工具调用失败
  *   RELOAD            文件被改过，预览该刷新了
  *   INFO:xxx          普通提示，进日志
  *   [失败] xxx         错误卡片
@@ -251,7 +253,9 @@ class AgentRunner(
                 }
 
                 // 工具自己抛异常（参数不合法 / 文件不存在之类）同样要补响应，道理同上
-                onEvent("TOOLRUN:[${tc.name}]")
+                // 把「动的是哪个文件」一起报给界面：对话里那行就能显示成「修改 main.js」，
+                // 而不是光秃秃一个 game_write —— 用户要看得见 AI 正在改哪份文件。
+                onEvent("TOOLRUN:[${tc.name}]" + toolTarget(tc.name, tc.argsJson))
                 val res = runCatching { tools.call(tc.name, tc.argsJson) }
                     .getOrElse { t -> EngineTools.ToolResult("工具执行出错：${t.javaClass.simpleName}: ${t.message}") }
                 val images = if (cfg.vision) res.images else emptyList()
@@ -320,6 +324,24 @@ class AgentRunner(
             "Maker Git 鉴权失败",
             "auth 缺失"
         ).any { t.contains(it) }
+    }
+
+    /**
+     * 从工具参数里抠出「这次动的是哪个文件」，给界面那行显示用（可空）。
+     *
+     * 只认本地读写类工具（game_*）的 path 参数：这几个是唯一能确定
+     * 「确实在碰某个文件」的。MCP / 云工具的 path 语义各家不同，硬猜会显示错文件名，
+     * 那比不显示更糟 —— 所以宁可不显示，退回工具名。
+     */
+    private fun toolTarget(name: String, argsJson: String): String {
+        if (!name.startsWith("game_")) return ""
+        return runCatching {
+            val o = org.json.JSONObject(argsJson)
+            // path 为准；game_create 没有 path，退一步用它的工程 id（显示成「新建 my_game」）
+            val p = o.optString("path", "").ifBlank { o.optString("id", "") }.trim()
+            // 只留文件名：路径整串太长，对话里那一行放不下（完整路径点开详情能看到）
+            if (p.isBlank()) "" else p.substringAfterLast('/')
+        }.getOrDefault("")
     }
 
     /**
