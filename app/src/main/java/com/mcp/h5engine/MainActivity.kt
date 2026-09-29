@@ -2259,12 +2259,39 @@ class MainActivity : AppCompatActivity(), GameUi {
 
     // ==================== 看 / 改代码（对话页那排图标） ====================
 
+    /**
+     * 当前项目到底是什么工程。
+     *
+     * H5：有 index.html，WebView 直接跑；
+     * Maker：UrhoX 工程（有 .project/project.json 或 .maker-mcp/），
+     * WebView 跑不了（引擎是桌面端的），预览改为「提交构建 -> Maker 链接 / 二维码」。
+     */
+    private fun projKind(name: String): String {
+        val d = File(gameRoot, name)
+        return when {
+            File(d, ".project/project.json").isFile -> "maker"
+            File(d, ".maker-mcp").isDirectory -> "maker"
+            File(d, "urhox-libs").isDirectory -> "maker"
+            else -> "h5"
+        }
+    }
+
+    /** 当前项目是不是 Maker / UrhoX 工程 */
+    private fun isMakerProject(): Boolean = projKind(currentGame) == "maker"
+
     /** 代码图标：直接开 index.html（没有就 game.js，再没有就第一个文件） */
     private fun editMainCode() {
         val dir = File(gameRoot, currentGame)
-        val f = listOf("index.html", "game.js").map { File(dir, it) }
-            .firstOrNull { it.exists() }
-            ?: dir.walkTopDown().firstOrNull { it.isFile }
+        val f = if (projKind(currentGame) == "maker") {
+            // UrhoX 工程：入口是 scripts/main.lua，另有 CLAUDE.md（AI 开发指南）
+            listOf("scripts/main.lua", "main.lua", "CLAUDE.md", "README.md").map { File(dir, it) }
+                .firstOrNull { it.exists() }
+                ?: dir.walkTopDown().firstOrNull { it.isFile && it.extension != "pak" }
+        } else {
+            listOf("index.html", "game.js").map { File(dir, it) }
+                .firstOrNull { it.exists() }
+                ?: dir.walkTopDown().firstOrNull { it.isFile }
+        }
         if (f == null) {
             toast("这个项目还没有文件")
             return
@@ -4246,6 +4273,44 @@ makerRow1.addView(ghostBtnOf(ctx, pal, "扫码登录").apply {
         }, LinearLayout.LayoutParams(-2, -2))
         col.addView(makerRow2, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(8) })
 
+        // ---- Maker （UrhoX）工程：初始化 / 拉取 / AI dev-kit ----
+        // 这一排以前是**不可能成功**的：Maker CLI 的 init 第一件事就是 ensureGitAvailable()，
+        // 而安卓沙箱里根本没有 git。现在 App 自带了 musl/aarch64 git（随运行时释放到 <rt>/gitrt），
+        // init 能真正跑起来 —— 也就能把 Maker 工程 clone 到本地了。
+        val makerRow3 = LinearLayout(ctx).apply { orientation = LinearLayout.HORIZONTAL }
+        makerRow3.addView(ghostBtnOf(ctx, pal, "初始化/拉取工程").apply {
+            setOnClickListener {
+                val et = input("Maker app-id（留空 = 让 CLI 列出应用让你选）", "")
+                val box = LinearLayout(ctx).apply {
+                    orientation = LinearLayout.VERTICAL
+                    setPadding(dp(16), dp(6), dp(16), 0)
+                }
+                box.addView(et)
+                android.app.AlertDialog.Builder(this@MainActivity)
+                    .setTitle("拉取 Maker 工程（当前：" + currentGame + "）")
+                    .setView(box)
+                    .setPositiveButton("开始") { _, _ ->
+                        val id = et.text.toString().trim()
+                        val proj = File(gameRoot, currentGame).absolutePath
+                        val cmd = if (id.isEmpty()) {
+                            listOf("init", "--target-dir", proj, "--skip-mcp-install")
+                        } else {
+                            listOf("init", "--target-dir", proj, "--skip-mcp-install", "--app-id", id)
+                        }
+                        makerRun(cmd, null, "初始化 / 拉取 Maker 工程")
+                    }
+                    .setNegativeButton("取消", null)
+                    .show()
+            }
+        }, LinearLayout.LayoutParams(-2, -2).apply { rightMargin = dp(8) })
+        makerRow3.addView(ghostBtnOf(ctx, pal, "更新 AI dev-kit").apply {
+            setOnClickListener {
+                val proj = File(gameRoot, currentGame).absolutePath
+                makerRun(listOf("dev-kit", "update", "--target-dir", proj), null, "更新 AI dev-kit")
+            }
+        }, LinearLayout.LayoutParams(-2, -2))
+        col.addView(makerRow3, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(8) })
+
         col.addView(makerOut, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(8) })
 
         // ---------- 厂商 ----------
@@ -4899,7 +4964,22 @@ makerRow1.addView(ghostBtnOf(ctx, pal, "扫码登录").apply {
             logs.add("[system] 打开项目 $id")
             // 该项目的对话历史重新装载（项目之间绝不共享上下文）
             reloadSessionsForProject()
-            if (File(dir, "index.html").exists()) {
+            if (projKind(id) == "maker") {
+                // UrhoX 工程：引擎哥是桌面端的（win/mac/linux-x86_64），手机上跑不起来，
+                // 硬塞 WebView 只会白屏。这里说清「怎么看效果」。
+                web.loadDataWithBaseURL(
+                    null,
+                    "<html><body style='background:#0F1011;color:#9A9A9A;font-family:sans-serif;padding:36px;line-height:1.9'>" +
+                        "<h3 style='color:#EDEDED;font-weight:500'>" + id + " 是 Maker（UrhoX）工程</h3>" +
+                        "<p>它不是网页游戏，本地预览跑不了原生引擎。<b style='color:#4FCFB4'>看效果的正确路径</b>：</p>" +
+                        "<p>回到「对话」页说一句 <b style='color:#4FCFB4'>提交构建</b>，AI 会推到 Maker 云端构建，" +
+                        "然后给你<b>链接 / 二维码</b>，在 TapTap 里就能看真机效果。</p>" +
+                        "<p style='color:#6E6E6E'>工程目录：</p>" +
+                        "<p style='color:#4FCFB4;word-break:break-all'>" + dir.absolutePath + "</p>" +
+                        "</body></html>",
+                    "text/html", "utf-8", null
+                )
+            } else if (File(dir, "index.html").exists()) {
                 web.loadUrl(url)
             } else {
                 // 没有 index.html 时给个说明页，而不是白屏
