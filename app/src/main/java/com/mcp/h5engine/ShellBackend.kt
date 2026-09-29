@@ -37,7 +37,7 @@ interface ShellBackend {
 class DirectShellBackend : ShellBackend {
     override val id = "direct"
 
-    override fun run(cmd: List<String>, cwd: File?, env: Map<String, String>, timeoutMs: Long): Res {
+    override fun run(cmd: List<String>, cwd: File?, env: Map<String, String>, timeoutMs: Long): ShellBackend.Res {
         val pb = ProcessBuilder(cmd)
         if (cwd != null) pb.directory(cwd)
         pb.environment().putAll(env)
@@ -53,10 +53,10 @@ class DirectShellBackend : ShellBackend {
         val done = p.waitFor(timeoutMs, TimeUnit.MILLISECONDS)
         if (!done) {
             p.destroyForcibly()
-            return Res(-1, out.toString(), err.toString() + "\n[超时 ${timeoutMs}ms，已强杀]")
+            return ShellBackend.Res(-1, out.toString(), err.toString() + "\n[超时 ${timeoutMs}ms，已强杀]")
         }
         t1.join(500); t2.join(500)
-        return Res(p.exitValue(), out.toString(), err.toString())
+        return ShellBackend.Res(p.exitValue(), out.toString(), err.toString())
     }
 }
 
@@ -64,7 +64,7 @@ class DirectShellBackend : ShellBackend {
 class SuShellBackend(private val suPath: String = "su") : ShellBackend {
     override val id = "su"
 
-    override fun run(cmd: List<String>, cwd: File?, env: Map<String, String>, timeoutMs: Long): Res {
+    override fun run(cmd: List<String>, cwd: File?, env: Map<String, String>, timeoutMs: Long): ShellBackend.Res {
         val line = (if (cwd != null) "cd ${cwd.absolutePath} && " else "") + cmd.joinToString(" ")
         return DirectShellBackend().run(listOf(suPath, "-c", line), null, env, timeoutMs)
     }
