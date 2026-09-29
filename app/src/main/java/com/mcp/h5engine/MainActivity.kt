@@ -1167,6 +1167,10 @@ class MainActivity : AppCompatActivity(), GameUi {
 
 
     private fun addBubble(text: String, fromUser: Boolean, thumbs: List<ByteArray> = emptyList()) {
+        // 空内容不画。以前这里会照画不误：段落被过滤光之后兜底成 listOf(text)，
+        // 于是一个只含空白的消息会渲染成「一个只有复制按钮、没有字的空块」——
+        // 看着就像一个「缺了边框的卡片」（用户报的「输出完成卡片没有边框」很可能就是它）。
+        if (text.isBlank() && thumbs.isEmpty()) return
         // 一条消息 = 一个气泡；内部按空行切段，每段自带「复制」，含链接的段落多一个「复制链接」
         // 用户消息保留气泡（自己的话要能和 AI 的分开）；
         // **AI 的正文不再套卡片** —— 一屏几十个白框会让人分不清「正文」和「插进来的卡片」，
@@ -2914,8 +2918,20 @@ class MainActivity : AppCompatActivity(), GameUi {
         for (m in history) {
             when (m.role) {
                 "user" -> addBubble(m.text ?: "（图片）", true, m.images)
-                "assistant" -> if (!m.text.isNullOrBlank()) addBubble(m.text, false)
-                else -> addSystemLine(m.text ?: "")
+                "assistant" -> {
+                    if (!m.text.isNullOrBlank()) addBubble(m.text, false)
+                    // 这一轮调过工具：插一条「已工作 · 修改 2 次」摘要，
+                    // 但**绝不回放工具结果原文**（见下面 tool 分支的说明）
+                    if (m.toolCalls.isNotEmpty()) addHistoryWorkLine(m.toolCalls.map { it.name })
+                }
+                // ⚠️ 工具结果**不回放**。
+                // 以前这里走 else 分支，被当成「系统提示」整段居中打印 ——
+                // 而一条工具结果最长 16000 字符（一次 game_read 就是整个文件），
+                // 铺满整屏不说，还居中 + 灰字，用户看到的就是
+                // 「偶尔犯病出来一大段代码，然后对话历史就看不见了」。
+                // 想看细节：当时的卡片里有，或者让它重新读一次 —— 都比把 16k 塞进对话强。
+                "tool" -> Unit
+                else -> if (!m.text.isNullOrBlank()) addSystemLine(m.text)
             }
         }
         chatScroll.removeAllViews()
@@ -2923,6 +2939,50 @@ class MainActivity : AppCompatActivity(), GameUi {
         old.removeAllViews()
         stickBottom = true
         scrollChatToBottom(true)
+    }
+
+    /**
+     * 回放历史时的「已工作」摘要行。
+     *
+     * 只报「这一轮干了什么、几次」，不回放工具结果原文 ——
+     * 一条结果最长 16k 字符，回放出来就是铺满整屏的一坨代码，
+     * 把上下文全顶没（用户报的「犯病成一大段长内容」）。
+     * 历史里没存工具行明细，所以这里不给展开，只报个大概。
+     */
+    private fun addHistoryWorkLine(names: List<String>) {
+        if (names.isEmpty()) return
+        val verbs = LinkedHashMap<String, Int>()
+        for (n in names) {
+            val v = toolVerb(n)
+            verbs[v] = (verbs[v] ?: 0) + 1
+        }
+        val sum = if (verbs.size == 1) {
+            val e = verbs.entries.first()
+            e.key + " " + e.value + " 次"
+        } else {
+            "调用 ${names.size} 次"
+        }
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(11), dp(7), dp(11), dp(7))
+            background = roundCard(this@MainActivity, pal.groupBg, pal.groupBorder, 10)
+        }
+        row.addView(ImageView(this).apply {
+            setImageDrawable(LineIcon("layers", pal.sub, 1.8f))
+        }, LinearLayout.LayoutParams(dp(14), dp(14)).apply { rightMargin = dp(8) })
+        row.addView(TextView(this).apply {
+            text = "已工作 · $sum"
+            textSize = 11.5f
+            typeface = MONO
+            setTextColor(pal.sub)
+            maxLines = 1
+            ellipsize = android.text.TextUtils.TruncateAt.END
+        }, LinearLayout.LayoutParams(0, -2, 1f))
+        chatList.addView(row, LinearLayout.LayoutParams(-1, -2).apply {
+            topMargin = dp(3)
+            bottomMargin = dp(3)
+        })
     }
 
     /** 第一条用户消息顺便当标题，省得一堆「新对话」 */
@@ -3523,7 +3583,38 @@ class MainActivity : AppCompatActivity(), GameUi {
         if (pendingEvents.isEmpty()) return
         val txt = pendingEvents.joinToString("\n")
         pendingEvents.clear()
-        addSystemLine(txt)
+        // 「完成 · 共跑了 N 轮 · 累计 … tok」是这一轮的收尾小结，单独立成一张**带边框**的卡，
+        // 和上面的「已工作」组对齐。以前它混在其它提示里当一行居中灰字，
+        // 看着就是「一张没画完边框的卡片」（用户报的正是这个）。
+        if (txt.startsWith("完成 ·") || txt.startsWith("已停止 ·") || txt.startsWith("到步数上限")) {
+            addRunDoneCard(txt)
+        } else {
+            addSystemLine(txt)
+        }
+    }
+
+    /** 本轮收尾小结卡：带边框，和「已工作」组同一套观感 */
+    private fun addRunDoneCard(text: String) {
+        val card = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(12), dp(9), dp(12), dp(9))
+            background = roundCard(this@MainActivity, pal.card, pal.border, 10)
+        }
+        card.addView(TextView(this).apply {
+            text = text
+            textSize = 11.5f
+            typeface = MONO
+            setTextColor(pal.sub)
+            maxLines = 3
+            ellipsize = android.text.TextUtils.TruncateAt.END
+        }, LinearLayout.LayoutParams(0, -2, 1f))
+        card.addView(iconOp("copy", "复制本轮小结") { copyToClip(text, "本轮小结") })
+        chatList.addView(card, LinearLayout.LayoutParams(-1, -2).apply {
+            topMargin = dp(4)
+            bottomMargin = dp(4)
+        })
+        scrollChatToBottom()
     }
 
     // ==================== 项目（一个项目一个目录） ====================
@@ -5553,6 +5644,36 @@ class MainActivity : AppCompatActivity(), GameUi {
                     InputType.TYPE_NUMBER_FLAG_DECIMAL
             }
 
+        /**
+         * 带**真标签**的输入框 —— 设置页所有输入项都该用它，不要直接用 input()。
+         *
+         * 为什么：input() 只设了 hint，而 hint **只在框里没内容时**才显示。
+         * 设置页这些框基本都是有值的（0.4 / 400 / 40 / 2 / 6 …），于是标签永远看不见 ——
+         * 用户对着一排光秃秃的数字，根本分不清哪个是 temperature、哪个是轮数上限
+         * （「设置里面参数不知道干嘛的」就是这么来的）。
+         * 现在标签是框上方独立的一行文字，**永远可见**。
+         *
+         * 它会自己把自己挂进 col，调用点不用再 col.addView —— 少一处漏加的机会。
+         */
+        fun field(
+            label: String,
+            value: String,
+            numeric: Boolean = false,
+            into: LinearLayout = col
+        ): EditText {
+            val wrap = LinearLayout(ctx).apply { orientation = LinearLayout.VERTICAL }
+            wrap.addView(TextView(ctx).apply {
+                text = label
+                textSize = 12.5f
+                setTextColor(pal.sub)
+                setPadding(dp(2), 0, dp(2), dp(5))
+            })
+            val et = input(label, value, numeric)
+            wrap.addView(et, LinearLayout.LayoutParams(-1, -2))
+            into.addView(wrap, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(9) })
+            return et
+        }
+
         fun spinnerOf(labels: List<String>, selected: Int) = android.widget.Spinner(ctx).apply {
             // 自绘 item 文字颜色：系统默认的是纯黑，深色模式下等于看不见（这也是「原生味」来源）。
             // 顺带把内边距和字号统一到跟输入框一致。
@@ -5636,8 +5757,7 @@ class MainActivity : AppCompatActivity(), GameUi {
             }.start()
         }
 
-        val patEt = input("粘贴 PAT（也可用右边的扫码登录）", "")
-        col.addView(patEt, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(2) })
+        val patEt = field("粘贴 PAT（也可用右边的扫码登录）", "")
 
         val makerRow1 = LinearLayout(ctx).apply { orientation = LinearLayout.HORIZONTAL }
         makerRow1.addView(ghostBtnOf(ctx, pal, "保存 PAT").apply {
@@ -5736,8 +5856,7 @@ makerRow1.addView(ghostBtnOf(ctx, pal, "扫码登录").apply {
         }
         col.addView(lockCb, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(8) })
 
-        val personaEt = input("人格名（默认就是应用名）", cfgStore.personaName)
-        col.addView(personaEt, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(6) })
+        val personaEt = field("人格名（默认就是应用名）", cfgStore.personaName)
         col.addView(TextView(ctx).apply {
             text = "只锁「身份」，不锁「能力」—— 这是故意的。" +
                 "「能不能做 3D / 能不能联机」这类必须如实回答：连能力都让它编的话，" +
@@ -5755,10 +5874,8 @@ makerRow1.addView(ghostBtnOf(ctx, pal, "扫码登录").apply {
 
         var curProvider = AiProviders.ALL[provSp.selectedItemPosition]
 
-        val urlEt = input("Base URL（可改成中转站）", cfgStore.effectiveBaseUrl(curProvider))
-        val keyEt = input("API Key（只存本机，不会上传）", cfgStore.keyOf(curProvider.id))
-        col.addView(urlEt, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(6) })
-        col.addView(keyEt, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(6) })
+        val urlEt = field("接口地址 Base URL（走中转站/自建代理就改这里）", cfgStore.effectiveBaseUrl(curProvider))
+        val keyEt = field("API Key（只存本机，不会上传）", cfgStore.keyOf(curProvider.id))
 
         // ---------- 去哪申请 Key（用户要求：配置的时候就得能直接点到官网） ----------
         val applyTitle = TextView(ctx).apply {
@@ -5820,8 +5937,7 @@ makerRow1.addView(ghostBtnOf(ctx, pal, "扫码登录").apply {
 
         // ---------- 模型 ----------
         section("模型")
-        val modelEt = input("模型名（可直接手填最新模型）", cfgStore.modelOf(curProvider.id))
-        col.addView(modelEt, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(6) })
+        val modelEt = field("模型名（厂商出新模型时直接手填这里）", cfgStore.modelOf(curProvider.id))
 
         // 设为默认配置：和底部模型面板里的「长按」是同一件事，这里给一个明面入口 ——
         // 不是所有人都会去长按，但「默认配置」这个概念得让人看得见、点得到。
@@ -5929,10 +6045,22 @@ makerRow1.addView(ghostBtnOf(ctx, pal, "扫码登录").apply {
 
         // ---------- 参数 ----------
         section("参数")
-        val tempEt = input("temperature（越低越稳定）", cfgStore.temperature.toString(), true)
-        val stepsEt = input("单次最多工具轮数", cfgStore.maxSteps.toString(), true)
-        col.addView(tempEt, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(6) })
-        col.addView(stepsEt, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(6) })
+        val tempEt = field("temperature 随机性（0 = 最稳，1 = 最放飞）", cfgStore.temperature.toString(), true)
+        col.addView(TextView(ctx).apply {
+            text = "写代码为主，0.3 ~ 0.5 之间最稳；调高了它容易自己加戏、改不该改的地方。"
+            textSize = 11.5f
+            setTextColor(pal.faint)
+            setPadding(dp(2), dp(4), dp(2), 0)
+        })
+
+        val stepsEt = field("单次最多工具轮数（一条消息里最多让它调多少次工具）", cfgStore.maxSteps.toString(), true)
+        col.addView(TextView(ctx).apply {
+            text = "调小省额度、也不会跑飞；调大能给复杂任务更多余地。" +
+                "到上限了它会停下来报一句，你再发一条就能接着做 —— 不会把前面的成果丢掉。"
+            textSize = 11.5f
+            setTextColor(pal.faint)
+            setPadding(dp(2), dp(4), dp(2), 0)
+        })
 
         val fbCb = CheckBox(ctx).apply {
             text = "模型看不了图时，把截图存盘并把路径告诉它"
@@ -5952,25 +6080,33 @@ makerRow1.addView(ghostBtnOf(ctx, pal, "扫码登录").apply {
             setTextColor(pal.faint)
         }, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(4) })
 
-        val maxOutEt = input(
-            "输出上限 max_tokens（0 = 交给服务商决定）",
+        val maxOutEt = field(
+            "单次回答最多写多少字（max_tokens，0 = 让它自己定）",
             cfgStore.maxOutTokens.toString(), true
         )
-        col.addView(maxOutEt, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(6) })
 
-        val histEt = input("历史条数上限（只带最近 N 条消息）", cfgStore.historyLimit.toString(), true)
-        col.addView(histEt, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(6) })
+        val histEt = field(
+            "每次请求带上最近多少条消息（越小请求越轻）",
+            cfgStore.historyLimit.toString(), true
+        )
+        col.addView(TextView(ctx).apply {
+            text = "调小省 token，但 AI 会「忘事」—— 之前读过的文件、定过的方案可能就不记得了。"
+            textSize = 11.5f
+            setTextColor(pal.faint)
+            setPadding(dp(2), dp(4), dp(2), 0)
+        })
 
         // 下面这两项比「条数」更影响体积：截图和长工具结果都是**每一步都要重发一遍**的，
         // 不像历史条数那样容易被忽略。
-        val keepImgEt = input("历史里保留几张截图（0 = 一张不留）", cfgStore.keepImages.toString(), true)
-        col.addView(keepImgEt, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(6) })
+        val keepImgEt = field(
+            "历史里保留几张截图（0 = 一张不留）",
+            cfgStore.keepImages.toString(), true
+        )
 
-        val keepTrEt = input(
+        val keepTrEt = field(
             "最近多少条长工具结果留全文（更早的压成一行占位）",
             cfgStore.keepToolResults.toString(), true
         )
-        col.addView(keepTrEt, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(6) })
         col.addView(TextView(ctx).apply {
             text = "截图是按 base64 直接塞进请求体的，而且每一步都连同历史重发 —— " +
                 "一张 720p 截图 ≈ 100KB，留十张就是每步多传 1MB，慢也慢在这儿。" +
@@ -6129,10 +6265,8 @@ makerRow1.addView(ghostBtnOf(ctx, pal, "扫码登录").apply {
                     orientation = LinearLayout.VERTICAL
                     setPadding(dp(18), dp(6), dp(18), dp(6))
                 }
-                val nameEt = input("名称", "我的 MCP")
-                val urlEt2 = input("地址（Streamable HTTP，如 http://127.0.0.1:3000/）", "http://")
-                box.addView(nameEt, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(6) })
-                box.addView(urlEt2, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(6) })
+                val nameEt = field("名称", "我的 MCP", into = box)
+                val urlEt2 = field("地址（Streamable HTTP，如 http://127.0.0.1:3000/）", "http://", into = box)
                 AlertDialog.Builder(themed())
                     .setTitle("添加 MCP 服务器")
                     .setView(box)
@@ -6183,9 +6317,8 @@ makerRow1.addView(ghostBtnOf(ctx, pal, "扫码登录").apply {
                 orientation = LinearLayout.VERTICAL
                 setPadding(dp(18), dp(6), dp(18), dp(6))
             }
-            val kouEt = input("抠图 API Key（形如 kk-xxxx…）", McpRt.koukoutuKey(ctx))
+            val kouEt = field("抠图 API Key（形如 kk-xxxx…）", McpRt.koukoutuKey(ctx), into = box)
             kouEt.inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD
-            box.addView(kouEt, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(6) })
             box.addView(TextView(ctx).apply {
                 text = "申请地址：https://www.koukoutu.com/user/dev\n" +
                     "（免费额度用完可在同一页充值；同步接口 1 积分 / 张，并发上限 5）"
