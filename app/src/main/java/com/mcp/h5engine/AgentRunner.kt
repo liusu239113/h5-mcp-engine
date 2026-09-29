@@ -4,6 +4,17 @@ import android.content.Context
 import java.io.File
 
 /**
+ * 模型「说了要做、却一个工具都没调」时，补给它的一句提醒。
+ *
+ * 弱模型很常见：写一句「我直接查一下页面运行状态」，然后就收尾了 ——
+ * 用户看到的是「才跑 1 轮就说完成了」，其实什么都没干。
+ * 这句话把它按回正轨：**直接做，别只描述**。
+ */
+private const val CONTINUE_NUDGE =
+    "（继续 —— 你上面说了要做什么，但一个工具都没有调用。请直接把那些动作做完，" +
+        "用工具去执行，不要只描述打算怎么做。全部做完再用一段话汇报结果。）"
+
+/**
  * AI 代理循环：把「用户一句话」变成「多轮工具调用」。
  *
  * 事件协议（界面靠前缀分流，别改前缀）：
@@ -238,6 +249,8 @@ class AgentRunner(
         val limit = cfg.maxSteps.coerceAtMost(skill.maxSteps)
         var step = if (resume) startStep.coerceAtLeast(0) else 0
         var wrote = false
+        /** 「说了要做却没动手」被自动催了几次（上限 2，见下面的判断） */
+        var nudges = 0
 
         // 续跑但步数预算已经用满：明说一句。否则用户点了「再试一次」之后毫无反应，
         // 只会以为按钮坏了。
@@ -272,6 +285,18 @@ class AgentRunner(
             }
 
             if (reply.toolCalls.isEmpty()) {
+                // 「嘴上说要做、手上一个工具没调」——这是弱模型最常见的掉链子方式：
+                // 它写一句「我直接查一下页面运行状态」，然后这一轮就结束了。
+                // 以前这里直接当成本轮完成，用户看到的就是「才跑了 1 轮就说完成了」，
+                // 而实际上它什么都没干（用户反复报的正是这个）。
+                // 现在给它一次机会：原话留在历史里，补一句「直接做完」，让它接着跑。
+                // 上限 2 次，免得模型翻来覆去说空话把额度烧光。
+                if (nudges < 2 && looksLikeIntent(reply.text)) {
+                    nudges++
+                    history += ChatMsg("user", CONTINUE_NUDGE)
+                    onEvent("INFO: 它说了要做却没动手，已自动催它继续（第 $nudges 次）")
+                    continue
+                }
                 if (wrote) onEvent("RELOAD")
                 onEvent("INFO: 完成 · 共跑了 $step 轮 · " + TokenStats.summary())
                 return
@@ -378,6 +403,29 @@ class AgentRunner(
             // 只留文件名：路径整串太长，对话里那一行放不下（完整路径点开详情能看到）
             if (p.isBlank()) "" else p.substringAfterLast('/')
         }.getOrDefault("")
+    }
+
+    /**
+     * 这句话是「准备动手」还是「已经交付」？
+     *
+     * 只认「准备动手」的特征。**宁可漏判也别误判** ——
+     * 把一段正常的收尾汇报当成「还要动手」，就会白追一轮、白烧额度。
+     * 所以先排除明确的完成用语，再看有没有「接下来要做某事」的口吻。
+     */
+    private fun looksLikeIntent(t: String?): Boolean {
+        if (t.isNullOrBlank()) return false
+        val s = t.lowercase()
+        val doneCues = listOf(
+            "已完成", "已经完成", "搞定了", "都改好了", "全部完成", "修复完成",
+            "做完了", "改完了", "completed", "all done", "finished"
+        )
+        if (doneCues.any { s.contains(it) }) return false
+        val actCues = listOf(
+            "让我", "我先", "我直接", "我来", "我马上", "接下来我", "下面我", "现在让我",
+            "先去", "先看", "先查", "再查", "查一下", "看一下", "确认一下", "检查一下",
+            "let me", "i'll ", "i will ", "let's ", "next i", "now i"
+        )
+        return actCues.any { s.contains(it) }
     }
 
     /**

@@ -308,6 +308,65 @@ class LineIcon(
                 path.lineTo(12f, 18.6f)
                 path.lineTo(17.4f, 13.2f)
             }
+            // 小喇叭 + 两道声波：预览「有声」
+            "volume" -> {
+                path.moveTo(4f, 9.6f)
+                path.lineTo(7.4f, 9.6f)
+                path.lineTo(11.4f, 5.8f)
+                path.lineTo(11.4f, 18.2f)
+                path.lineTo(7.4f, 14.4f)
+                path.lineTo(4f, 14.4f)
+                path.close()
+                path.moveTo(14.4f, 9.6f)
+                path.quadTo(16.1f, 12f, 14.4f, 14.4f)
+                path.moveTo(17.4f, 7.2f)
+                path.quadTo(20.4f, 12f, 17.4f, 16.8f)
+            }
+            // 小喇叭 + 叉：预览「已静音」
+            "mute" -> {
+                path.moveTo(4f, 9.6f)
+                path.lineTo(7.4f, 9.6f)
+                path.lineTo(11.4f, 5.8f)
+                path.lineTo(11.4f, 18.2f)
+                path.lineTo(7.4f, 14.4f)
+                path.lineTo(4f, 14.4f)
+                path.close()
+                path.moveTo(15f, 9.7f)
+                path.lineTo(20.2f, 14.9f)
+                path.moveTo(20.2f, 9.7f)
+                path.lineTo(15f, 14.9f)
+            }
+            // 放大镜 + 加号：放大画面
+            "zoom_in" -> {
+                path.addCircle(10.6f, 10.6f, 6.4f, Path.Direction.CW)
+                path.moveTo(15.4f, 15.4f)
+                path.lineTo(20.4f, 20.4f)
+                path.moveTo(10.6f, 7.8f)
+                path.lineTo(10.6f, 13.4f)
+                path.moveTo(7.8f, 10.6f)
+                path.lineTo(13.4f, 10.6f)
+            }
+            // 放大镜 + 减号：缩小画面
+            "zoom_out" -> {
+                path.addCircle(10.6f, 10.6f, 6.4f, Path.Direction.CW)
+                path.moveTo(15.4f, 15.4f)
+                path.lineTo(20.4f, 20.4f)
+                path.moveTo(7.8f, 10.6f)
+                path.lineTo(13.4f, 10.6f)
+            }
+            // 相机：把当前画面发给 AI
+            "camera" -> {
+                path.moveTo(3.6f, 8.6f)
+                path.lineTo(7.6f, 8.6f)
+                path.lineTo(9.2f, 6.2f)
+                path.lineTo(14.8f, 6.2f)
+                path.lineTo(16.4f, 8.6f)
+                path.lineTo(20.4f, 8.6f)
+                path.lineTo(20.4f, 19f)
+                path.lineTo(3.6f, 19f)
+                path.close()
+                path.addCircle(12f, 13.6f, 3.2f, Path.Direction.CW)
+            }
         }
         canvas.drawPath(path, p)
         canvas.restore()

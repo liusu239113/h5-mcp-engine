@@ -434,7 +434,10 @@ class MainActivity : AppCompatActivity(), GameUi {
 
     /** 用户在预览页手动按的静音开关（优先级最高：切页、重载都按它来） */
     private var userMutePreview = false
-    private var previewMuteChip: TextView? = null
+    private var previewMuteChip: ImageView? = null
+
+    /** 预览缩放档位（0.5 ~ 2.0）。只改渲染，不改页面视口 —— 见 zoomPreview */
+    private var previewZoom = 1.0f
 
     /** 最近一次导出的 zip，用于「分享 / 复制路径」 */
     @Volatile
@@ -936,6 +939,26 @@ class MainActivity : AppCompatActivity(), GameUi {
                     "media:a.length,playing:n,hidden:document.hidden,url:String(location.href).slice(0,90)});}catch(e){return 'ERR '+e;}})()"
             ) { r -> android.util.Log.i("hexoraMute", "mute=" + mute + " " + r) }
         }
+    }
+
+    /**
+     * 缩放预览画面（± 两档，0.5 ~ 2.0）。
+     *
+     * 用 View 的 scaleX/scaleY，**不用 WebView 自带的缩放**：
+     * 它只影响渲染，不改页面视口 —— 游戏内部 `window.innerWidth` 拿到的还是原值，
+     * 不会因为用户放大一下就以为屏幕变小了（那会把布局整个打乱，对游戏是致命的）。
+     * 触摸坐标由系统按视图矩阵自动反变换，所以放大之后点按钮依然准。
+     */
+    private fun zoomPreview(dir: Int) {
+        previewZoom = (previewZoom + dir * 0.25f).coerceIn(0.5f, 2.0f)
+        runCatching {
+            // 以中心为轴缩放：放大时会从中间往外撑，比从左上角撑看着自然
+            web.pivotX = web.width / 2f
+            web.pivotY = web.height / 2f
+            web.scaleX = previewZoom
+            web.scaleY = previewZoom
+        }
+        toast("画面缩放 ${(previewZoom * 100).toInt()}%")
     }
 
     @Suppress("DEPRECATION")
@@ -4161,41 +4184,43 @@ class MainActivity : AppCompatActivity(), GameUi {
             isClickable = true
             setOnClickListener { toggleProjKind() }
         }
-        val reload = chipOf(this, pal, "重载", false).apply {
-            setOnClickListener {
-                reloadGame()
-                toast("已重载画面")
-            }
-        }
-        val shot = chipOf(this, pal, "发给 AI", false).apply {
-            setOnClickListener { attachScreenshot() }
-        }
-        val switch = chipOf(this, pal, "项目", false).apply {
-            setOnClickListener { showProjects() }
-        }
-
         bar.addView(previewLabel, LinearLayout.LayoutParams(0, -2, 1f))
-        bar.addView(reload)
-        // 手动静音：游戏 BGM / 音效太吵时一键关掉，状态一直记着
-        // 标签显示的是**当前状态**，不是「点了会怎样」。
-        // 以前显示动作：初始「🔇静音」而实际有声，点一下变「🔊有声」反而静音了 ——
-        // 用户点完看着字变了，也不知道到底静音没有，只能用一句「这开关好像没啥用」。
-        previewMuteChip = chipOf(this, pal, "🔊 有声", false).apply {
+        // 工具栏一律用**手绘图标**，不再用文字 chip。
+        // 以前是「重载 / 🔊 有声 / 发给 AI / 项目」四个文字块，中间还夹一个 emoji ——
+        // 右边明明是全屏那种手绘图标，两边画风是断的（用户反复提过：不要文字、不要 emoji）。
+        // 按钮收到 32dp 是为了塞得下：一行 6 个，再宽就把左边的项目名挤没了。
+        bar.addView(iconButton(this, pal, "refresh", sizeDp = 32, marginStartDp = 6) {
+            reloadGame()
+            toast("已重载画面")
+        })
+        // 静音开关：**图标本身就说明状态**（喇叭+声波 = 有声；喇叭+叉 = 已静音），
+        // 不再靠文字切换 —— 以前标签显示动作，用户点完看着字变了也不知道到底静音没有。
+        previewMuteChip = ImageView(this).apply {
+            setImageDrawable(LineIcon("volume", pal.sub, 1.8f))
+            setPadding(dp(8), dp(8), dp(8), dp(8))
+            background = pressable(roundCard(this@MainActivity, pal.cardAlt, pal.border, 10), 0x14000000)
+            contentDescription = "预览静音开关"
             setOnClickListener {
                 userMutePreview = !userMutePreview
-                text = if (userMutePreview) "🔇 已静音" else "🔊 有声"
+                setImageDrawable(
+                    LineIcon(
+                        if (userMutePreview) "mute" else "volume",
+                        if (userMutePreview) pal.accent else pal.sub,
+                        1.8f
+                    )
+                )
                 applyPreviewMute(userMutePreview || activeTab != 1)
                 toast(if (userMutePreview) "预览已静音（切页、重载也保持）" else "预览恢复发声")
             }
         }
-        bar.addView(
-            previewMuteChip,
-            LinearLayout.LayoutParams(-2, -2).apply { leftMargin = dp(8) }
-        )
-        bar.addView(shot, LinearLayout.LayoutParams(-2, -2).apply { leftMargin = dp(6) })
-        bar.addView(switch, LinearLayout.LayoutParams(-2, -2).apply { leftMargin = dp(6) })
+        bar.addView(previewMuteChip, LinearLayout.LayoutParams(dp(32), dp(32)).apply { leftMargin = dp(5) })
+        // 缩放：手机上的游戏画面常常偏小或偏大，给 ± 两档
+        bar.addView(iconButton(this, pal, "zoom_out", sizeDp = 32, marginStartDp = 5) { zoomPreview(-1) })
+        bar.addView(iconButton(this, pal, "zoom_in", sizeDp = 32, marginStartDp = 4) { zoomPreview(1) })
+        // 相机 = 把当前画面发给 AI（原来那块「发给 AI」文字）
+        bar.addView(iconButton(this, pal, "camera", sizeDp = 32, marginStartDp = 5) { attachScreenshot() })
         // 手绘全屏图标：把预览容器整个搬进全屏 Dialog（同一个 WebView 实例，游戏状态不丢）
-        bar.addView(iconButton(this, pal, "fullscreen", sizeDp = 34, marginStartDp = 6) { showFullPreview() })
+        bar.addView(iconButton(this, pal, "fullscreen", sizeDp = 32, marginStartDp = 5) { showFullPreview() })
 
         @SuppressLint("SetJavaScriptEnabled")
         val w = WebView(this).apply { setBackgroundColor(pal.bg) }
