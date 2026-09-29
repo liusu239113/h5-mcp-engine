@@ -342,6 +342,16 @@ class MainActivity : AppCompatActivity(), GameUi {
 
     @Volatile
     private var running = false
+    /**
+     * 运行线程是否真的还活着。
+     *
+     * 自愈用：万一某轮因为异常路径没走到 finishRun()，running 会永远卡在 true，
+     * 之后用户发什么消息都只会「排队」，一条也发不出去（用户报的 bug）。
+     */
+    @Volatile private var runAlive = false
+    /** 待发送队列面板（运行中发的消息会进这里，可编辑 / 删除 / 立即发） */
+    private lateinit var queueBox: LinearLayout
+    private var queueExpanded = true
 
     @Volatile
     private var runner: AgentRunner? = null
@@ -966,6 +976,9 @@ class MainActivity : AppCompatActivity(), GameUi {
             setPadding(dp(12), dp(10), dp(12), dp(10))
             background = roundCard(this@MainActivity, pal.card, pal.border, 14)
         }
+        // 待发送队列：贴在输入框上方，没有待发消息时整个隐藏
+        queueBox = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        box.addView(queueBox, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(6) })
         box.addView(inputEt, LinearLayout.LayoutParams(-1, -2))
 
         val row = LinearLayout(this).apply {
@@ -1001,14 +1014,14 @@ class MainActivity : AppCompatActivity(), GameUi {
         }
         stopBtn = ghostBtnOf(this, pal, "停止").apply {
             visibility = View.GONE
-            setOnClickListener {
-                // 立刻掐断在飞的网络请求，不用等 240 秒读超时
-                runCatching { runner?.cancel() }
-                runHead?.text = "正在停止…"
-                toast("已停止")
-            }
+            // 立刻生效：不等线程自己结束、不等 240 秒读超时（见 doStop）
+            setOnClickListener { doStop("手动停止") }
         }
-        sendBtn = primaryBtnOf(this, pal, "发送").apply { setOnClickListener { send() } }
+        sendBtn = primaryBtnOf(this, pal, "发送").apply {
+            setOnClickListener { send() }
+            // 长按 = 排队（等这一轮跑完再发）；正常点 = 立刻发（打断上一轮）
+            setOnLongClickListener { send(queueIfBusy = true); true }
+        }
 
         row.addView(attachBtn)
         row.addView(shotBtn, LinearLayout.LayoutParams(-2, -2).apply { leftMargin = dp(6) })
@@ -1838,15 +1851,35 @@ class MainActivity : AppCompatActivity(), GameUi {
     @Volatile
     private var lastUserText = ""
 
-    private fun send() {
+    /**
+     * 发送入口。
+     *
+     * queueIfBusy = true 时（长按「发送」）才是「排队等它跑完」；
+     * 正常点「发送」是**立刻发**：上一轮还在跑就直接打断它，不闷声排队
+     * （用户反馈：发消息只会排队发不出去，还停不掉）。
+     */
+    private fun send(queueIfBusy: Boolean = false) {
         val text0 = inputEt.text.toString().trim().ifEmpty { lastUserText }
+        if (running && !runAlive) {
+            // 自愈：线程其实早结束了，running 却还挂着 —— 别让用户卡在「排队」里
+            running = false
+        }
         if (running) {
-            // 运行中又发消息：不再掐断上一轮（掐断会丢掉它已经跑出来的东西），
-            // 先排队，等这轮自然结束自动发。想立刻打断就去按「停止」。
             if (text0.isNotBlank()) {
-                msgQueue.addLast(text0)
-                inputEt.setText("")
-                toast("已排队（第 ${msgQueue.size} 条），这轮结束自动发送")
+                if (queueIfBusy || msgQueue.isNotEmpty()) {
+                    // 明确要求排队 / 队列里已经攒了东西：不再连环打断，老老实实排队
+                    msgQueue.addLast(text0)
+                    inputEt.setText("")
+                    renderQueue()
+                    toast("已加入队列（第 ${msgQueue.size} 条）")
+                } else {
+                    // 发送就是发送：立刻打断上一轮，把这句话发出去
+                    msgQueue.addLast(text0)
+                    inputEt.setText("")
+                    renderQueue()
+                    toast("已打断上一轮，这句马上发出")
+                    doStop("发送新消息")
+                }
             }
             return
         }
@@ -1949,6 +1982,10 @@ class MainActivity : AppCompatActivity(), GameUi {
             addSystemLine("识别到广告需求：本轮自动使用「广告接入（TapTap 激励视频）」技能，按官方契约执行")
         }
         val tools = EngineTools(this, gameRoot)
+        runSeq++
+        val mySeq = runSeq
+        // 事件只认「当前这一轮」：被停止 / 被新消息打断的那一轮，不再往界面上写。
+        // 否则会出现「已经打断了，画面还在往外吐字」的鬼现象。
         val r = AgentRunner(
             appCtx = this,
             cfg = cfg,
@@ -1956,10 +1993,7 @@ class MainActivity : AppCompatActivity(), GameUi {
             tools = tools,
             visionFallback = cfgStore.visionFallback,
             shotDir = File(gameRoot, "_shots")
-        ) { ev -> onAgentEvent(ev) }
-
-        runSeq++
-        val mySeq = runSeq
+        ) { ev -> if (mySeq == runSeq) onAgentEvent(ev) }
         runner = r
         running = true
         runSteps = 0
@@ -1970,6 +2004,7 @@ class MainActivity : AppCompatActivity(), GameUi {
         startRunCard()
 
         Thread {
+            runAlive = true
             try {
                 r.run(
                     history,
@@ -1981,6 +2016,7 @@ class MainActivity : AppCompatActivity(), GameUi {
                     if (mySeq == runSeq) addErrorCard(AiClient.friendly("${t.javaClass.simpleName}: ${t.message}"))
                 }
             } finally {
+                runAlive = false
                 main.post { if (mySeq == runSeq) finishRun() }
             }
         }.start()
@@ -2142,7 +2178,10 @@ class MainActivity : AppCompatActivity(), GameUi {
         // 模型正在流回来的「思考 / 正文」实时打进面板。
         // 不接这个回调的话，思考版模型长时间推理时面板只有「思考中…」，
         // 用户只能以为它卡死了。
-        AiClient.onProgress = { kind, text -> main.post { paintProgress(kind, text) } }
+        AiClient.onProgress = { kind, text ->
+            val s = runSeq
+            main.post { if (s == runSeq) paintProgress(kind, text) }
+        }
         scrollChatToBottom()
     }
 
@@ -2214,6 +2253,157 @@ class MainActivity : AppCompatActivity(), GameUi {
         }
     }
 
+    /**
+     * 立刻停止当前轮。
+     *
+     * 关键在「立刻」：用户点停止 / 发新消息时，界面必须马上恢复可用，
+     * 不能等后台线程自己结束（HTTP 读超时 240 秒、工具调用 300 秒都可能拖着）。
+     * 做法是 runSeq++ 把这一轮作废 —— 它线程收尾时的 finishRun 会被跳过，
+     * 它的事件 / 进度回调也都会被序号过滤掉，然后我们自己把界面收干净。
+     */
+    private fun doStop(reason: String) {
+        if (!running && msgQueue.isEmpty()) return
+        runSeq++                      // 作废当前轮：旧线程的回调从此全部被丢弃
+        running = false
+        runner?.let { runCatching { it.cancel() } }
+        runTicker?.let { main.removeCallbacks(it) }
+        AiClient.onProgress = null
+        stopBtn.visibleIf(false)
+        stopGuard()
+        latestActivity = ""
+        runHead?.text = "已中断（$reason）"
+        runBar?.text = "上次运行 · 已中断（$reason）"
+        runCatching { persistSessions() }
+        renderQueue()
+        drainQueue(immediate = true)
+    }
+
+    /**
+     * 出队发送：一次只发一条。
+     *
+     * 如果这时候上一轮还在跑，先把上一轮停掉（doStop 末尾会再回来调本函数），
+     * 保证「队列里的消息一定能发出去」，而不是喊一句「已排队」就没下文。
+     */
+    private fun drainQueue(immediate: Boolean = false) {
+        if (!::inputEt.isInitialized) return
+        if (msgQueue.isEmpty()) { renderQueue(); return }
+        val go = Runnable {
+            if (msgQueue.isEmpty()) return@Runnable
+            if (running && runAlive) { doStop("先发队列里的消息"); return@Runnable }
+            running = false
+            val next = msgQueue.removeFirst()
+            inputEt.setText(next)
+            renderQueue()
+            runCatching { send() }
+        }
+        if (immediate) main.post(go) else main.postDelayed(go, 200)
+    }
+
+    /** 待发送队列面板：每条都能编辑 / 立即发 / 删除 */
+    private fun renderQueue() {
+        if (!::queueBox.isInitialized) return
+        queueBox.removeAllViews()
+        if (msgQueue.isEmpty()) {
+            queueBox.visibleIf(false)
+            return
+        }
+        queueBox.visibleIf(true)
+        queueBox.background = roundCard(this, pal.card, pal.border, 12)
+        queueBox.setPadding(dp(10), dp(6), dp(10), dp(6))
+        val head = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        head.addView(TextView(this).apply {
+            text = "待发送队列（${msgQueue.size}）" + if (queueExpanded) " ▾" else " ▸"
+            textSize = 12.5f
+            setTextColor(pal.sub)
+            layoutParams = LinearLayout.LayoutParams(0, -2, 1f)
+            setOnClickListener { queueExpanded = !queueExpanded; renderQueue() }
+        })
+        queueBox.addView(head)
+        if (!queueExpanded) return
+        msgQueue.forEachIndexed { idx, m ->
+            val r = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+            }
+            r.addView(TextView(this).apply {
+                text = m.replace("\n", " ")
+                textSize = 12.5f
+                setTextColor(pal.text)
+                maxLines = 1
+                ellipsize = android.text.TextUtils.TruncateAt.END
+                setPadding(dp(2), dp(5), dp(2), dp(5))
+                layoutParams = LinearLayout.LayoutParams(0, -2, 1f)
+                setOnClickListener { editQueued(idx) }
+            })
+            r.addView(TextView(this).apply {
+                text = "▶"
+                textSize = 14f
+                setTextColor(pal.sub)
+                setPadding(dp(8), dp(4), dp(8), dp(4))
+                setOnClickListener { sendQueuedNow(idx) }
+            })
+            r.addView(TextView(this).apply {
+                text = "✎"
+                textSize = 14f
+                setTextColor(pal.sub)
+                setPadding(dp(8), dp(4), dp(8), dp(4))
+                setOnClickListener { editQueued(idx) }
+            })
+            r.addView(TextView(this).apply {
+                text = "✕"
+                textSize = 14f
+                setTextColor(pal.errText)
+                setPadding(dp(8), dp(4), dp(2), dp(4))
+                setOnClickListener {
+                    if (idx in msgQueue.indices) msgQueue.removeAt(idx)
+                    renderQueue()
+                }
+            })
+            queueBox.addView(r)
+        }
+    }
+
+    /** 编辑队列里的某一条（改完仍留在队列里，不会顺手发出去） */
+    private fun editQueued(i: Int) {
+        if (i !in msgQueue.indices) return
+        val et = EditText(this).apply {
+            setText(msgQueue[i])
+            setSelection(text.length)
+            minLines = 2
+            maxLines = 6
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE
+            setPadding(dp(14), dp(10), dp(14), dp(10))
+        }
+        val wrap = FrameLayout(this).apply {
+            setPadding(dp(14), dp(6), dp(14), 0)
+            addView(et)
+        }
+        AlertDialog.Builder(themed())
+            .setTitle("编辑待发送消息")
+            .setView(wrap)
+            .setPositiveButton("保存") { _, _ ->
+                val t = et.text.toString().trim()
+                if (t.isNotEmpty() && i in msgQueue.indices) {
+                    msgQueue[i] = t
+                    renderQueue()
+                }
+            }
+            .setNegativeButton("取消", null)
+            .show()
+    }
+
+    /** 队列里的某一条「立即发」（会打断当前轮，先把它发出去） */
+    private fun sendQueuedNow(i: Int) {
+        if (i !in msgQueue.indices) return
+        val t = msgQueue.removeAt(i)
+        msgQueue.addFirst(t)
+        renderQueue()
+        drainQueue(immediate = true)
+    }
+
     private fun finishRun() {
         running = false
         AiClient.onProgress = null
@@ -2233,11 +2423,8 @@ class MainActivity : AppCompatActivity(), GameUi {
         // 已经自己调过构建的不重复；H5 工程不动。
         if (runWrote && !builtThisRun && (isMakerProject() || makerTouched)) autoBuildMaker()
         // 运行期间排队的消息：这轮结束后自动发下一条（一次只发一条，避免连环堆积）
-        if (msgQueue.isNotEmpty()) {
-            val next = msgQueue.removeFirst()
-            inputEt.setText(next)
-            main.postDelayed({ runCatching { send() } }, 400)
-        }
+        renderQueue()
+        drainQueue(immediate = false)
     }
 
     // ==================== 会话管理（像 Maker 那样开多个对话） ====================
