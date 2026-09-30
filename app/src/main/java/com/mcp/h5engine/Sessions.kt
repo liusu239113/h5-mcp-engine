@@ -81,13 +81,18 @@ class SessionStore(private val ctx: Context, val proj: String = "") {
                     // 原样回传，落盘时丢了的话 —— 重启 / 切会话之后那条历史会**一直 400**。
                     // （text 里的空串统一转成 null，别让 "" 混进去。）
                     val think = m.optString("reasoning")
+                    // 截图路径也读回来：对话里那张图要能跨重启显示
+                    val shots = m.optJSONArray("shotPaths")?.let { sa ->
+                        (0 until sa.length()).mapNotNull { sa.optString(it).ifBlank { null } }
+                    }
                     msgs += ChatMsg(
                         m.optString("role", "user"),
                         m.optString("text").ifBlank { null },
                         emptyList(),
                         tcs,
                         m.optString("toolCallId").ifBlank { null },
-                        think.ifBlank { null }
+                        think.ifBlank { null },
+                        shots?.ifEmpty { null }
                     )
                 }
                 out += ChatSession(
@@ -119,6 +124,14 @@ class SessionStore(private val ctx: Context, val proj: String = "") {
                     m.toolCallId?.let { jo.put("toolCallId", it) }
                     // 思维链落盘：不回传就 400，丢了的话重启之后同样 400
                     m.reasoning?.let { jo.put("reasoning", it.take(8000)) }
+                    // 工具产出的图（AI 截的画面）落盘：只存**路径**，不存字节 ——
+                    // 图片本体已经在工程工作区里了，存字节会把会话文件撑爆。
+                    // 不回放的话，重启之后对话里那张截图就没了（用户报的正是这个）。
+                    m.shotPaths?.let { paths ->
+                        if (paths.isNotEmpty()) {
+                            jo.put("shotPaths", org.json.JSONArray(paths))
+                        }
+                    }
                     if (m.toolCalls.isNotEmpty()) {
                         val tcs = JSONArray()
                         for (t in m.toolCalls) {

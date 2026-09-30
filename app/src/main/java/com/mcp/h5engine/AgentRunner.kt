@@ -36,6 +36,13 @@ class AgentRunner(
     private val tools: EngineTools,
     private val visionFallback: Boolean,
     private val shotDir: File,
+    /**
+     * 当前工程目录（`<工程根>/<项目名>`）。
+     * 工具产出的图要落到它的 `_uploads/media/` —— 也就是**工作区**，
+     * 这样对话里能显示、游戏代码也能用相对路径引用。
+     * 为 null 时退回 [shotDir]（临时目录），至少不丢图。
+     */
+    private val projectDir: File? = null,
     private val onEvent: (String) -> Unit
 ) {
 
@@ -335,10 +342,23 @@ class AgentRunner(
                     runCatching { tools.call(tc.name, tc.argsJson) }
                         .getOrElse { t -> EngineTools.ToolResult("工具执行出错：${t.javaClass.simpleName}: ${t.message}") }
                 }
+                // 工具产出的图（主要是 game_shot 的截图）分两路走：
+                //   ① 给模型看（走多模态）—— 前提是当前模型能看图；
+                //   ② **落到工程工作区**，并往历史里塞一张缩略图，
+                //      这样对话区里能直接看见这张图，重启 / 切会话也还在。
+                // 以前只有 ①：模型看不了图的时候截图等于白截，
+                // 而且对话区**一张图都看不到**（用户报的正是这个）。
+                val savedShots = res.images.mapNotNull { saveShotToWorkspace(it) }
                 val images = if (cfg.vision) res.images else emptyList()
                 var text = res.text
                 if (res.images.isNotEmpty() && !cfg.vision && visionFallback) {
                     text += "\n" + saveShot(res.images.first())
+                }
+                // 告诉模型图存哪了（它后面可能要用相对路径引用）
+                if (savedShots.isNotEmpty()) {
+                    text += "\n（本次产出的图片已存入工程工作区：" +
+                        savedShots.joinToString("、") { it.name } +
+                        "，游戏里可直接用 _uploads/media/ 下的相对路径引用）"
                 }
                 // 【结果治理】单条工具结果太大（读了个大文件 / 全量日志）会把历史瞬间撑爆：
                 // 下一轮请求体积超限 → 降级重试 → 还是超 → 报错。这里先截断，
@@ -347,7 +367,11 @@ class AgentRunner(
                     text = text.take(16000) + "\n…（结果过长已截断到 16k；完整内容见对话里的工具卡片）"
                 }
 
-                history += ChatMsg("tool", text, images, toolCallId = tc.id)
+                history += ChatMsg(
+                    "tool", text, images,
+                    toolCallId = tc.id,
+                    shotPaths = savedShots.map { it.absolutePath }.ifEmpty { null }
+                )
 
                 var head = res.text.lineSequence().firstOrNull() ?: ""
                 if (head.length > 150) head = head.take(150) + "…"
@@ -358,6 +382,9 @@ class AgentRunner(
                 // 用 \u0000 当分隔符是因为工具文本里绝不可能出现它，不会串味。
                 val full = res.text.replace("\u0000", "").take(4000)
                 onEvent((if (fail) "TOOLFAIL:" else "TOOL:") + "[${tc.name}] " + head + "\u0000" + full)
+                // 截图单独再报一条：界面把它画成「已工作」组里的缩略图，
+                // 用户能直接看到 AI 截到了什么（不用去翻文件）
+                savedShots.forEach { onEvent("SHOT:" + it.absolutePath) }
 
                 // Maker 会把生成的图/音「materialize」到项目里并返回本地路径：
                 // 捞出来丢给 UI，用户就能在对话里直接看到缩略图、点一下预览/试听。
@@ -472,6 +499,27 @@ class AgentRunner(
         }
         return out.toList()
     }
+
+    /**
+     * 把工具产出的图落到**工程工作区**（`<项目>/_uploads/media/`），返回落好的文件。
+     *
+     * 为什么落工作区而不是临时目录：
+     *   · 对话里那张缩略图要能长期显示 —— 指向临时目录的话重启就变红叉；
+     *   · 用户明说「让它把截图放在工作区」—— 工作区就是工程里给素材用的地方，
+     *     游戏代码还能直接用 `_uploads/media/xxx.png` 相对路径引用它。
+     *
+     * 失败不抛：截图存不下来不该让整轮任务挂掉，返回 null 跳过即可。
+     */
+    private fun saveShotToWorkspace(img: ByteArray): File? = runCatching {
+        if (img.isEmpty()) return@runCatching null
+        // 优先落工作区；没有工程目录时退回 shotDir（临时），至少别把图丢了
+        val base = projectDir ?: shotDir
+        val dir = if (projectDir != null) File(base, "_uploads/media") else base
+        dir.mkdirs()
+        val f = File(dir, "shot_${System.currentTimeMillis()}.jpg")
+        f.writeBytes(img)
+        f
+    }.getOrNull()
 
     private fun saveShot(img: ByteArray): String = try {
         shotDir.mkdirs()

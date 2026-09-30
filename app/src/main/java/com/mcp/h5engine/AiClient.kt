@@ -30,7 +30,15 @@ data class ChatMsg(
      * 而且它**不是一次性报错** —— 那条消息还在历史里，之后每条请求都会被拒。
      * （这个字段只在**发请求**时用；UI 回放历史不显示它，免得把对话刷屏。）
      */
-    val reasoning: String? = null
+    val reasoning: String? = null,
+    /**
+     * 这条消息（工具结果）产出的图片**在工作区里的路径**。
+     *
+     * 只存路径不存字节：图片本体已经落在 `<项目>/_uploads/media/` 里了，
+     * 存字节会把会话 JSON 撑爆。回放历史时按路径去读，重启也还在。
+     * （和 [images] 的区别：那个是给模型看的原始字节，这个只给界面显示用。）
+     */
+    val shotPaths: List<String>? = null
 )
 
 data class ChatReply(

@@ -1907,6 +1907,48 @@ class MainActivity : AppCompatActivity(), GameUi {
     }
 
     /**
+     * AI 截到的画面 —— 在「已工作」组里放一张缩略图。
+     *
+     * 为什么放在组里而不是单开一张卡：截图是**过程**的一部分（它就是在验证画面），
+     * 跟着「修改 x.js / 读取 y」那些行排在一起最自然，也不占正文的地方。
+     * 点一下看大图，长按存到相册 —— 和用户自己发的图一套手感。
+     */
+    private fun addShotThumb(path: String) {
+        val f = File(path)
+        if (!f.isFile) return
+        val rows = toolWrap
+        if (rows == null) {
+            addAssetCard(path)
+            return
+        }
+        val side = dp(108)
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(0, dp(6), 0, dp(6))
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        val iv = ImageView(this).apply {
+            scaleType = ImageView.ScaleType.CENTER_CROP
+            background = roundCard(this@MainActivity, pal.cardAlt, pal.border, 10)
+            clipToOutline = true
+            contentDescription = "AI 截到的画面"
+            val bmp = runCatching { decodeThumb(f, side) }.getOrNull()
+            if (bmp != null) setImageBitmap(bmp)
+            else setImageDrawable(LineIcon("image", pal.faint, 1.8f))
+            setOnClickListener { showImageFull(f) }
+            setOnLongClickListener { saveToLocal(f); true }
+        }
+        row.addView(iv, LinearLayout.LayoutParams(side, side * 2 / 3).apply { rightMargin = dp(10) })
+        row.addView(TextView(this).apply {
+            setText("AI 截到的画面\n点一下看大图 · 长按保存")
+            textSize = 11f
+            setTextColor(pal.faint)
+        }, LinearLayout.LayoutParams(0, -2, 1f))
+        rows.addView(row, LinearLayout.LayoutParams(-1, -2))
+        scrollChatToBottom()
+    }
+
+    /**
      * 过程自述行：AI 干活途中说的话（「我先看一下这个文件」这类）。
      *
      * 缩进折进「已工作」组里当一行 ✎，**不单独占一张气泡** ——
@@ -2393,7 +2435,10 @@ class MainActivity : AppCompatActivity(), GameUi {
             skill = skill,
             tools = tools,
             visionFallback = cfgStore.visionFallback,
-            shotDir = File(gameRoot, "_shots")
+            shotDir = File(gameRoot, "_shots"),
+            // 工程目录：AI 截到的画面要落进这个项目的**工作区**（_uploads/media），
+            // 这样对话里能显示、重启还在、游戏代码也能用相对路径引用
+            projectDir = projDir()
         ) { ev -> if (mySeq == runSeq) onAgentEvent(ev) }
         runner = r
         running = true
@@ -2499,6 +2544,11 @@ class MainActivity : AppCompatActivity(), GameUi {
                     // 删掉了：它会把「读到过的文件」当成「刚生成的素材」，
                     // 于是 game_read / code_search 一碰到 .mp4 路径就弹卡（用户说的
                     // 「读项目老是跑这个音频出来」）。真正产出的素材走 ASSET: 事件。
+                }
+                ev.startsWith("SHOT:") -> {
+                    // AI 截到的画面：直接在「已工作」组里放一张缩略图，
+                    // 不用去翻文件就能看到它到底截到了什么。
+                    addShotThumb(ev.removePrefix("SHOT:").trim())
                 }
                 ev.startsWith("ASSET:") -> {
                     // 素材生成完成：直接在对话里插一张卡，点一下就能预览 / 试听
@@ -3103,13 +3153,18 @@ class MainActivity : AppCompatActivity(), GameUi {
                     // 但**绝不回放工具结果原文**（见下面 tool 分支的说明）
                     if (m.toolCalls.isNotEmpty()) addHistoryWorkLine(m.toolCalls.map { it.name })
                 }
-                // ⚠️ 工具结果**不回放**。
+                // ⚠️ 工具结果的**文字**不回放。
                 // 以前这里走 else 分支，被当成「系统提示」整段居中打印 ——
                 // 而一条工具结果最长 16000 字符（一次 game_read 就是整个文件），
                 // 铺满整屏不说，还居中 + 灰字，用户看到的就是
                 // 「偶尔犯病出来一大段代码，然后对话历史就看不见了」。
                 // 想看细节：当时的卡片里有，或者让它重新读一次 —— 都比把 16k 塞进对话强。
-                "tool" -> Unit
+                //
+                // 但**截图要回放** —— 那是用户要看的画面，不是文本噪音。
+                // 只存了路径，按路径去读；文件被删了就跳过。
+                "tool" -> m.shotPaths?.forEach { p ->
+                    if (File(p).isFile) addShotThumb(p)
+                }
                 else -> if (!m.text.isNullOrBlank()) addSystemLine(m.text)
             }
         }
