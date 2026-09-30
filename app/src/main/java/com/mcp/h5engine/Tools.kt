@@ -1376,15 +1376,15 @@ class EngineTools(private val ui: GameUi, private val root: File) {
                                 if (!up.ok || url.isBlank()) {
                                     ToolResult("第一步（传素材库）失败：${up.message}\n${up.raw.take(700)}")
                                 } else {
-                                    // ② 写进字段 —— 少了这步等于白传
-                                    val changes = JSONArray().put(
-                                        JSONObject()
-                                            .put("field_id", field)
-                                            .put("op", a.optString("op", "replace"))
-                                            .put("value", url)
-                                    ).toString()
-                                    val save = TapCli.saveChanges(
-                                        ctx, dev, app, changes,
+                                    // ② 写进字段 —— 少了这步等于白传。
+                                    // 用 saveField：它会自动带上官方强制的 expected（乐观锁），
+                                    // 漏了会被 CLI 直接拒（实测踩过）。
+                                    val save = TapCli.saveField(
+                                        ctx, dev, app,
+                                        module = a.optString("module", "assets-upload"),
+                                        fieldId = field,
+                                        op = a.optString("op", "replace"),
+                                        value = url,
                                         idempotencyKey = "ai-" + app + "-" + field + "-" + System.currentTimeMillis()
                                     )
                                     if (save.ok) {
@@ -1415,15 +1415,37 @@ class EngineTools(private val ui: GameUi, private val root: File) {
                         } else {
                             // 先把「改成什么」摊给用户看 —— 写操作不能悄悄做
                             val preview = StringBuilder("准备写入这些字段：\n")
-                            fields.keys().forEach { k -> preview.append("  · ").append(k).append(" = ").append(fields.opt(k)).append('\n') }
-                            val r = TapCli.saveChanges(
-                                ctx, dev, app,
-                                JSONObject().put("fields", fields).toString(),
-                                idempotencyKey = "save-" + app + "-" + System.currentTimeMillis(),
-                                dryRun = false
-                            )
-                            if (r.ok) ToolResult(preview.toString() + "\n已保存。\n" + r.raw.take(700))
-                            else ToolResult(preview.toString() + "\n保存失败：${r.message}\n" + r.raw.take(800))
+                            fields.keys().forEach { k ->
+                                preview.append("  · ").append(k).append(" = ").append(fields.opt(k)).append('\n')
+                            }
+                            // ⚠️ 走 saveField（逐个字段），不要拼 `{"fields":{...}}` ——
+                            // 官方要的是 `changes[]` 数组，而且每条**必须带 expected**（乐观锁）。
+                            // 之前这里传的是旧格式，会直接被拒。
+                            val module = a.optString("module", "basic-info")
+                            val fails = StringBuilder()
+                            var okCount = 0
+                            for (k in fields.keys()) {
+                                val r = TapCli.saveField(
+                                    ctx, dev, app,
+                                    module = module,
+                                    fieldId = k,
+                                    op = "replace",
+                                    value = fields.opt(k) ?: "",
+                                    idempotencyKey = "save-" + app + "-" + k + "-" + System.currentTimeMillis()
+                                )
+                                if (r.ok) okCount++ else fails.append("  · ").append(k)
+                                    .append("：").append(r.message).append('\n')
+                            }
+                            if (fails.isEmpty()) {
+                                ToolResult(preview.toString() + "\n已保存 $okCount 个字段。")
+                            } else {
+                                ToolResult(
+                                    preview.toString() +
+                                        "\n成功 $okCount 个，失败：\n" + fails +
+                                        "\n（写字段要求带 expected 乐观锁，本工具已自动带；" +
+                                        "还失败通常是值不合规 —— 用 action=modules 看该字段的规格。）"
+                                )
+                            }
                         }
                     }
 

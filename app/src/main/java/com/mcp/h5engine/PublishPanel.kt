@@ -282,20 +282,21 @@ class PublishPanel(
 
             if (url.isBlank() || code.isBlank()) {
                 busy = false
-                // 网络类失败要说人话 —— 「TapTap OAuth request failed」这种原文
-                // 用户看不懂，也不知道该干嘛。
                 val isNet = start.raw.contains("network") || start.raw.contains("transport") ||
                     start.raw.contains("timeout") || start.raw.contains("refused")
                 post {
                     host.pubConfirm(
                         "登录 TapTap 失败",
                         if (isNet) {
-                            "连不上 TapTap 的服务器。常见原因：\n\n" +
-                                "① **手机上开着 VPN / 代理**，而发布工具没走那个代理 ——\n" +
-                                "   本版已自动把系统代理传给发布工具；如果还不行，\n" +
-                                "   试着把 VPN 换成全局模式，或者暂时关掉它再登录。\n" +
-                                "② 网络本身不通（切换 WiFi / 流量再试）。\n" +
-                                "③ 公司网络 / 校园网有防火墙，拦了 taptap 的域名。\n\n" +
+                            // 不要再让用户去查 VPN —— 上一版就是这么写的，
+                            // 而真正的原因是**我们自己**给 CLI 塞了个连不上的代理
+                            // （读 android.net.Proxy 拿到了垃圾值）。
+                            // 现在已改成直连优先，这里只说「还能做什么」。
+                            "连不上 TapTap 的服务器。\n\n" +
+                                "已经试过两条路（直连 + 本地代理）都不通，所以更可能是网络环境本身：\n" +
+                                "  · 切换一下网络（WiFi ↔ 流量）再试\n" +
+                                "  · 如果开着 VPN / 代理类 App，先关掉再试（CLI 不一定认它）\n" +
+                                "  · 公司网 / 校园网可能拦了 taptap 的域名\n\n" +
                                 "原始错误：\n" + start.raw.take(500)
                         } else {
                             "没能拿到授权链接。原始输出：\n\n" + start.raw.take(700)
@@ -829,11 +830,11 @@ class PublishPanel(
                     }
                     return
                 }
-                val ch = org.json.JSONArray().put(
-                    JSONObject().put("field_id", slot.fieldId).put("op", "replace").put("value", vid)
-                ).toString()
-                val save = TapCli.saveChanges(
-                    host.pubCtx, devId, appId, ch,
+                // 用 saveField：它会自动带上官方强制的 expected（乐观锁）
+                val save = TapCli.saveField(
+                    host.pubCtx, devId, appId,
+                    module = "assets-upload", fieldId = slot.fieldId,
+                    op = "replace", value = vid,
                     idempotencyKey = "pub-" + appId + "-" + slot.fieldId + "-" + System.currentTimeMillis()
                 )
                 if (!save.ok) {
@@ -862,11 +863,11 @@ class PublishPanel(
                     }
                     return
                 }
-                val ch = org.json.JSONArray().put(
-                    JSONObject().put("field_id", slot.fieldId).put("op", "replace").put("value", url)
-                ).toString()
-                val save = TapCli.saveChanges(
-                    host.pubCtx, devId, appId, ch,
+                // 用 saveField：自动带 expected（漏了会被 CLI 直接拒）
+                val save = TapCli.saveField(
+                    host.pubCtx, devId, appId,
+                    module = "assets-upload", fieldId = slot.fieldId,
+                    op = "replace", value = url,
                     idempotencyKey = "pub-" + appId + "-" + slot.fieldId + "-" + System.currentTimeMillis()
                 )
                 if (!save.ok) {
@@ -1290,15 +1291,11 @@ class PublishPanel(
                                 }
                                 return@Thread
                             }
-                            // ② 写进字段
-                            val changes = org.json.JSONArray().put(
-                                JSONObject()
-                                    .put("field_id", slot.fieldId)
-                                    .put("op", "replace")
-                                    .put("value", url)
-                            ).toString()
-                            val save = TapCli.saveChanges(
-                                host.pubCtx, devId, appId, changes,
+                            // ② 写进字段（saveField 自动带 expected）
+                            val save = TapCli.saveField(
+                                host.pubCtx, devId, appId,
+                                module = "assets-upload", fieldId = slot.fieldId,
+                                op = "replace", value = url,
                                 idempotencyKey = "slot-" + appId + "-" + slot.fieldId + "-" + System.currentTimeMillis()
                             )
                             busy = false

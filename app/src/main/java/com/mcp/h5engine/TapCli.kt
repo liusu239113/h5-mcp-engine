@@ -92,7 +92,6 @@ object TapCli {
         timeoutMs: Long = 120_000,
         stdin: String? = null
     ): Result {
-        val exe = bin(ctx)
         if (!available(ctx)) {
             return Result(
                 false, JSONObject(),
@@ -102,6 +101,54 @@ object TapCli {
             )
         }
 
+        // ① **先直连**。
+        //
+        // 为什么必须直连优先：实测证明（在真二进制上验的）——
+        // 把 HTTPS_PROXY 指向一个连不上的地址，报错**恰好**是
+        // `type=network / subtype=transport / TapTap OAuth request failed`。
+        // 也就是说：**给 CLI 设一个坏代理 = 把本来能用的网络搞坏**。
+        // 我之前无脑读 android.net.Proxy.getDefaultHost() 并塞进去，
+        // 而很多新 Android 上它返回的不是 null 而是垃圾值 ——
+        // 于是用户明明没开 VPN，登录却一直失败（用户报的正是这个）。
+        val direct = exec(ctx, args, cwd, timeoutMs, stdin, null)
+
+        // ② 直连失败、而且看着像网络问题，才退到本地代理重试一次。
+        //
+        // 本地代理是给「CLI 解析不了域名」那种情况准备的（它读 /etc/resolv.conf，
+        // 而 Android 没有这个文件）。由 App 去解析域名，再开隧道转发。
+        if (direct.ok || !looksLikeNetworkError(direct)) return direct
+
+        val port = runCatching { LocalProxy.ensure() }.getOrDefault(0)
+        if (port <= 0) return direct
+        val viaProxy = exec(ctx, args, cwd, timeoutMs, stdin, "http://127.0.0.1:$port")
+        // 代理也没救回来就返回**直连那次**的结果 —— 那是更本质的失败原因
+        return if (viaProxy.ok) viaProxy else direct
+    }
+
+    /** 这次失败像不像网络问题（决定要不要退到代理重试） */
+    private fun looksLikeNetworkError(r: Result): Boolean {
+        val t = (r.raw + r.message).lowercase()
+        return t.contains("transport") || t.contains("network") ||
+            t.contains("timeout") || t.contains("connection") ||
+            t.contains("no such host") || t.contains("lookup") ||
+            t.contains("dial tcp") || t.contains("refused") ||
+            t.contains("unreachable")
+    }
+
+    /**
+     * 真正跑一次 CLI。
+     *
+     * @param proxy 非空时给子进程设 HTTP(S)_PROXY；null = 直连。
+     */
+    private fun exec(
+        ctx: Context,
+        args: List<String>,
+        cwd: File?,
+        timeoutMs: Long,
+        stdin: String?,
+        proxy: String?
+    ): Result {
+        val exe = bin(ctx)
         return try {
             val cmd = mutableListOf(exe.absolutePath)
             cmd += args
@@ -127,25 +174,14 @@ object TapCli {
             env["TAPTAP_CLI_HOME"] = home(ctx).absolutePath
             // 静态二进制不需要解释器，但把 PATH 指清楚总没坏处
             env["PATH"] = ctx.applicationInfo.nativeLibraryDir
-            // 网络出口：**优先走我们自己的本地代理**。
+            // 代理只由 [run] 显式传进来（直连失败后才会传）。
             //
-            // 为什么必须有这一步（实测报错：`上传请求至 https://api.tapapis.cn/... 运输失败`）：
-            // CLI 是**静态链接的原生二进制**，它读 /etc/resolv.conf 做 DNS ——
-            // 而 Android 沙箱里**没有这个文件**（系统 DNS 走 netd，不是文件）。
-            // 于是它「能连 IP 但连不上域名」，报 transport failed。
-            //
-            // 我们起一个本地 CONNECT 代理，让 CLI 把请求发给它，
-            // 由**我们**解析域名（App 走 Android 的 resolver，解析正常），
-            // 再开隧道把字节原样搬过去。TLS 端到端，中间看不到内容。
-            //
-            // 代理起不来时退回系统代理（有些机型系统代理本身就能用）；
-            // 两个都没有就直连（至少别比原来更差）。
-            val proxyUrl = runCatching {
-                val p = LocalProxy.ensure()
-                if (p > 0) "http://127.0.0.1:$p" else systemProxyUrl(ctx)
-            }.getOrNull() ?: systemProxyUrl(ctx)
-
-            proxyUrl?.let { p ->
+            // ⚠️ **不要再在这里读 android.net.Proxy 塞给子进程** ——
+            // 那个 API 在不少新 Android 上返回垃圾值（不是 null），
+            // 一塞进去就等于「给 CLI 设了个连不上的代理」，
+            // 报错恰好是 `transport / TapTap OAuth request failed`，
+            // 把本来能直连的网络搞坏。用户明明没开 VPN 却登录失败，就是这个原因。
+            proxy?.let { p ->
                 env["HTTP_PROXY"] = p
                 env["HTTPS_PROXY"] = p
                 env["http_proxy"] = p
@@ -213,19 +249,10 @@ object TapCli {
         return Result(false, JSONObject(), raw.take(500), raw)
     }
 
-    /**
-     * 读出 Android 当前配的系统 HTTP 代理，拼成 `http://host:port`。
-     * 没配代理就返回 null（保持直连）。
-     *
-     * 为什么需要它：手机上挂 VPN / 代理类 App 时，代理信息在系统设置里，
-     * App 自己走 OkHttp 能读到，但**子进程读不到** —— Go 写的 CLI 只认
-     * `HTTP_PROXY` 环境变量。不传下去就会「浏览器能打开、CLI 连不上」。
-     */
-    private fun systemProxyUrl(ctx: Context): String? = runCatching {
-        val host = android.net.Proxy.getDefaultHost()?.trim().orEmpty()
-        val port = android.net.Proxy.getDefaultPort()
-        if (host.isBlank() || port <= 0) null else "http://$host:$port"
-    }.getOrNull()
+    // （原来这里有个 systemProxyUrl()，读 android.net.Proxy.getDefaultHost() 给子进程设代理。
+    //   已删除：那个 API 在不少新 Android 上返回垃圾值而不是 null，
+    //   于是「没开 VPN 的用户」也被塞了一个连不上的代理，登录必失败。
+    //   现在改成直连优先，失败了才用自己起的本地代理 —— 见 run()。）
 
     /**
      * 这条命令认不认 `--format json`（而不是 `--json`）。
@@ -414,6 +441,55 @@ object TapCli {
     }
 
     /**
+     * 写一个字段 —— **自动带上官方要求的 `expected`**。
+     *
+     * 这是写素材/资料字段的**唯一推荐入口**。别绕开它直接拼 changes：
+     * 官方强制要求每条 change 带 `expected`（乐观锁），漏了会被直接拒：
+     *   `save-changes requires $.changes[0] to include expected unless force=true`
+     *
+     * `expected` 的语义（官方原文）：**原样回填该字段读取时的 `current_value`**；
+     * `current_value` 是 null（首次写入）就传 `[]`。
+     * 所以这里先读一次字段，把当前值原样放进去。
+     *
+     * @param module 字段所在的模块（`basic-info` / `assets-upload` / `profile-promotion` …）
+     */
+    fun saveField(
+        ctx: Context,
+        devId: String,
+        appId: String,
+        module: String,
+        fieldId: String,
+        op: String,
+        value: Any,
+        oldValue: String? = null,
+        idempotencyKey: String? = null
+    ): Result {
+        // ① 先读字段当前值 —— expected 要「原样回填」它
+        val mod = getModule(ctx, devId, appId, module)
+        val field = mod.obj("result")?.optJSONObject("fields")?.optJSONObject(fieldId)
+            ?: mod.data.optJSONObject("fields")?.optJSONObject(fieldId)
+        val current = field?.opt("current_value")
+
+        val change = JSONObject()
+            .put("field_id", fieldId)
+            .put("op", op)
+            .put("value", value)
+        if (oldValue != null) change.put("old_value", oldValue)
+
+        // expected：null（首次写入）→ []；其余原样回传
+        when (current) {
+            null, JSONObject.NULL -> change.put("expected", org.json.JSONArray())
+            else -> change.put("expected", current)
+        }
+
+        val changes = org.json.JSONArray().put(change).toString()
+        return saveChanges(
+            ctx, devId, appId, changes,
+            idempotencyKey ?: ("save-" + appId + "-" + fieldId + "-" + System.currentTimeMillis())
+        )
+    }
+
+    /**
      * 保存资料修改（改简介 / 写素材字段 等）。
      *
      * 官方要求的 `changes[]` 结构，每项：
@@ -421,9 +497,15 @@ object TapCli {
      *   · `op`       操作：`append` 追加 / `remove` 删除 / `replace` 整组重传 / `replace_one` 替换一张
      *   · `value`    新值（图片是 HTTPS URL；视频是数字 videoId）
      *   · `old_value` 仅 `replace_one` 需要，从最新字段值读
-     *   · `expected` 「本批变更后的最终值」数组，用于乐观锁校验
+     *   · **`expected` 必填**（乐观锁）：**原样回填**该字段读取时的 `current_value`；
+     *     `current_value` 是 null（首次写入）时传 `[]`。
      *
-     * @param changesJson 一个 JSON **数组**串，如 `[{"field_id":"icon","op":"replace","value":"https://..."}]`
+     * ⚠️ `expected` 漏了会被直接拒：
+     *   `save-changes requires $.changes[0] to include expected unless force=true`
+     * —— 我第一版就是漏了它，导致**所有写字段操作都会失败**（实测踩到）。
+     * 所以 [saveField] 会自动带上，别绕开它手写。
+     *
+     * @param changesJson 一个 JSON **数组**串
      */
     fun saveChanges(
         ctx: Context,
