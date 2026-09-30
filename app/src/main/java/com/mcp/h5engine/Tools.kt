@@ -796,10 +796,11 @@ class EngineTools(private val ui: GameUi, private val root: File) {
             // AI 要按题材挑一套主题时必须能读到它 —— 之前这条路是断的：
             // 包在 assets/ui-kits/ 躺着，而 resolve 只认工程目录，
             // 于是 AI 根本不知道有这 10 套主题，只能自己瞎编配色。
+            // 返回不存在的 File 而不是 null：resolve 的签名是非空 File，
+            // 上层统一按「文件在不在」判断（读的时候会报「文件不存在」，口径一致）。
             r == "_ui" || r.startsWith("_ui/") -> {
                 val tail = if (r == "_ui") "" else r.removePrefix("_ui/")
-                val f = File(uiKitRoot, tail)
-                if (f.exists()) f else null
+                File(uiKitRoot, tail)
             }
             else -> {
                 val f = safe(gameDir(game), r)
