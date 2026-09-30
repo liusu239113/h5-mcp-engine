@@ -72,14 +72,17 @@ jobs:
               cp "$SRC" "$OUT"
               chmod +x "$OUT"
               echo "OK   taptap-cli $VER -> $OUT ($(wc -c < "$OUT") bytes)"
-              # 校验：必须是个静态 aarch64 ELF，否则装到手机上跑不起来
-              python3 - "$OUT" <<'PY' || echo "WARN 二进制校验没通过，发布功能可能不可用"
-import struct,sys
-f=open(sys.argv[1],'rb'); d=f.read(64)
-assert d[:4]==b'\x7fELF', 'not ELF'
-assert struct.unpack('<H', d[18:20])[0]==0xb7, 'not aarch64'
-print('     校验通过: aarch64 ELF')
-PY
+              # 校验：必须是个 aarch64 ELF，否则装到手机上跑不起来。
+              # 用纯 shell 读字节（不用 heredoc —— 顶格的 heredoc 会截断 YAML 块标量，
+              # 上一次就是那样把整个 workflow 弄成语法错误、连 job 都没起来）。
+              MAGIC=$(head -c 4 "$OUT" | od -An -tx1 | tr -d ' \n')
+              MACH=$(dd if="$OUT" bs=1 skip=18 count=2 2>/dev/null | od -An -tx1 | tr -d ' \n')
+              echo "     magic=$MAGIC machine=$MACH"
+              if [ "$MAGIC" = "7f454c46" ] && [ "$MACH" = "b700" ]; then
+                echo "     校验通过: aarch64 ELF"
+              else
+                echo "WARN 二进制校验没通过（期望 7f454c46/b700），发布功能可能不可用"
+              fi
             else
               echo "SKIP taptap-cli 解包后没找到 linux-arm64（包结构可能变了）"
             fi
