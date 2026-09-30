@@ -40,7 +40,8 @@ class LogBuffer(private val cap: Int = 400) {
  *   · 脚本有没有真的执行（有没有全局变量、body 有没有长出来）
  *   · 屏幕上现在显示的是什么文案（卡在「正在进场…」这种一眼就能看出来）
  */
-private const val VALIDATE_STATE_JS = """
+// 用 val 不用 const val：`.trimIndent()` 是函数调用，不是编译期常量
+private val VALIDATE_STATE_JS = """
 (function(){
   try {
     var out = {};
@@ -1506,7 +1507,8 @@ class EngineTools(private val ui: GameUi, private val root: File) {
             val waitMs = a.optInt("wait_ms", 2500).coerceIn(300, 30_000)
             val asserts = a.optJSONArray("assertions")
 
-            logs.clear()          // 只关心这次重载之后的报错
+            // 清掉旧日志：只关心这次重载之后产生的报错
+            ui.consoleClear()
             ui.reloadGame()
             runCatching { Thread.sleep(waitMs.toLong()) }
 
@@ -1514,7 +1516,7 @@ class EngineTools(private val ui: GameUi, private val root: File) {
             sb.append("跑了一遍（重载后等了 ${waitMs}ms），结果如下：\n\n")
 
             // ① 运行时报错 —— 这是最有价值的部分
-            val errs = logs.tail(400).filter {
+            val errs = ui.consoleTail(400).filter {
                 val l = it.lowercase()
                 l.contains("error") || l.contains("uncaught") || l.contains("failed") ||
                     l.contains("exception") || l.contains("traceback")
