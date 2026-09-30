@@ -1,8 +1,10 @@
 package com.mcp.h5engine
 
 import android.content.Context
+import android.util.Log
 import org.json.JSONObject
 import java.io.File
+import java.io.FileOutputStream
 import java.util.concurrent.TimeUnit
 
 /**
@@ -30,8 +32,13 @@ import java.util.concurrent.TimeUnit
  */
 object TapCli {
 
+    private const val TAG = "hexoraTapCli"
+
     /** 打进 APK 的二进制名（见上面的说明：改名只是为了过打包流程） */
     private const val BIN_NAME = "libtaptapcli.so"
+
+    /** 随包携带的 CA 根证书（assets/ca/cacert.pem）。见 [caBundle] 的说明。 */
+    private const val CA_ASSET = "ca/cacert.pem"
 
     /**
      * 凭证目录。走 TAPTAP_CLI_HOME 环境变量告诉 CLI，
@@ -47,6 +54,50 @@ object TapCli {
         val f = bin(ctx)
         f.isFile && f.canExecute() && f.length() > 1_000_000
     }.getOrDefault(false)
+
+    /**
+     * 把随包的 CA 根证书释放到磁盘，返回路径（失败返回 null）。
+     *
+     * ## 为什么非要有这个
+     *
+     * taptap-cli 是**静态链接的 Go 二进制**，它用的是 Go 自己的 crypto/x509 ——
+     * 而 Go 的证书加载**只认 Linux 那几个固定路径**：
+     *
+     *     /etc/ssl/certs/ca-certificates.crt
+     *     /etc/pki/tls/certs/ca-bundle.crt
+     *     /etc/ssl/ca-bundle.pem  …（就这几个）
+     *
+     * **Android 上一个都没有**（它的信任库在 /system/etc/security/cacerts，
+     * 而且是个目录、格式也不一样，Go 根本不看）。
+     *
+     * 结果：TLS 握手时**找不到任何可信根**，直接失败。CLI 把它包装成
+     *     {"type":"network","subtype":"transport","message":"TapTap OAuth request failed"}
+     * —— 看起来像「网络不通」，实际是**证书验证失败**。
+     *
+     * 这就是「登录一直失败」的根因。我一开始误判成代理问题，改了两版都没修好：
+     * 代理根本不是原因（直连 + 代理都失败，因为**两条路都要过 TLS**）。
+     *
+     * 修法：把 CA bundle 随包带进来，通过 `SSL_CERT_FILE` 显式指给 CLI
+     * （Go 认这个环境变量，优先级高于上面那些固定路径）。
+     *
+     * ⚠️ **不要**用 `java.lang.ProcessBuilder` 去跑什么命令生成 —— 直接用 assets。
+     * ⚠️ 同时清掉 `SSL_CERT_DIR`：那是个**目录**，Go 会去遍历它，
+     *    指向不存在的目录虽然不致命，但会把「找不到证书」的噪音混进错误里。
+     */
+    fun caBundle(ctx: Context): File? {
+        val f = File(home(ctx), "cacert.pem")
+        // 已经释放过且内容看着正常（有 PEM 头、不是空文件）就直接复用
+        if (f.isFile && f.length() > 10_000) return f
+        return runCatching {
+            ctx.assets.open(CA_ASSET).use { ins ->
+                FileOutputStream(f).use { ins.copyTo(it, 1 shl 16) }
+            }
+            if (f.length() > 10_000) f else null
+        }.getOrElse {
+            Log.e(TAG, "CA 证书释放失败: ${it.message}")
+            null
+        }
+    }
 
     /**
      * 一条命令的结果。
@@ -103,13 +154,11 @@ object TapCli {
 
         // ① **先直连**。
         //
-        // 为什么必须直连优先：实测证明（在真二进制上验的）——
-        // 把 HTTPS_PROXY 指向一个连不上的地址，报错**恰好**是
-        // `type=network / subtype=transport / TapTap OAuth request failed`。
-        // 也就是说：**给 CLI 设一个坏代理 = 把本来能用的网络搞坏**。
-        // 我之前无脑读 android.net.Proxy.getDefaultHost() 并塞进去，
-        // 而很多新 Android 上它返回的不是 null 而是垃圾值 ——
-        // 于是用户明明没开 VPN，登录却一直失败（用户报的正是这个）。
+        // 直连优先本身是对的：给 CLI 塞一个连不上的代理，会把本来能用的网络搞坏
+        // （报错**恰好**也是 `transport / TapTap OAuth request failed` ——
+        //  和证书问题**共用同一句文案**，这正是我之前误判的原因）。
+        // 但**代理从来不是用户登录失败的根因**：直连和走代理**都要过 TLS**，
+        // 证书缺失时两条路都必然失败。真正的根因见 [caBundle]。
         val direct = exec(ctx, args, cwd, timeoutMs, stdin, null)
 
         // ② 直连失败、而且看着像网络问题，才退到本地代理重试一次。
@@ -174,6 +223,19 @@ object TapCli {
             env["TAPTAP_CLI_HOME"] = home(ctx).absolutePath
             // 静态二进制不需要解释器，但把 PATH 指清楚总没坏处
             env["PATH"] = ctx.applicationInfo.nativeLibraryDir
+
+            // ★★★ 关键修复：把 CA 根证书显式指给 CLI ★★★
+            //
+            // Go 的证书加载只看 /etc/ssl/certs/ca-certificates.crt 那几个 Linux 固定路径，
+            // 而 Android 上一个都没有 → TLS 握手找不到可信根 → 直接失败。
+            // 失败被包装成 `transport / TapTap OAuth request failed`，看着像网络问题，
+            // 其实是证书问题。这是「登录一直失败」的**真正根因**（详见 [caBundle]）。
+            caBundle(ctx)?.let { ca ->
+                env["SSL_CERT_FILE"] = ca.absolutePath
+                // 显式清掉：Go 会去遍历 SSL_CERT_DIR 这个**目录**，
+                // 留着上一层的值只会往错误信息里掺噪音。
+                env.remove("SSL_CERT_DIR")
+            }
             // 代理只由 [run] 显式传进来（直连失败后才会传）。
             //
             // ⚠️ **不要再在这里读 android.net.Proxy 塞给子进程** ——

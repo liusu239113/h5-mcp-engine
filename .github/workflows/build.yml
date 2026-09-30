@@ -91,6 +91,46 @@ jobs:
           fi
           ls -la app/src/main/jniLibs/arm64-v8a/ || true
 
+      # CA 根证书 —— 发布功能的**生命线**，缺了它登录必失败。
+      #
+      # 为什么需要：taptap-cli 是静态链接的 Go 二进制，Go 的 crypto/x509
+      # 只从 /etc/ssl/certs/ca-certificates.crt 这几个 **Linux 固定路径** 加载根证书，
+      # 而 Android 上一个都没有（它的信任库在 /system/etc/security/cacerts，
+      # Go 根本不看）→ TLS 握手找不到可信根 → 失败，并被包装成
+      # `transport / TapTap OAuth request failed`，看着像网络问题。
+      #
+      # 仓库里已经随包存了一份（assets/ca/cacert.pem），这里只是尽量刷成最新；
+      # 下载失败就沿用仓库里那份，**不影响构建**。
+      - name: Refresh CA bundle
+        continue-on-error: true
+        run: |
+          set +e
+          mkdir -p app/src/main/assets/ca
+          if curl -fsSL --retry 2 --retry-delay 3 --max-time 90 \
+               https://curl.se/ca/cacert.pem -o /tmp/cacert.pem; then
+            if [ "$(grep -c 'BEGIN CERTIFICATE' /tmp/cacert.pem)" -ge 50 ]; then
+              cp /tmp/cacert.pem app/src/main/assets/ca/cacert.pem
+              echo "OK   CA bundle 已刷新"
+            else
+              echo "WARN 下载到的 CA bundle 看着不对，沿用仓库里那份"
+            fi
+          else
+            echo "SKIP 刷新失败，沿用仓库里那份"
+          fi
+          echo "     证书数: $(grep -c 'BEGIN CERTIFICATE' app/src/main/assets/ca/cacert.pem)"
+
+      # 硬校验：证书包必须在，而且得像个真的证书包。
+      # 这里**故意让构建失败** —— 悄悄发出一个「登录永远失败」的包，
+      # 比构建失败糟糕得多（之前已经因为这个来回折腾好几轮了）。
+      - name: Verify CA bundle is packaged
+        run: |
+          set -e
+          CA=app/src/main/assets/ca/cacert.pem
+          test -f "$CA" || { echo "ERROR 缺少 $CA —— 发布功能会因 TLS 失败而不可用"; exit 1; }
+          N=$(grep -c 'BEGIN CERTIFICATE' "$CA")
+          test "$N" -ge 50 || { echo "ERROR $CA 只有 $N 张证书，不正常"; exit 1; }
+          echo "OK   CA bundle: $N 张证书, $(wc -c < "$CA") bytes"
+
       - name: Fetch H5 frameworks into assets/lib
         continue-on-error: true
         run: |
