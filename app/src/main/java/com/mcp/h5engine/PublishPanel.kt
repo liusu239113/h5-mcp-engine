@@ -74,6 +74,51 @@ class PublishPanel(
     private var appTitle = ""
     /** analyze-app-status 的结果缓存 */
     private var status: JSONObject? = null
+
+    /**
+     * 各模块的「已完成 / 总数」——发布页上那个绿色的 `3/3 已完成`。
+     *
+     * 来源是 `get-app-module`：只统计**可见且必填**的字段，
+     * 其中 current_value 非空的算已完成。这跟官方页面的口径一致，
+     * 也**不会因为平台/游戏类型不同而算错**（字段集合本来就是按当前条件投影出来的）。
+     */
+    private val moduleStats = HashMap<String, Pair<Int, Int>>()
+
+    /** 拉各模块字段统计（发布页那三个分组用得到的那几个模块） */
+    private fun loadModules() {
+        if (appId.isBlank() || devId.isBlank()) return
+        for (m in GROUP_MODULES) {
+            val r = TapCli.raw(
+                host.pubCtx,
+                listOf("app", "get-app-module", "--dev-id", devId, "--app-id", appId, "--module", m),
+                timeoutMs = 90_000
+            )
+            if (!r.ok) continue
+            val fields = r.obj("result")?.optJSONObject("fields")
+                ?: r.data.optJSONObject("fields")
+                ?: continue
+            var total = 0
+            var done = 0
+            for (k in fields.keys()) {
+                val f = fields.optJSONObject(k) ?: continue
+                if (!f.optBoolean("visible", true)) continue
+                if (!f.optBoolean("required", false)) continue
+                total++
+                if (isFilled(f.opt("current_value"))) done++
+            }
+            moduleStats[m] = done to total
+            post { render() }
+        }
+    }
+
+    /** 字段值算不算「已填」——空串 / null / 空数组 / 空对象都算没填 */
+    private fun isFilled(v: Any?): Boolean = when (v) {
+        null, JSONObject.NULL -> false
+        is String -> v.isNotBlank() && v != "null"
+        is org.json.JSONArray -> v.length() > 0
+        is JSONObject -> v.length() > 0
+        else -> true
+    }
     /** 折叠状态：三个分组默认都展开 */
     private val collapsed = mutableSetOf<String>()
 
@@ -365,14 +410,17 @@ class PublishPanel(
         render()
         Thread {
             val r = TapCli.analyzeStatus(host.pubCtx, devId, appId)
-            busy = false
             if (r.ok) status = r.data
+            busy = false
             post {
                 if (!r.ok) {
                     host.pubConfirm("拉取发布状态失败", r.message + "\n\n" + r.raw.take(600), {})
                 }
                 render()
             }
+            // 再拉各模块的字段统计（算「3/3 已完成」用）。
+            // 放在后面单独一轮：它要打好几个请求，慢，不该拖着状态显示不出来。
+            loadModules()
         }.start()
     }
 
@@ -421,6 +469,16 @@ class PublishPanel(
         else -> o?.toString().orEmpty().take(160)
     }
 
+    /**
+     * 一个分组卡 —— 对齐官方那套：
+     *
+     *   ┌────────────────────────────────────────┐
+     *   │ 游戏资料                   3/3 已完成 ⌄ │   ← 标题 + 绿色进度 + 折叠箭头
+     *   │ 游戏简介、游戏截图和实机视频都已准备完成。│   ← 一句人话描述
+     *   │ ────────────────────────────────────── │
+     *   │ [展开后] 具体字段 / 素材卡              │
+     *   └────────────────────────────────────────┘
+     */
     private fun groupCard(key: String, title: String, modules: List<String>, st: JSONObject): View {
         val c = card(pal.card, pal.border)
         val open = key !in collapsed
@@ -436,44 +494,64 @@ class PublishPanel(
         }
         head.addView(TextView(host.pubCtx).apply {
             setText(title)
-            textSize = 14f
+            textSize = 15f
             typeface = MEDIUM
             setTextColor(pal.text)
         }, LinearLayout.LayoutParams(0, -2, 1f))
+
+        // 进度：有模块统计就用「3/3 已完成」，否则退回「还有 N 项要补」
+        val stat = groupStat(modules)
+        if (stat != null) {
+            val (done, total) = stat
+            head.addView(TextView(host.pubCtx).apply {
+                setText("$done/$total 已完成")
+                textSize = 13f
+                typeface = MEDIUM
+                // 全齐 = 绿色（官方就是绿的）；没齐 = 提醒色
+                setTextColor(if (done >= total && total > 0) pal.accent else pal.errText)
+            }, LinearLayout.LayoutParams(-2, -2).apply { rightMargin = dp(8) })
+        }
         head.addView(TextView(host.pubCtx).apply {
             setText(if (open) "⌄" else "›")
-            textSize = 14f
+            textSize = 15f
             setTextColor(pal.faint)
         })
         c.addView(head)
 
-        // 这个分组下还有几条待办
-        val todo = countTodo(st, modules)
+        // 描述行：官方那套是「XX、YY 都已准备完成。」/「还差 XX」
         c.addView(TextView(host.pubCtx).apply {
-            setText(if (todo == 0) "这一组没有待补项" else "还有 $todo 项要补")
-            textSize = 11.5f
-            setTextColor(if (todo == 0) pal.accent else pal.sub)
-            setPadding(0, dp(5), 0, 0)
+            setText(groupDesc(key, modules, stat, st))
+            textSize = 12.5f
+            setTextColor(pal.sub)
+            setPadding(0, dp(6), 0, 0)
         })
 
         if (!open) return c
 
-        // 展开后：把这一组涉及的具体待办列出来（点一下可以让 AI 去补）
+        c.addView(View(host.pubCtx).apply { setBackgroundColor(pal.border) },
+            LinearLayout.LayoutParams(-1, dp(1)).apply { topMargin = dp(12); bottomMargin = dp(4) })
+
+        // 展开内容：icon 预览卡（基本信息那组）+ 具体待办
+        if (key == "basic") c.addView(iconSlotCard())
+
         val items = todoItems(st, modules)
         if (items.isEmpty()) {
             c.addView(TextView(host.pubCtx).apply {
-                setText("（都齐了）")
-                textSize = 12f
+                setText("都齐了，不用再补。")
+                textSize = 12.5f
                 setTextColor(pal.faint)
-                setPadding(0, dp(8), 0, 0)
+                setPadding(0, dp(10), 0, 0)
             })
         } else {
             for ((mod, msg) in items) {
                 val row = LinearLayout(host.pubCtx).apply {
                     orientation = LinearLayout.HORIZONTAL
                     gravity = Gravity.CENTER_VERTICAL
-                    setPadding(0, dp(9), 0, 0)
+                    setPadding(0, dp(10), 0, 0)
                     isClickable = true
+                    setOnClickListener {
+                        host.pubAskAi("帮我看看 TapTap 发布资料这一项怎么补：$msg（模块 $mod）")
+                    }
                 }
                 row.addView(TextView(host.pubCtx).apply {
                     setText("·")
@@ -482,26 +560,116 @@ class PublishPanel(
                 }, LinearLayout.LayoutParams(-2, -2).apply { rightMargin = dp(7) })
                 row.addView(TextView(host.pubCtx).apply {
                     setText(msg)
-                    textSize = 12f
+                    textSize = 12.5f
                     setTextColor(pal.text)
                     maxLines = 3
                     ellipsize = android.text.TextUtils.TruncateAt.END
                 }, LinearLayout.LayoutParams(0, -2, 1f))
-                row.addView(btn("让 AI 补") {
+                // 官方的素材操作是**图标**，不是文字按钮 —— 这里跟着做
+                row.addView(iconBtn("skill", "让 AI 处理这一项") {
                     host.pubAskAi(
                         "这个 TapTap 发布资料项还没补齐，请帮我处理：$msg" +
                             "（模块 $mod，app $appId，厂商 $devId）。" +
                             "先读一次当前值，需要我提供文案/图片就先问我。"
                     )
                 })
-                row.setOnClickListener {
-                    host.pubAskAi("帮我看看 TapTap 发布资料这一项怎么补：$msg（模块 $mod）")
-                }
                 c.addView(row)
             }
         }
         return c
     }
+
+    /** 这一组的 已完成/总数（把组内几个模块的数字合起来） */
+    private fun groupStat(modules: List<String>): Pair<Int, Int>? {
+        var done = 0
+        var total = 0
+        var any = false
+        for (m in modules) {
+            val s = moduleStats[m] ?: continue
+            any = true
+            done += s.first
+            total += s.second
+        }
+        return if (any) done to total else null
+    }
+
+    /** 官方那种描述行：「XX、YY 都已准备完成。」/「还差 XX」 */
+    private fun groupDesc(
+        key: String,
+        modules: List<String>,
+        stat: Pair<Int, Int>?,
+        st: JSONObject
+    ): String {
+        val what = when (key) {
+            "basic" -> "游戏 icon、游戏名、游戏类型、发布厂商和开发者的话"
+            "assets" -> "游戏简介、游戏截图和实机视频"
+            else -> "宣传主图和其他推广图片"
+        }
+        val todo = countTodo(st, modules)
+        return when {
+            stat != null && stat.second > 0 && stat.first >= stat.second -> "$what 都已准备完成。"
+            todo > 0 -> "$what 里还有 $todo 项没准备好。"
+            else -> "$what 都已准备完成。"
+        }
+    }
+
+    /**
+     * 游戏 icon 预览卡 —— 对齐官方那张「大图 + 右上角图标按钮」。
+     *
+     * 官方是 ✦（AI 生成）/ ↑（上传）两个图标叠在图上；
+     * 这里同样用图标，不用文字按钮。
+     */
+    private fun iconSlotCard(): View {
+        val box = LinearLayout(host.pubCtx).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(0, dp(12), 0, 0)
+        }
+        val holder = FrameLayout(host.pubCtx)
+
+        // 图（有就显示，没有就给个占位方块）
+        val iv = ImageView(host.pubCtx).apply {
+            scaleType = ImageView.ScaleType.CENTER_CROP
+            background = roundCard(host.pubCtx, pal.cardAlt, pal.border, 12)
+            clipToOutline = true
+            setImageDrawable(LineIcon("image", pal.faint, 1.8f))
+            setPadding(dp(28), dp(28), dp(28), dp(28))
+        }
+        holder.addView(iv, FrameLayout.LayoutParams(dp(96), dp(96)))
+
+        // 右上角两个图标按钮：✦ 让 AI 生成 / ↑ 上传
+        val ops = LinearLayout(host.pubCtx).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.END
+        }
+        ops.addView(iconBtn("skill", "让 AI 生成 icon") {
+            host.pubAskAi(
+                "帮我为这个游戏生成一张 TapTap 商店用的 icon（官方规格，1:1）。" +
+                    "做完直接上传到素材库（app $appId，厂商 $devId）。"
+            )
+        })
+        ops.addView(iconBtn("upload", "上传 icon") { uploadFlow() })
+        holder.addView(ops, FrameLayout.LayoutParams(-2, -2).apply { gravity = Gravity.TOP or Gravity.END })
+
+        box.addView(holder, LinearLayout.LayoutParams(dp(96), dp(96)))
+        box.addView(TextView(host.pubCtx).apply {
+            setText("游戏 icon")
+            textSize = 11.5f
+            setTextColor(pal.faint)
+            setPadding(0, dp(6), 0, 0)
+        })
+        return box
+    }
+
+    /** 圆形图标按钮（官方的素材操作就是这种） */
+    private fun iconBtn(kind: String, desc: String, onClick: () -> Unit): View =
+        ImageView(host.pubCtx).apply {
+            setImageDrawable(LineIcon(kind, pal.text, 1.8f))
+            setPadding(dp(7), dp(7), dp(7), dp(7))
+            background = pressable(roundCard(host.pubCtx, pal.card, pal.border, 9), 0x14000000)
+            contentDescription = desc
+            setOnClickListener { onClick() }
+            layoutParams = LinearLayout.LayoutParams(dp(30), dp(30)).apply { leftMargin = dp(6) }
+        }
 
     /** 把 blockers / warnings / suggestions 按模块归到某一组里 */
     private fun todoItems(st: JSONObject, modules: List<String>): List<Pair<String, String>> {
@@ -817,5 +985,20 @@ class PublishPanel(
          */
         @Volatile var curDevId: String = ""
         @Volatile var curAppId: String = ""
+
+        /**
+         * 发布页那三个分组各自覆盖哪些模块 —— 用来算「3/3 已完成」。
+         *
+         * 分组口径照官方页面的说法来：
+         *   游戏基本信息 = icon / 游戏名 / 类型 / 厂商 / 开发者的话
+         *   游戏资料     = 简介 / 截图 / 实机视频
+         *   宣传推广物料 = 宣传主图 / 其他推广图
+         * 模块 id 则照 CLI 的 module_id（见官方 app-edit-field-map）。
+         */
+        private val GROUP_MODULES = listOf(
+            "basic-info", "developer-info", "platform-status",
+            "assets-upload", "release-settings",
+            "profile-promotion", "windows-exclusive"
+        )
     }
 }

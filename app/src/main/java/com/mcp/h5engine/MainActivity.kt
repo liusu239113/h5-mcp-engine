@@ -776,8 +776,12 @@ class MainActivity : AppCompatActivity(), GameUi {
         chatPage = buildChatPage()
         previewPage = buildPreviewPage()
 
-        pubPage = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
+        // ⚠️ 必须是 FrameLayout，不能是 LinearLayout。
+        // 「管理发布」那一层是**叠**在原发布页上面的，两层都是 height=MATCH_PARENT：
+        //   竖向 LinearLayout 里，第一个子视图会把整高占满，
+        //   第二个被排到屏幕外面 —— 点了按钮其实有反应，但页面渲染在看不见的地方，
+        //   用户看到的就是「点不动 / 没反应」。
+        pubPage = FrameLayout(this).apply {
             setBackgroundColor(pal.bg)
             visibility = View.GONE
         }
@@ -5371,7 +5375,10 @@ class MainActivity : AppCompatActivity(), GameUi {
             pubScroll.addView(row, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(10) })
         }
 
-        pubPage.addView(ScrollView(this).apply { addView(pubScroll) }, LinearLayout.LayoutParams(-1, -1))
+        pubPage.addView(
+            ScrollView(this).apply { addView(pubScroll) },
+            FrameLayout.LayoutParams(-1, -1)
+        )
         refreshExportRow()
     }
 
@@ -5467,7 +5474,7 @@ class MainActivity : AppCompatActivity(), GameUi {
                 ScrollView(this).apply { addView(publishBody) },
                 LinearLayout.LayoutParams(-1, 0, 1f)
             )
-            pubPage.addView(page, LinearLayout.LayoutParams(-1, -1))
+            pubPage.addView(page, FrameLayout.LayoutParams(-1, -1))
             publishPage = page
         }
         publishPage?.visibleIf(true)
