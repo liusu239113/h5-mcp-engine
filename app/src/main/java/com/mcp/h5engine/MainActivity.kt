@@ -7208,11 +7208,21 @@ makerRow1.addView(ghostBtnOf(ctx, pal, "扫码登录").apply {
             val sid = att?.optJSONObject("result")?.optString("sessionId", "").orEmpty()
             if (sid.isEmpty()) return null
 
-            // ③ 抓图。fromSurface=false：不依赖「当前有没有合成面」，
-            //    页面不在屏幕上、甚至被 GONE 掉，也一样出图
+            // ③ 抓图。
+            //
+            // **fromSurface 默认（true）= 抓真实合成结果** —— 这正是我们要的：
+            // 拿到的就是屏幕上那一帧（DOM 文字 + canvas + WebGL 全在）。
+            // 我一开始传了 false，以为「不依赖合成面更保险」，其实反了：
+            // false 走的是「从主框架渲染」那条路，**不含跨进程 iframe**，
+            // 而且渲染管线略有差别 —— 出来的图会跟用户看到的不完全一致。
+            // 现在不传它（用默认 true），并且显式打开 captureBeyondViewport 之外的两个开关：
+            //   · optimizeForSpeed=false：优先保真，不做有损加速
+            //   · captureBeyondViewport=true：页面比视口长时也完整截下来
             val shot = cdpCall(
                 out, ins, 3, "Page.captureScreenshot",
-                JSONObject().put("format", "jpeg").put("quality", 75).put("fromSurface", false),
+                JSONObject().put("format", "jpeg").put("quality", 80)
+                    .put("captureBeyondViewport", true)
+                    .put("optimizeForSpeed", false),
                 sid
             )
             val d = shot?.optJSONObject("result")?.optString("data", "").orEmpty()

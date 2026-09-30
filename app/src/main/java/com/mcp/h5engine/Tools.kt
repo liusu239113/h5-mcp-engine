@@ -30,6 +30,42 @@ class LogBuffer(private val cap: Int = 400) {
  * 然后把好代码改坏。这段脚本从**运行时事实**出发回答「页面到底加载没有」，
  * 让模型有依据，而不是靠一张图瞎猜。
  */
+/**
+ * game_validate 用的「页面运行状态」探测脚本。
+ *
+ * 为什么光看 console 报错不够：**卡在加载页往往一条错都不报**。
+ * 那个桌面 skill 的文档里也有同样的坑（它用 `scene_stalled` 区分「静态展示」和「卡死」）。
+ * 这里从运行时事实回答三件事：
+ *   · 页面加载到哪一步了（readyState）
+ *   · 脚本有没有真的执行（有没有全局变量、body 有没有长出来）
+ *   · 屏幕上现在显示的是什么文案（卡在「正在进场…」这种一眼就能看出来）
+ */
+private const val VALIDATE_STATE_JS = """
+(function(){
+  try {
+    var out = {};
+    out.readyState = document.readyState;
+    out.bodyChildren = document.body ? document.body.children.length : -1;
+    out.bodyLen = document.body ? document.body.innerHTML.length : -1;
+    // 屏幕上的可见文案（截断）：卡在 loading 页时这里会露馅
+    var txt = document.body ? (document.body.innerText || '').replace(/\s+/g, ' ').trim() : '';
+    out.visibleText = txt.slice(0, 160);
+    // canvas 情况：有几个、有没有真的画出东西
+    var cvs = [].slice.call(document.querySelectorAll('canvas'));
+    out.canvasCount = cvs.length;
+    out.canvases = cvs.slice(0, 4).map(function(c){
+      return { w: c.width|0, h: c.height|0, visible: !!(c.offsetWidth && c.offsetHeight) };
+    });
+    // 常见的「引擎挂上没」信号
+    out.globals = {};
+    ['CONFIG','Career','Screens','App','game','SceneManager','Phaser','THREE','PIXI','engine']
+      .forEach(function(k){ try { out.globals[k] = (typeof window[k]); } catch(e){} });
+    out.scripts = document.scripts ? document.scripts.length : -1;
+    return JSON.stringify(out);
+  } catch(e) { return JSON.stringify({ probeError: String(e) }); }
+})()
+""".trimIndent()
+
 private const val SHOT_PROBE_JS = """
 (function(){
   try {
@@ -318,6 +354,17 @@ class EngineTools(private val ui: GameUi, private val root: File) {
                 """{"code":{"type":"string","description":"表达式或 IIFE，返回值需可 JSON 化"}}""",
                 listOf("code")),
 
+            fn("game_validate",
+                "【跑一遍看有没有报错】让游戏真正跑起来、再查它有没有问题。\n" +
+                    "做的事：强制热重载 → 等它跑一会儿 → 收集这段时间的 console 报错 → " +
+                    "读页面运行状态（是否还在加载页、脚本有没有执行、关键全局变量在不在）。\n" +
+                    "**改完代码用它自检，比只看截图靠谱** —— 截图只能看出「画面不对」，" +
+                    "它能告诉你「哪一行抛了异常」。\n" +
+                    "想额外断言就传 assertions，比如 [[\"typeof Career==='object'\",\"职业系统没定义\"]]。",
+                """{"wait_ms":{"type":"integer","description":"重载后等多少毫秒再检查，默认 2500。游戏初始化慢就调大"},
+                   "assertions":{"type":"array","description":"可选断言列表，每项 [表达式, 失败说明]"}}""",
+                emptyList()),
+
             fn("game_shot", "**离屏抓一张「游戏画面」**（不切页、不动用户屏幕、不点击）。" +
                 "这是你自己的调试眼：确认游戏画面有没有白屏/错位/被遮挡、素材有没有渲染出来。" +
                 "拿不到图会说明原因，**不要**据此断言「游戏坏了」",
@@ -470,6 +517,23 @@ class EngineTools(private val ui: GameUi, private val root: File) {
                 listOf("action"))
         )
     }
+
+    /**
+     * 把 runJsSync 回传的 JSON 串排一下版。
+     *
+     * 页面探测脚本返回的是 `JSON.stringify(...)`，再经 evaluateJavascript 包了一层引号，
+     * 直接丢给模型是一长条转义串；这里解开、缩进，它才读得下去。
+     * 解不开就原样返回（别把信息弄丢）。
+     */
+    private fun prettyJson(raw: String): String = runCatching {
+        val unquoted = org.json.JSONTokener(raw).nextValue()
+        val s = when (unquoted) {
+            is String -> unquoted
+            is JSONObject -> unquoted.toString()
+            else -> return@runCatching raw
+        }
+        org.json.JSONObject(s).toString(2)
+    }.getOrDefault(raw)
 
     /**
      * 把 analyze-app-status 的结果压成人话给模型看。
@@ -1357,6 +1421,69 @@ class EngineTools(private val ui: GameUi, private val root: File) {
         "game_reload" -> { ui.reloadGame(); ToolResult("已热重载") }
 
         "js_eval" -> ToolResult(ui.runJsSync(a.getString("code")).take(6000))
+
+        "game_validate" -> {
+            // 跑一遍 + 查错。刻意**只重载一次、只等一次**：
+            // 那套桌面 skill 的 validate 也是「跑 N 帧后收错误」，本质一样，
+            // 区别只是它跑的是离线进程、我们跑的是用户手机上的真实页面 ——
+            // 后者反而更准（就是用户看到的那个环境）。
+            val waitMs = a.optInt("wait_ms", 2500).coerceIn(300, 30_000)
+            val asserts = a.optJSONArray("assertions")
+
+            logs.clear()          // 只关心这次重载之后的报错
+            ui.reloadGame()
+            runCatching { Thread.sleep(waitMs.toLong()) }
+
+            val sb = StringBuilder()
+            sb.append("跑了一遍（重载后等了 ${waitMs}ms），结果如下：\n\n")
+
+            // ① 运行时报错 —— 这是最有价值的部分
+            val errs = logs.tail(400).filter {
+                val l = it.lowercase()
+                l.contains("error") || l.contains("uncaught") || l.contains("failed") ||
+                    l.contains("exception") || l.contains("traceback")
+            }
+            if (errs.isEmpty()) {
+                sb.append("✅ 这段时间没有 console 报错\n")
+            } else {
+                sb.append("❌ 有 ${errs.size} 条报错（最后 ${minOf(errs.size, 12)} 条）：\n")
+                errs.takeLast(12).forEach { sb.append("  · ").append(it.take(220)).append('\n') }
+            }
+
+            // ② 页面运行状态 —— 光看「没报错」不够，卡在加载页也不报错
+            val state = runCatching { ui.runJsSync(VALIDATE_STATE_JS, 8000) }.getOrNull()
+            if (!state.isNullOrBlank() && state != "null") {
+                sb.append("\n页面状态：\n").append(prettyJson(state).take(1200)).append('\n')
+            }
+
+            // ③ 调用方给的断言
+            if (asserts != null && asserts.length() > 0) {
+                sb.append("\n断言：\n")
+                var failed = 0
+                for (i in 0 until asserts.length()) {
+                    val item = asserts.optJSONArray(i) ?: continue
+                    val expr = item.optString(0).trim()
+                    val why = item.optString(1, expr)
+                    if (expr.isBlank()) continue
+                    val r = runCatching {
+                        ui.runJsSync("(function(){try{return !!($expr)}catch(e){return 'ERR:'+e.message}})()", 6000)
+                    }.getOrNull()?.trim().orEmpty()
+                    val ok = r == "true"
+                    if (!ok) failed++
+                    sb.append(if (ok) "  ✅ " else "  ❌ ").append(why)
+                    if (!ok) sb.append("  （求值结果 ").append(r.take(80)).append("）")
+                    sb.append('\n')
+                }
+                sb.append(if (failed == 0) "\n全部断言通过。\n" else "\n有 $failed 条断言没过。\n")
+            }
+
+            sb.append(
+                "\n怎么用这份结果：报错 → 按栈定位到具体文件行去修；" +
+                    "页面状态里 readyState 不是 complete 或还在 loading 文案 → 说明卡在初始化；" +
+                    "**别只凭截图判断** —— 截图看不出「哪一行抛了异常」。"
+            )
+            ToolResult(sb.toString())
+        }
 
         "game_shot" -> {
             val img = ui.snapshotGameOffscreen(a.optInt("maxWidth", 720))
