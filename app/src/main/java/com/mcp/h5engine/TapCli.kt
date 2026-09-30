@@ -105,9 +105,17 @@ object TapCli {
         return try {
             val cmd = mutableListOf(exe.absolutePath)
             cmd += args
-            // 统一要 JSON：不然拿到的是给人看的表格，没法解析
+            // 统一要 JSON 输出。
+            //
+            // ⚠️ 正确的 flag 是 **--json**，不是 --format。踩过的坑：
+            //   · 我一开始追加的是 `--format json`，`auth qrcode` 直接报
+            //     `unknown flag "--format"` —— 登录因此一直失败；
+            //   · 而 `--format` 只有 metadata 那批命令认（app / developer 的某些子命令）。
+            // 所以：默认加 `--json`（auth / upload 这些认它），
+            // 只有明确属于 metadata 服务的才加 `--format json`。
             if (args.none { it == "--format" || it == "--json" }) {
-                cmd += listOf("--format", "json")
+                if (wantsFormatFlag(args)) cmd += listOf("--format", "json")
+                else cmd += listOf("--json")
             }
 
             val pb = ProcessBuilder(cmd)
@@ -178,6 +186,28 @@ object TapCli {
         return Result(false, JSONObject(), raw.take(500), raw)
     }
 
+    /**
+     * 这条命令认不认 `--format json`（而不是 `--json`）。
+     *
+     * 实测（在真二进制上逐个 --help 过）：
+     *   · `auth *`  —— 认 `--json`，**不认** `--format`（报了 unknown flag，登录就是死在这）；
+     *   · `upload`  —— 认 `--format json`（`--help` 里写着）；
+     *   · `app` / `developer` —— 认 `--format json`；
+     *   · 拿不准的一律走 `--json`：多认一个参数的命令很多，但**不认就会直接失败**，
+     *     而少了它顶多拿到纯文本（[parseEnvelope] 有兜底，仍能把原文交出去）。
+     */
+    private fun wantsFormatFlag(args: List<String>): Boolean {
+        val head = args.firstOrNull().orEmpty()
+        val second = args.getOrNull(1).orEmpty()
+        return when (head) {
+            "auth" -> false
+            "app", "developer", "skills", "schema" -> true
+            "upload" -> true
+            // 兜底：只看第一个词不够时，再看子命令是不是 metadata 那批
+            else -> second in setOf("analyze-app-status", "list-packages", "list-app-versions")
+        }
+    }
+
     private fun waitExit(p: Process, timeoutMs: Long): Boolean {
         val deadline = System.currentTimeMillis() + timeoutMs
         while (System.currentTimeMillis() < deadline) {
@@ -193,16 +223,28 @@ object TapCli {
 
     // ==================== 常用操作的语义封装 ====================
 
-    /** 认证状态：没登录 / 已登录（带昵称之类） */
+    /** 认证状态：没登录 / 已登录。加 --json 才有结构化输出 */
     fun authStatus(ctx: Context): Result =
         run(ctx, listOf("auth", "status"), timeoutMs = 25_000)
 
     /**
-     * 取登录二维码 / 授权链接。
-     * 这是发布页「未登录」时要显示的东西 —— 让用户扫一下就能登录。
+     * 开始登录：**官方给 AI 用的那套**（`auth login --no-wait --json`）。
+     *
+     * 返回里带 `verification_url` / `device_code` —— 把 url 给用户去点，
+     * 然后拿 device_code 去 [authLoginPoll] 轮询直到授权完成。
+     *
+     * ⚠️ 别用 `auth qrcode`：那个是**拿一个 URL 去生成二维码图片**的，
+     * 不是「生成授权链接」。我一开始就是当成后者用的，所以永远拿不到链接。
      */
-    fun authQrcode(ctx: Context): Result =
-        run(ctx, listOf("auth", "qrcode"), timeoutMs = 60_000)
+    fun authLoginStart(ctx: Context): Result =
+        run(ctx, listOf("auth", "login", "--no-wait"), timeoutMs = 60_000)
+
+    /**
+     * 拿着 device_code 轮询，直到用户在他那边点完授权。
+     * 会一直阻塞到授权成功 / 过期，所以超时给得宽。
+     */
+    fun authLoginPoll(ctx: Context, deviceCode: String, timeoutMs: Long = 10 * 60_000 + 30_000): Result =
+        run(ctx, listOf("auth", "login", "--device-code", deviceCode), timeoutMs = timeoutMs)
 
     /** 退出登录 */
     fun authLogout(ctx: Context): Result =

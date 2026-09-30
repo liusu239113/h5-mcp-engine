@@ -232,10 +232,28 @@ class EngineTools(private val ui: GameUi, private val root: File) {
 
     // ==================== 工具声明 ====================
 
+    /**
+     * 造一条工具声明。
+     *
+     * ⚠️ **这里必须容错**，不能直接 `JSONObject(props)`。
+     *
+     * 踩过的坑：`props` 是个手写的 JSON 串，写错一个字符就抛 JSONException。
+     * 而 allSpecs 是 by lazy —— 构造列表时抛异常，会**整个工具列表取不出来**，
+     * 于是每一条请求都失败，App 表现为「什么消息都发不了」。
+     * 一次手滑（我在 description 里写了 `\"` —— Kotlin 三引号**不处理转义**，
+     * 那个引号把 JSON 字符串提前闭合了）就把整个 App 搞瘫了。
+     *
+     * 现在：单条 schema 坏掉只丢**这一个**工具，其余照常发出去，
+     * 并且在 logcat 里留一条 error 说明是哪个工具、错在哪。
+     */
     private fun fn(name: String, desc: String, props: String, required: List<String>): JSONObject {
+        val propsObj = runCatching { JSONObject(props) }.getOrElse { e ->
+            android.util.Log.e("hexoraTools", "工具 $name 的参数 schema 不是合法 JSON，已降级为空参数: ${e.message}")
+            JSONObject()
+        }
         val params = JSONObject()
             .put("type", "object")
-            .put("properties", JSONObject(props))
+            .put("properties", propsObj)
         if (required.isNotEmpty()) params.put("required", JSONArray(required.toTypedArray()))
         return JSONObject()
             .put("type", "function")
@@ -364,7 +382,7 @@ class EngineTools(private val ui: GameUi, private val root: File) {
                    "developer_id":{"type":"string","description":"厂商 ID；一般不用传"},
                    "module":{"type":"string","description":"action=modules 时要读的模块 id"},
                    "path":{"type":"string","description":"action=upload 时的图片路径（工作区相对路径或文件名）"},
-                   "fields":{"type":"object","description":"action=save 时要写入的字段，如 {\\"description\\":\\"新简介\\"}"}}""",
+                   "fields":{"type":"object","description":"action=save 时要写入的字段，形如 {字段名: 新值}"}}""",
                 listOf("action")),
 
             fn("memory_save",
@@ -1111,13 +1129,31 @@ class EngineTools(private val ui: GameUi, private val root: File) {
                     }
 
                     "login" -> {
-                        val r = TapCli.authQrcode(ctx)
-                        val url = Regex("https?://[^\\s\"'<>]+").find(r.raw)?.value
-                        if (url == null) ToolResult("没拿到授权链接。CLI 输出：\n" + r.raw.take(600))
-                        else ToolResult(
-                            "TapTap 授权链接（原样贴给用户，让他点开登录并确认）：\n$url\n\n" +
-                                "用户授权完让他回一句，你再调 action=status 继续。"
-                        )
+                        // 官方给 AI 用的两段式：先 --no-wait 拿链接，再拿 device_code 轮询。
+                        // 轮询会阻塞到用户点完（最长 10 分钟），所以直接在这一步里等他。
+                        val start = TapCli.authLoginStart(ctx)
+                        val url = start.data.optString("verification_url").ifBlank {
+                            Regex("\"verification_url\"\\s*:\\s*\"([^\"]+)\"")
+                                .find(start.raw)?.groupValues?.get(1).orEmpty()
+                        }
+                        val code = start.data.optString("device_code").ifBlank {
+                            Regex("\"device_code\"\\s*:\\s*\"([^\"]+)\"")
+                                .find(start.raw)?.groupValues?.get(1).orEmpty()
+                        }
+                        if (url.isBlank() || code.isBlank()) {
+                            ToolResult("没拿到授权链接。CLI 输出：\n" + start.raw.take(700))
+                        } else {
+                            val done = TapCli.authLoginPoll(ctx, code)
+                            ToolResult(
+                                if (done.ok)
+                                    "TapTap 授权已完成（链接是 $url，用户已点过确认）。" +
+                                        "现在可以调 action=apps 拿游戏列表了。"
+                                else
+                                    "TapTap 授权没完成。把这个链接原样贴给用户，让他点开登录并确认：\n$url\n\n" +
+                                        "他确认完你再调一次 action=status 看状态。\n" +
+                                        "（CLI 返回：${done.raw.take(400)}）"
+                            )
+                        }
                     }
 
                     "apps" -> {

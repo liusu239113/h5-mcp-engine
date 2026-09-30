@@ -920,11 +920,10 @@ class MainActivity : AppCompatActivity(), GameUi {
         // 单次静音会漏掉这一声，350ms 后再对一次表。
         if (tab != 1) main.postDelayed({ if (activeTab != 1) applyPreviewMute(true) }, 350)
         if (tab == 1) ensurePreviewFresh(true)
-        if (tab == 2) {
-            refreshExportRow()
-            // 发布页每次进来都刷一下：账号状态、资料进度可能在上一次对话里被 AI 改过了
-            publishPanel?.refresh()
-        }
+        if (tab == 2) refreshExportRow()
+        // 切到别的页就把「管理发布」那层收起来：下次回到发布页应该先看到发布页本身，
+        // 而不是停在上次进的面板里（那会让人以为发布页被换掉了）
+        if (tab != 2) closePublishPanel()
     }
 
     /**
@@ -5330,16 +5329,21 @@ class MainActivity : AppCompatActivity(), GameUi {
             setPadding(dp(14), dp(14), dp(14), dp(18))
         }
 
-        // ==================== 发布到 TapTap（主体） ====================
-        // 这一块是发布页的主角：登录、选游戏、看资料缺什么、传素材、提审。
-        // 数据全来自官方 CLI（见 TapCli / PublishPanel），不在本地硬编码字段表。
-        publishPanel = PublishPanel(publishHost, pubScroll)
+        // ==================== 管理发布（入口） ====================
+        // 只放一个入口卡，点进去才是 TapTap 发布面板（登录 / 选游戏 / 资料 / 提审）。
+        // 刻意**不做内嵌**：那个面板很长（账号 + 三个分组 + 素材 + 提审），
+        // 铺在这里会把下面「导出与发布」那些原有功能全挤到看不见的地方 ——
+        // 上一版就是这么干的，把好好的东西挤没了。
+        pubScroll.addView(
+            publishEntryCard(),
+            LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(16) }
+        )
 
         pubScroll.addView(TextView(this).apply {
-            text = "导出与备份"
+            text = "导出与发布"
             textSize = 12f
             setTextColor(pal.faint)
-            setPadding(dp(4), dp(22), 0, dp(8))
+            setPadding(dp(4), 0, 0, dp(8))
         })
 
         lastExportTv = TextView(this).apply {
@@ -5371,10 +5375,110 @@ class MainActivity : AppCompatActivity(), GameUi {
         refreshExportRow()
     }
 
-    // ==================== 发布面板的宿主实现 ====================
+    // ==================== 发布面板（点「管理发布」进来） ====================
 
-    /** 发布面板（TapTap 发布）——懒建，构建时注入 pubScroll */
+    /** 发布面板（TapTap 发布）——懒建，构建时注入 publishBody */
     private var publishPanel: PublishPanel? = null
+
+    /** 发布面板的内容容器（独立页面里那个） */
+    private lateinit var publishBody: LinearLayout
+
+    /** 发布面板整页：进去之后盖住发布页，返回就露出来 */
+    private var publishPage: LinearLayout? = null
+
+    /**
+     * 「管理发布」入口卡 —— 发布页最上面那一块。
+     *
+     * 它只是个**入口**：原来的导出 / 文件 / console / 保活等全留在下面没动。
+     */
+    private fun publishEntryCard(): LinearLayout {
+        val card = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(14), dp(13), dp(12), dp(13))
+            background = pressable(roundCard(this@MainActivity, pal.accentSoft, pal.accent, 14), 0x14000000)
+            isClickable = true
+            setOnClickListener { openPublishPanel() }
+        }
+        card.addView(ImageView(this).apply {
+            setImageDrawable(LineIcon("upload", pal.accent, 1.8f))
+        }, LinearLayout.LayoutParams(dp(22), dp(22)).apply { rightMargin = dp(12) })
+
+        val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        col.addView(TextView(this).apply {
+            text = "管理发布"
+            textSize = 15f
+            typeface = MEDIUM
+            setTextColor(pal.accent)
+        })
+        col.addView(TextView(this).apply {
+            text = "TapTap 商店页：登录 · 选游戏 · 查资料缺什么 · 传素材 · 提审"
+            textSize = 11.5f
+            setTextColor(pal.sub)
+            setPadding(0, dp(4), 0, 0)
+        })
+        card.addView(col, LinearLayout.LayoutParams(0, -2, 1f))
+        card.addView(TextView(this).apply {
+            text = "›"
+            textSize = 16f
+            setTextColor(pal.accent)
+        })
+        return card
+    }
+
+    /** 进「管理发布」：把面板页盖在发布页上（原页面原地留着，返回就回来） */
+    private fun openPublishPanel() {
+        if (publishPage == null) {
+            publishBody = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(dp(14), dp(6), dp(14), dp(18))
+            }
+            // 面板在**这里**建，注入的是它自己的容器 —— 不碰 pubScroll
+            publishPanel = PublishPanel(publishHost, publishBody)
+
+            val page = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                setBackgroundColor(pal.bg)
+            }
+            // 顶部返回条
+            val bar = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(dp(10), dp(12), dp(14), dp(10))
+                setBackgroundColor(pal.navBg)
+            }
+            bar.addView(TextView(this).apply {
+                text = "‹ 返回"
+                textSize = 14f
+                setTextColor(pal.accent)
+                setPadding(dp(6), dp(6), dp(14), dp(6))
+                setOnClickListener { closePublishPanel() }
+            })
+            bar.addView(TextView(this).apply {
+                text = "管理发布"
+                textSize = 15.5f
+                typeface = MEDIUM
+                setTextColor(pal.text)
+            }, LinearLayout.LayoutParams(0, -2, 1f))
+            page.addView(bar, LinearLayout.LayoutParams(-1, -2))
+            page.addView(View(this).apply { setBackgroundColor(pal.border) },
+                LinearLayout.LayoutParams(-1, dp(1)))
+            page.addView(
+                ScrollView(this).apply { addView(publishBody) },
+                LinearLayout.LayoutParams(-1, 0, 1f)
+            )
+            pubPage.addView(page, LinearLayout.LayoutParams(-1, -1))
+            publishPage = page
+        }
+        publishPage?.visibleIf(true)
+        publishPanel?.refresh()
+    }
+
+    private fun closePublishPanel() {
+        publishPage?.visibleIf(false)
+        // 回来时刷一下导出行，顺手把发布页的滚动位置留在原位
+        refreshExportRow()
+    }
 
     /** 给 PublishPanel 用的窄接口：它只需要这几件事，不该看得见 MainActivity 的全部私有成员 */
     private val publishHost = object : PublishHost {

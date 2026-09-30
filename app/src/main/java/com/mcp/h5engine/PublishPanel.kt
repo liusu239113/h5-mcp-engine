@@ -201,27 +201,58 @@ class PublishPanel(
     }
 
     /**
-     * 登录。
+     * 登录 —— 走官方给 AI 用的两段式流程：
      *
-     * CLI 的 `auth qrcode` 会给一个授权链接 / 二维码 —— 手机上最顺的是**直接开浏览器**，
-     * 用户在 TapTap App 里点一下确认就完事，不用真的去扫。
+     *   ① `auth login --no-wait --json`  →  拿 verification_url + device_code
+     *   ② 开浏览器让用户点授权，同时拿 device_code 去 `auth login --device-code` 轮询
+     *   ③ 轮询返回成功 → 刷新面板
+     *
+     * 用户不用管「登录完回来点刷新」这种话 —— 轮询会一直等到他点完为止。
      */
     private fun login() {
         if (busy) return
         busy = true
-        host.pubToast("正在取登录链接…")
+        host.pubToast("正在取授权链接…")
         Thread {
-            val r = TapCli.authQrcode(host.pubCtx)
-            busy = false
-            val url = findUrl(r.raw) ?: findUrl(r.data.toString())
-            post {
-                if (url != null) {
-                    host.pubOpenUrl(url)
-                    host.pubToast("已打开授权页，登录完回来点「刷新状态」")
-                } else {
+            val start = TapCli.authLoginStart(host.pubCtx)
+            val url = start.data.optString("verification_url").ifBlank {
+                Regex("\"verification_url\"\\s*:\\s*\"([^\"]+)\"")
+                    .find(start.raw)?.groupValues?.get(1).orEmpty()
+            }
+            val code = start.data.optString("device_code").ifBlank {
+                Regex("\"device_code\"\\s*:\\s*\"([^\"]+)\"")
+                    .find(start.raw)?.groupValues?.get(1).orEmpty()
+            }
+
+            if (url.isBlank() || code.isBlank()) {
+                busy = false
+                post {
                     host.pubConfirm(
                         "登录 TapTap",
-                        "没能自动拿到授权链接。CLI 原始输出：\n\n" + r.raw.take(600),
+                        "没能拿到授权链接。CLI 原始输出：\n\n" + start.raw.take(700),
+                        {}
+                    )
+                }
+                return@Thread
+            }
+
+            post {
+                host.pubOpenUrl(url)
+                host.pubToast("已打开授权页 —— 在那边点确认，这边会自动完成")
+            }
+
+            // ② 轮询等他点完（CLI 自己会一直等到授权成功或过期）
+            val done = TapCli.authLoginPoll(host.pubCtx, code)
+            busy = false
+            post {
+                if (done.ok) {
+                    host.pubToast("登录成功")
+                    refresh()
+                } else {
+                    host.pubConfirm(
+                        "登录没完成",
+                        "可能没点确认、或者授权过期了。再点一次「登录 TapTap」即可。\n\n" +
+                            done.raw.take(600),
                         {}
                     )
                 }
