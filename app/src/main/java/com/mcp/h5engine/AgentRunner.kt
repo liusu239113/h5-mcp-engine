@@ -273,7 +273,13 @@ class AgentRunner(
 
             reply.reasoning?.let { onEvent("THINK:" + it) }
 
-            history += ChatMsg("assistant", reply.text, toolCalls = reply.toolCalls)
+            // reasoning 必须一起存进历史 —— DeepSeek 思考模式要求把 reasoning_content
+            // 原样回传，丢了的话下一次请求直接 400（且那条消息一直在，会一直 400）。
+            history += ChatMsg(
+                "assistant", reply.text,
+                toolCalls = reply.toolCalls,
+                reasoning = reply.reasoning
+            )
             if (!reply.text.isNullOrBlank()) {
                 // 分开报两类文本：
                 //   AIFINAL = 这一轮不再调工具了，这就是交付给用户的结果 → 界面当正文排

@@ -77,12 +77,17 @@ class SessionStore(private val ctx: Context, val proj: String = "") {
                             tcs += ToolCall(id, t.optString("name"), t.optString("args", "{}"))
                         }
                     }
+                    // reasoning 也要一起回来！DeepSeek 思考模式要求把 reasoning_content
+                    // 原样回传，落盘时丢了的话 —— 重启 / 切会话之后那条历史会**一直 400**。
+                    // （text 里的空串统一转成 null，别让 "" 混进去。）
+                    val think = m.optString("reasoning")
                     msgs += ChatMsg(
                         m.optString("role", "user"),
                         m.optString("text").ifBlank { null },
                         emptyList(),
                         tcs,
-                        m.optString("toolCallId").ifBlank { null }
+                        m.optString("toolCallId").ifBlank { null },
+                        think.ifBlank { null }
                     )
                 }
                 out += ChatSession(
@@ -103,11 +108,17 @@ class SessionStore(private val ctx: Context, val proj: String = "") {
             for (s in list) {
                 val ma = JSONArray()
                 for (m in s.msgs.takeLast(300)) {
-                    // 只跳过「既没文字、也没工具调用」的空壳。
-                    // 注意别把带 tool_calls 的 assistant 消息漏掉 —— 那正是上次 400 的元凶。
-                    if (m.text.isNullOrBlank() && m.toolCalls.isEmpty()) continue
+                    // 只跳过「既没文字、也没工具调用、也没思维链」的空壳。
+                    // 注意两点：
+                    //   · 带 tool_calls 的 assistant 别漏掉 —— 那正是上次 400 的元凶；
+                    //   · 只有 reasoning 没正文的也别漏 —— DeepSeek 思考模式要求回传它。
+                    if (m.text.isNullOrBlank() && m.toolCalls.isEmpty() && m.reasoning.isNullOrBlank()) {
+                        continue
+                    }
                     val jo = JSONObject().put("role", m.role).put("text", m.text ?: "")
                     m.toolCallId?.let { jo.put("toolCallId", it) }
+                    // 思维链落盘：不回传就 400，丢了的话重启之后同样 400
+                    m.reasoning?.let { jo.put("reasoning", it.take(8000)) }
                     if (m.toolCalls.isNotEmpty()) {
                         val tcs = JSONArray()
                         for (t in m.toolCalls) {

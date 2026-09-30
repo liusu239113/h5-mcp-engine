@@ -19,7 +19,18 @@ data class ChatMsg(
     val text: String? = null,
     val images: List<ByteArray> = emptyList(),
     val toolCalls: List<ToolCall> = emptyList(),
-    val toolCallId: String? = null
+    val toolCallId: String? = null,
+    /**
+     * 思维链（DeepSeek 的 `reasoning_content` 等）。
+     *
+     * ⚠️ **必须存下来、并且原样回传**，不能只是拿来显示。
+     * DeepSeek 思考模式有硬性要求：带 `reasoning_content` 的那条 assistant 消息，
+     * 再次发回去时必须把这个字段带上，否则直接 400：
+     *   The `reasoning_content` in the thinking mode must be passed back to the API.
+     * 而且它**不是一次性报错** —— 那条消息还在历史里，之后每条请求都会被拒。
+     * （这个字段只在**发请求**时用；UI 回放历史不显示它，免得把对话刷屏。）
+     */
+    val reasoning: String? = null
 )
 
 data class ChatReply(
@@ -152,9 +163,13 @@ class AiClient(private val cfg: ProviderConfig) {
         for (i in src.indices) {
             val m = src[i]
             when {
-                // 残缺的一轮：拆掉 tool_calls，只留文本
+                // 残缺的一轮：拆掉 tool_calls，只留文本。
+                // reasoning 要一起带上 —— 它和「有没有 tool_calls」无关，
+                // 丢了的话 DeepSeek 思考模式照样 400。
                 m.role == "assistant" && m.toolCalls.isNotEmpty() && !ok[i] ->
-                    if (!m.text.isNullOrBlank()) out += ChatMsg("assistant", m.text, m.images)
+                    if (!m.text.isNullOrBlank()) {
+                        out += ChatMsg("assistant", m.text, m.images, reasoning = m.reasoning)
+                    }
 
                 m.role == "tool" -> {
                     val prev = out.lastOrNull()
@@ -396,6 +411,9 @@ class AiClient(private val cfg: ProviderConfig) {
                 rb.header("x-goog-api-key", cfg.apiKey)
         }
 
+        // 「思维链缺失」只洗一次：洗过还失败就是别的原因，别死循环
+        var reasoningScrubbed = false
+
         val call = newHttp(direct).newCall(rb.build())
         inflight = call
         return try {
@@ -425,6 +443,31 @@ class AiClient(private val cfg: ProviderConfig) {
                     ) {
                         body.remove("stream_options")
                         return once(body, direct, note)
+                    }
+
+                    // 思维链缺失：老版本存历史时没留 reasoning_content，
+                    // 而 DeepSeek 思考模式要求原样回传，于是这条历史**每次都 400**。
+                    // 这里自动洗一遍：把缺 reasoning 的 assistant 消息剥掉工具调用、
+                    // 降级成普通文本，再重试 —— 用户不用自己去清对话。
+                    if (low.contains("reasoning_content") && !reasoningScrubbed) {
+                        reasoningScrubbed = true
+                        val msgs = body.optJSONArray("messages")
+                        if (msgs != null) {
+                            for (i in 0 until msgs.length()) {
+                                val m = msgs.optJSONObject(i) ?: continue
+                                if (strOf(m, "role") != "assistant") continue
+                                if (!strOf(m, "reasoning_content").isBlank()) continue
+                                // 没有 reasoning 的 assistant：去掉 tool_calls，
+                                // 免得引出「tool_calls 没响应」的下一串问题
+                                if (m.has("tool_calls")) m.remove("tool_calls")
+                                if (strOf(m, "content").isBlank()) {
+                                    m.put("content", "（上一步的思考记录已丢失，这里跳过）")
+                                }
+                            }
+                            // 同一批里可能留下无主的 tool 消息，交给 fixToolPairing 兜
+                            body.put("messages", fixToolPairing(msgs))
+                            return once(body, direct, note + " · 已清理缺失的思维链")
+                        }
                     }
                     // 把「这条请求到底发给了谁、带了多大东西」一并带出来。
                     // 以前只显示服务商原文，用户和 AI 都无从判断是 Key / Base URL / 请求体量哪一环的问题
@@ -663,6 +706,8 @@ class AiClient(private val cfg: ProviderConfig) {
             if (!sawData) return null
             if (!usable && tools.isEmpty()) return null
             val msg = JSONObject().put("role", "assistant").put("content", text.toString())
+            // 思维链要带给 parseOpenAi，它会存进 ChatReply.reasoning，
+            // 再被 AgentRunner 存进历史、下一轮回传 —— 这条链断在哪一环都会 400。
             if (think.isNotEmpty()) msg.put("reasoning_content", think.toString())
             if (tools.isNotEmpty()) {
                 val arr = JSONArray()
@@ -987,6 +1032,13 @@ class AiClient(private val cfg: ProviderConfig) {
             val hasImg = !m.images.isNullOrEmpty()
             if (m.role == "assistant" && t.isEmpty() && !hasTools && !hasImg) continue
             val o = JSONObject().put("role", m.role)
+            // 思维链原样回传。DeepSeek 思考模式**强制**要求：
+            // 带 reasoning_content 的 assistant 消息再次发回去时必须带上它，否则 400
+            // 「The `reasoning_content` in the thinking mode must be passed back to the API.」
+            // 只给 assistant 加 —— tool / user 消息没有这个字段。
+            if (m.role == "assistant" && !m.reasoning.isNullOrBlank()) {
+                o.put("reasoning_content", m.reasoning)
+            }
             if (m.role == "tool") {
                 o.put("tool_call_id", m.toolCallId ?: "")
                 // 旧版本的坑：历史里可能已经存进了字面量 "null"，
