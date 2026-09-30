@@ -153,19 +153,26 @@ object SkillPresets {
           ② 需要**另外单独存一份**透明图。它需要用户在 设置 → 图片工具（抠图） 配一次 Key
           （申请 https://www.koukoutu.com/user/dev，1 积分/张、png 再 +1）——
           **这不是常规流程**，能用 `transparent=true` 就不要走它。
-10. 【引擎手册 · Maker / UrhoX 工程必读】
-   如果工程里有 scripts/main.lua 或 urhox-libs/，或者你正在调 maker_* 工具，
-   **动手改代码之前先读这两份**（game_read 只报文件名就行，目录在 _skills/）：
-   · _skills/urhox-maker-handbook.md —— 引擎硬规则与高频踩坑：
-     长度单位是**米**（角色 1.5~2.0，不是像素）；Y-up 左手系（和 Unity 一样）；
-     Lua 数组从 **1** 开始；graphics:SetMode() 已禁用，用 GetWidth/GetHeight/GetDPR；
-     NanoVG 必须挂 NanoVGRender 事件、字体只在初始化建一次；
-     UI 一律用 urhox-libs/UI（原生 UI 已废弃，raw NanoVG 只用来画图形）；
-     程序化材质只有 PBRNoTexture / PBRNoTextureAlpha / NoTextureUnlit 三个 Technique；
-     第三人称相机必须用 ThirdPersonCamera 库；鼠标键用 MOUSEB_LEFT 不要用数字 0。
-   · _skills/urhox-recipe-map.md —— 「要做 X 该用什么」选型表、脚手架对照表、
-     以及「症状 → 解法」速查（报错了先查这张表）。
-   违反手册里的规则，代码要么直接报错、要么画面错乱且不报错。**不要跳过这一步凭印象写。**
+10. 【技能包 · 动手前先查，别凭印象写】
+   _skills/ 目录下有一套手册（game_read 只报文件名就行）。**按需读，不要全读** ——
+   全读要几万 token。先看 _skills/skills-index.md 那张表，它会告诉你该读哪份。
+
+   速查（先记这几条最常用的）：
+   · **不确定怎么做** → `_skills/urhox-recipe-map.md`（选型表 + 症状→解法速查）
+   · **Maker / UrhoX 工程**（有 scripts/main.lua 或 urhox-libs/）→ `urhox-maker-handbook.md`
+     硬规则：长度单位是**米**（角色 1.5~2.0，不是像素）；Y-up 左手系（同 Unity）；
+     Lua 数组从 **1** 开始；graphics:SetMode() 已禁用；NanoVG 必须挂 NanoVGRender 事件；
+     UI 一律用 urhox-libs/UI（原生 UI 已废弃）；程序化材质只有 PBRNoTexture /
+     PBRNoTextureAlpha / NoTextureUnlit 三个 Technique；第三人称相机用 ThirdPersonCamera 库；
+     鼠标键用 MOUSEB_LEFT 不要用数字 0。
+   · **H5 工程**（index.html + js）→ `h5-handbook.md`
+     骨架、dt 夹上限、DPR 封顶 2、pointer 事件、离屏缓存、音频要等首次交互、安全区
+   · **要做得「好玩」** → `game-design-playbook.md`
+     核心循环、难度曲线、反馈、数值、怎么自动试玩 20 局看分布
+   · **UI / HUD** → `ui-design-spec.md`；**要生成像素素材** → `pixel-art-generator.md`
+
+   违反手册里的规则，代码要么直接报错、要么画面错乱且不报错。
+   **不要跳过这一步凭印象写。**
    """.trimIndent()
 
     val ALL: List<Skill> = listOf(
