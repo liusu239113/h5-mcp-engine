@@ -44,6 +44,50 @@ jobs:
         with:
           gradle-version: '8.2'
 
+      # TapTap 官方 CLI —— 发布页和 AI 的「传素材 / 查资料 / 提审」全走它。
+      #
+      # 为什么这么做：
+      #   · 官方包 95MB，其中 91MB 是**六个平台**的预编译二进制，我们只要 linux-arm64；
+      #   · 那个二进制是**静态链接的 aarch64 ELF**（无 PT_INTERP、不依赖任何 .so），
+      #     所以不需要 node / musl，直接塞进 jniLibs 就能在 Android 上跑；
+      #   · 必须放 jniLibs：Android API 29+ 禁止从应用私有目录 exec，
+      #     只有 nativeLibraryDir（APK 里的 lib/<abi>/）允许执行。
+      #     改名成 libtaptapcli.so 只是为了让打包流程认它，它本身仍是可执行文件。
+      #
+      # 这一步失败不阻断构建（TapCli.available() 会返回 false，UI 会给出人话提示），
+      # 但**务必在日志里留下 SKIP 字样**，别让「发布功能静默消失」。
+      - name: Fetch TapTap CLI into jniLibs
+        continue-on-error: true
+        run: |
+          set +e
+          VER="2026.9.24"
+          mkdir -p app/src/main/jniLibs/arm64-v8a
+          OUT="app/src/main/jniLibs/arm64-v8a/libtaptapcli.so"
+          URL="https://registry.npmjs.org/@taptap/cli/-/cli-${VER}.tgz"
+          if curl -fsSL --retry 2 --retry-delay 3 --max-time 240 "$URL" -o /tmp/tapcli.tgz; then
+            rm -rf /tmp/tapcli && mkdir -p /tmp/tapcli
+            tar xzf /tmp/tapcli.tgz -C /tmp/tapcli package/bin/taptap-cli-linux-arm64 2>/dev/null
+            SRC="/tmp/tapcli/package/bin/taptap-cli-linux-arm64"
+            if [ -f "$SRC" ]; then
+              cp "$SRC" "$OUT"
+              chmod +x "$OUT"
+              echo "OK   taptap-cli $VER -> $OUT ($(wc -c < "$OUT") bytes)"
+              # 校验：必须是个静态 aarch64 ELF，否则装到手机上跑不起来
+              python3 - "$OUT" <<'PY' || echo "WARN 二进制校验没通过，发布功能可能不可用"
+import struct,sys
+f=open(sys.argv[1],'rb'); d=f.read(64)
+assert d[:4]==b'\x7fELF', 'not ELF'
+assert struct.unpack('<H', d[18:20])[0]==0xb7, 'not aarch64'
+print('     校验通过: aarch64 ELF')
+PY
+            else
+              echo "SKIP taptap-cli 解包后没找到 linux-arm64（包结构可能变了）"
+            fi
+          else
+            echo "SKIP taptap-cli 下载失败（发布页会提示「发布工具没随安装包进来」）"
+          fi
+          ls -la app/src/main/jniLibs/arm64-v8a/ || true
+
       - name: Fetch H5 frameworks into assets/lib
         continue-on-error: true
         run: |

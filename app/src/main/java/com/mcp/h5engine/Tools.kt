@@ -147,6 +147,16 @@ class EngineTools(private val ui: GameUi, private val root: File) {
          */
         val SLIM_DROP: Set<String> = setOf("toolpkg", "localserver")
 
+        /**
+         * 「发布到 TapTap」工具本轮是否放行。
+         *
+         * 和 mcpAllowed 同样的道理：默认关。用户这轮提到了发布 / 素材 / 审核相关的事，
+         * 才把 taptap_publish 的声明发给模型 —— 免得它「顺手」去改线上资料。
+         * （提审这一档更严：AI 永远只能做快照+预检，真正的提交必须用户在发布页点。）
+         */
+        @Volatile
+        var publishAllowed: Boolean = false
+
         /** MCP 工具桥（TapTap 小游戏等），App 启动时注入；声明与执行都会带上它 */
         @Volatile
         var mcp: McpHub? = null
@@ -337,6 +347,26 @@ class EngineTools(private val ui: GameUi, private val root: File) {
                 """{"action":{"type":"string","description":"status=查状态；start/login=开始授权并拿链接；logout=退出授权；switch=换号（清旧+出新链接）；token=直接写入 token"},"token":{"type":"string","description":"可选。action=token 时要写入的 token 原文"}}""",
                 listOf("action")),
 
+            fn("taptap_publish",
+                "【发布到 TapTap】管理 TapTap 商店页：查资料缺什么、传素材、改资料、提审。\n" +
+                    "action 取值：\n" +
+                    "  status     查发布准备情况（缺哪些必填项、能不能提审）—— **动手前先查这个**\n" +
+                    "  login      取 TapTap 授权链接（把链接原样贴给用户，别让他自己去设置页翻）\n" +
+                    "  apps       列出该账号下的游戏（拿 app_id）\n" +
+                    "  modules    读某个资料模块的当前值（如 basic-info / assets-upload）\n" +
+                    "  upload     上传一张图到素材库（path 传工作区里的图片）\n" +
+                    "  save       保存资料修改（fields 传 {字段:值}）\n" +
+                    "  submit     提交审核（**高风险**：会走 快照→预检→提交，每一步都先返回给用户确认）\n" +
+                    "纪律：save / upload / submit 都是写操作。**先把要改什么、从什么改成什么摊给用户看**，" +
+                    "拿到明确同意再执行；submit 尤其如此 —— 提交后版本就进审核流了。",
+                """{"action":{"type":"string","description":"status/login/apps/modules/upload/save/submit"},
+                   "app_id":{"type":"string","description":"游戏 ID；不传就用发布页当前选中的"},
+                   "developer_id":{"type":"string","description":"厂商 ID；一般不用传"},
+                   "module":{"type":"string","description":"action=modules 时要读的模块 id"},
+                   "path":{"type":"string","description":"action=upload 时的图片路径（工作区相对路径或文件名）"},
+                   "fields":{"type":"object","description":"action=save 时要写入的字段，如 {\\"description\\":\\"新简介\\"}"}}""",
+                listOf("action")),
+
             fn("memory_save",
                 "【长期记忆】把值得跨会话记住的事记下来（用户偏好、项目约定、踩过的坑、固定用法）。" +
                     "每轮会自动把相关记忆注入你的上下文，以后不用再问。只记以后还用得上的，别记一次性闲聊。",
@@ -424,14 +454,65 @@ class EngineTools(private val ui: GameUi, private val root: File) {
     }
 
     /**
+     * 把 analyze-app-status 的结果压成人话给模型看。
+     *
+     * 为什么不直接把原始 JSON 丢过去：那个结构有好几层，还带一堆模型用不上的
+     * meta / schema 字段；压成「能不能提审 + 还缺什么」它才知道下一步该干嘛。
+     */
+    private fun summarizeStatus(d: JSONObject): String {
+        val sb = StringBuilder()
+        val blockers = d.optJSONArray("blockers")
+        val warnings = d.optJSONArray("warnings")
+        val suggestions = d.optJSONArray("suggestions")
+
+        sb.append("发布准备情况：").append(
+            if (blockers == null || blockers.length() == 0) "**没有阻断项，可以提审**"
+            else "还有 ${blockers.length()} 项阻断，现在还不能提审"
+        ).append('\n')
+
+        fun dump(title: String, arr: JSONArray?) {
+            if (arr == null || arr.length() == 0) return
+            sb.append('\n').append(title).append("（").append(arr.length()).append("）：\n")
+            for (i in 0 until minOf(arr.length(), 10)) {
+                val o = arr.opt(i)
+                val txt = when (o) {
+                    is JSONObject -> {
+                        val m = o.optString("message").ifBlank {
+                            o.optString("detail").ifBlank { o.toString() }
+                        }
+                        val mod = o.optString("module").ifBlank { o.optString("field_id") }
+                        if (mod.isBlank()) m else "[$mod] $m"
+                    }
+                    else -> o?.toString().orEmpty()
+                }
+                if (txt.isNotBlank()) sb.append("  · ").append(txt.take(220)).append('\n')
+            }
+        }
+        dump("阻断项（必须补）", blockers)
+        dump("警告", warnings)
+        dump("建议", suggestions)
+
+        sb.append(
+            "\n下一步：按清单逐项补。补字段用 action=save（先用 action=modules 读当前值再改），" +
+                "补图用 action=upload；补完再 action=status 复查。" +
+                "**不要直接提交审核** —— 提审必须由用户在发布页点确认。"
+        )
+        return sb.toString()
+    }
+
+    /**
      * allow 为 null 或空集合都表示全开；技能白名单只管引擎工具。
      *
      * MCP 工具**默认不附带**：只有本轮用户明确表达了相关意图（mcpAllowed=true）才注入声明，
      * 否则模型连这些工具的存在都看不到 —— 从源头杜绝「自动识别一圈 / 顺手发布」。
      */
     fun specs(allow: Set<String>? = null): List<JSONObject> {
-        val base = if (allow.isNullOrEmpty()) allSpecs
+        val base0 = if (allow.isNullOrEmpty()) allSpecs
         else allSpecs.filter { allow.contains(it.getJSONObject("function").getString("name")) }
+        // 发布工具默认不给：用户这轮提了发布相关的事才注入声明（同 mcpAllowed 的思路）。
+        // 它内部对写操作还有二次拦截，见 taptap_publish 的实现。
+        val base = if (publishAllowed) base0
+        else base0.filterNot { it.getJSONObject("function").getString("name") == "taptap_publish" }
         val extra = mcp?.specs()?.filter {
             val n = it.getJSONObject("function").getString("name")
             mcpAllowed || !isWriteTool(n)
@@ -998,6 +1079,143 @@ class EngineTools(private val ui: GameUi, private val root: File) {
         }
         // Maker 云能力授权：AI 自己就能把授权链接递给用户，不用用户去设置页翻。
         // 这是内置工具，不受 MCP 准入开关限制 —— 否则「需要授权」这件事它连说都说不出来。
+        "taptap_publish" -> {
+            val ctx = ctxRef
+            if (ctx == null) ToolResult("App 上下文不可用，重启一次 App 再试")
+            else if (!TapCli.available(ctx)) {
+                ToolResult(
+                    "发布工具没随安装包进来（CI 构建时没下到 taptap-cli）。" +
+                        "其它功能不受影响；要发布得装一个带它的版本。"
+                )
+            } else {
+                val act = a.optString("action").trim().lowercase()
+                // 没传就沿用发布页当前选中的那一个，省得 AI 每次都问
+                val dev = a.optString("developer_id").ifBlank { PublishPanel.curDevId }
+                val app = a.optString("app_id").ifBlank { PublishPanel.curAppId }
+                fun needApp(): ToolResult? =
+                    if (app.isBlank()) ToolResult(
+                        "还没确定要发布哪个游戏。先 action=apps 列一下（需要先 login），" +
+                            "或者让用户在发布页选一个。"
+                    ) else null
+                fun needIds(): ToolResult? =
+                    if (app.isBlank() || dev.isBlank()) ToolResult(
+                        "缺少 app_id / developer_id。先 action=login 再 action=apps 拿到它们。"
+                    ) else null
+
+                when (act) {
+                    "status" -> {
+                        needIds()?.let { return it }
+                        val r = TapCli.analyzeStatus(ctx, dev, app)
+                        if (!r.ok) ToolResult("查发布状态失败：${r.message}\n${r.raw.take(800)}")
+                        else ToolResult(summarizeStatus(r.data))
+                    }
+
+                    "login" -> {
+                        val r = TapCli.authQrcode(ctx)
+                        val url = Regex("https?://[^\\s\"'<>]+").find(r.raw)?.value
+                        if (url == null) ToolResult("没拿到授权链接。CLI 输出：\n" + r.raw.take(600))
+                        else ToolResult(
+                            "TapTap 授权链接（原样贴给用户，让他点开登录并确认）：\n$url\n\n" +
+                                "用户授权完让他回一句，你再调 action=status 继续。"
+                        )
+                    }
+
+                    "apps" -> {
+                        val d = dev.ifBlank {
+                            // 没给厂商就先自己找
+                            val dl = TapCli.developerList(ctx)
+                            Regex("\"(?:developer_id|id)\"\\s*:\\s*\"?(\\d+)\"")
+                                .find(dl.raw)?.groupValues?.get(1).orEmpty()
+                        }
+                        if (d.isBlank()) ToolResult("没定位到厂商，先 action=login 授权。")
+                        else {
+                            val r = TapCli.appList(ctx, d)
+                            if (!r.ok) ToolResult("拉游戏列表失败：${r.message}\n${r.raw.take(600)}")
+                            else ToolResult("厂商 $d 下的游戏：\n" + r.raw.take(2500))
+                        }
+                    }
+
+                    "modules" -> {
+                        needIds()?.let { return it }
+                        val m = a.optString("module").trim()
+                        if (m.isBlank()) ToolResult("要读哪个模块？如 basic-info / assets-upload / profile-promotion")
+                        else {
+                            val r = TapCli.raw(
+                                ctx,
+                                listOf("app", "get-app-module", "--dev-id", dev, "--app-id", app, "--module", m)
+                            )
+                            if (!r.ok) ToolResult("读模块失败：${r.message}\n${r.raw.take(600)}")
+                            else ToolResult("模块 $m 当前值：\n" + r.raw.take(3000))
+                        }
+                    }
+
+                    "upload" -> {
+                        needIds()?.let { return it }
+                        val p = a.optString("path").trim()
+                        if (p.isBlank()) ToolResult("要传哪张图？path 传工作区里的文件名。")
+                        else {
+                            val f = fuzzyFind(p)
+                            if (f == null) ToolResult("找不到文件：$p")
+                            else {
+                                val r = TapCli.uploadImage(ctx, f, dev, app, dryRun = false)
+                                if (r.ok) ToolResult("已上传 ${f.name} 到素材库。\n" + r.raw.take(800))
+                                else ToolResult("上传失败：${r.message}\n" + r.raw.take(800))
+                            }
+                        }
+                    }
+
+                    "save" -> {
+                        needIds()?.let { return it }
+                        val fields = a.optJSONObject("fields")
+                        if (fields == null || fields.length() == 0) {
+                            ToolResult("要改什么？fields 传 {\"字段名\":\"新值\"}，字段名照 get-app-module 返回的来。")
+                        } else {
+                            // 先把「改成什么」摊给用户看 —— 写操作不能悄悄做
+                            val preview = StringBuilder("准备写入这些字段：\n")
+                            fields.keys().forEach { k -> preview.append("  · ").append(k).append(" = ").append(fields.opt(k)).append('\n') }
+                            val r = TapCli.saveChanges(
+                                ctx, dev, app,
+                                JSONObject().put("fields", fields).toString(),
+                                idempotencyKey = "save-" + app + "-" + System.currentTimeMillis(),
+                                dryRun = false
+                            )
+                            if (r.ok) ToolResult(preview.toString() + "\n已保存。\n" + r.raw.take(700))
+                            else ToolResult(preview.toString() + "\n保存失败：${r.message}\n" + r.raw.take(800))
+                        }
+                    }
+
+                    "submit" -> {
+                        needIds()?.let { return it }
+                        // 提审是 high-risk-write：这里**只做快照 + 预检**，
+                        // 真正的提交必须由用户在发布页点确认（见 PublishPanel.submitFlow）。
+                        val snap = TapCli.prepareReviewSnapshot(ctx, dev, app)
+                        if (!snap.ok) {
+                            ToolResult("生成审核快照失败：${snap.message}\n${snap.raw.take(700)}")
+                        } else {
+                            val fp = Regex("\"review_fingerprint\"\\s*:\\s*\"([^\"]+)\"")
+                                .find(snap.raw)?.groupValues?.get(1).orEmpty()
+                            val data = JSONObject()
+                                .put("release_schedule", JSONObject().put("kind", "immediate"))
+                                .apply { if (fp.isNotBlank()) put("review_fingerprint", fp) }
+                            val pre = TapCli.precheckReview(ctx, dev, app, data.toString())
+                            ToolResult(
+                                "已生成快照并预检（**还没有提交**）。\n" +
+                                    "复核指纹：${fp.ifBlank { "（没读到，可能返回结构变了）" }}\n\n" +
+                                    (if (pre.ok) "预检通过。" else "预检有问题：${pre.message}") + "\n" +
+                                    pre.raw.take(900) +
+                                    "\n\n→ 提交是不可撤销的（版本会进审核流），所以**必须由用户在发布页点确认**。" +
+                                    "把上面的结果说给用户听，让他去发布页点「更新线上版本」。"
+                            )
+                        }
+                    }
+
+                    else -> ToolResult(
+                        "不认识的 action：$act。可用：status / login / apps / modules / upload / save / submit"
+                    )
+                }
+            }
+        }
+
         "maker_auth" -> {
             val c = ctxRef
             if (c == null) {

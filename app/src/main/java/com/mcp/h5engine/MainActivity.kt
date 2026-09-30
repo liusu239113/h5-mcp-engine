@@ -450,6 +450,24 @@ class MainActivity : AppCompatActivity(), GameUi {
                 contentResolver.openInputStream(uri)?.use { it.readBytes() }
             }.getOrNull()
             val small = bytes?.let { shrinkToJpeg(it, 1024, 80) }
+
+            // 发布页「上传图片」也会走这条通道：它要的是**磁盘上的原图**（要传给 TapTap），
+            // 不是压缩后喂给模型的 JPEG。所以这里先把原图落到工作区，再交回给面板。
+            val forPublish = pickPublishImage
+            if (forPublish != null && bytes != null) {
+                pickPublishImage = null
+                val saved = runCatching {
+                    val dir = kindDir("media").apply { mkdirs() }
+                    val f = File(dir, "publish_" + System.currentTimeMillis() + ".png")
+                    f.writeBytes(bytes)
+                    f
+                }.getOrNull()
+                main.post {
+                    if (saved == null) toast("保存图片失败") else forPublish(saved)
+                }
+                return@registerForActivityResult
+            }
+
             main.post {
                 if (small == null) {
                     toast("读取图片失败")
@@ -900,7 +918,11 @@ class MainActivity : AppCompatActivity(), GameUi {
         // 单次静音会漏掉这一声，350ms 后再对一次表。
         if (tab != 1) main.postDelayed({ if (activeTab != 1) applyPreviewMute(true) }, 350)
         if (tab == 1) ensurePreviewFresh(true)
-        if (tab == 2) refreshExportRow()
+        if (tab == 2) {
+            refreshExportRow()
+            // 发布页每次进来都刷一下：账号状态、资料进度可能在上一次对话里被 AI 改过了
+            publishPanel?.refresh()
+        }
     }
 
     /**
@@ -2321,7 +2343,20 @@ class MainActivity : AppCompatActivity(), GameUi {
         val skill = if (resume) {
             SkillPresets.byId(lastRunSkillId ?: cfgStore.skillId)
         } else {
-            EngineTools.mcpAllowed = mcpWanted
+            // 发布类动作单独放行一次：用户这轮提到了发布/上传/审核，
+        // 才把 taptap_publish 这个工具的「写」能力打开。
+        // 注意 submit（提审）**不在这里** —— 它由发布页的用户确认触发，AI 只能做快照+预检。
+        val publishWanted = listOf(
+            "发布", "上架", "提审", "审核", "商店页", "更新线上", "传素材", "上传素材",
+            "游戏简介", "宣传图", "截图", "icon", "封面", "资料",
+            "taptap", "tap", "开发者", "应用信息"
+        ).any { text.lowercase().contains(it) } || shortOK(text)
+        EngineTools.publishAllowed = publishWanted
+        if (publishWanted) {
+            addSystemLine("本轮已放行「发布到 TapTap」工具（查资料 / 传素材 / 改资料）；提审仍需你在发布页点确认")
+        }
+
+        EngineTools.mcpAllowed = mcpWanted
             if (mcpWanted) {
                 addSystemLine("本轮已放行 TapTap / Maker 的写 / 发布类接口（上传、发布、改信息等）；它动手前仍会先跟你确认")
             } else if (EngineTools.mcp != null) {
@@ -5293,11 +5328,16 @@ class MainActivity : AppCompatActivity(), GameUi {
             setPadding(dp(14), dp(14), dp(14), dp(18))
         }
 
+        // ==================== 发布到 TapTap（主体） ====================
+        // 这一块是发布页的主角：登录、选游戏、看资料缺什么、传素材、提审。
+        // 数据全来自官方 CLI（见 TapCli / PublishPanel），不在本地硬编码字段表。
+        publishPanel = PublishPanel(publishHost, pubScroll)
+
         pubScroll.addView(TextView(this).apply {
-            text = "导出与发布"
+            text = "导出与备份"
             textSize = 12f
             setTextColor(pal.faint)
-            setPadding(dp(4), 0, 0, dp(8))
+            setPadding(dp(4), dp(22), 0, dp(8))
         })
 
         lastExportTv = TextView(this).apply {
@@ -5328,6 +5368,48 @@ class MainActivity : AppCompatActivity(), GameUi {
         pubPage.addView(ScrollView(this).apply { addView(pubScroll) }, LinearLayout.LayoutParams(-1, -1))
         refreshExportRow()
     }
+
+    // ==================== 发布面板的宿主实现 ====================
+
+    /** 发布面板（TapTap 发布）——懒建，构建时注入 pubScroll */
+    private var publishPanel: PublishPanel? = null
+
+    /** 给 PublishPanel 用的窄接口：它只需要这几件事，不该看得见 MainActivity 的全部私有成员 */
+    private val publishHost = object : PublishHost {
+        override val pubCtx: Context get() = this@MainActivity
+        override val pubPal: Palette get() = pal
+        override fun pubDp(v: Int): Int = dp(v)
+        override fun pubToast(s: String) = toast(s)
+        override fun pubOpenUrl(url: String) = openExternal(url)
+
+        override fun pubConfirm(title: String, msg: String, onOk: () -> Unit) {
+            AlertDialog.Builder(themed())
+                .setTitle(title)
+                .setMessage(msg.take(6000))
+                .setPositiveButton("继续") { _, _ -> onOk() }
+                .setNegativeButton("取消", null)
+                .show()
+        }
+
+        override fun pubPickImage(onPicked: (File) -> Unit) {
+            pickPublishImage = onPicked
+            runCatching {
+                pickImage.launch("image/*")
+            }.onFailure { toast("打不开相册：${it.message}") }
+        }
+
+        override fun pubAskAi(prompt: String) {
+            inputEt.setText(prompt)
+            toast("已填进输入框，点「发送」交给 AI")
+        }
+
+        override fun pubWorkspaceDir(): File = kindDir("media")
+
+        override fun pubIngest(src: File, kind: String): File = ensureInWorkspace(src)
+    }
+
+    /** 发布页「上传图片」选完之后的落点（选图回调是全局单例，所以拿个变量接一下） */
+    private var pickPublishImage: ((File) -> Unit)? = null
 
     private fun refreshExportRow() {
         val f = lastExport
