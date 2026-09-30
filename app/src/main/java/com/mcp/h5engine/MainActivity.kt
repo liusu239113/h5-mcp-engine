@@ -271,7 +271,9 @@ class MainActivity : AppCompatActivity(), GameUi {
     private lateinit var bridge: EngineBridge
     private lateinit var chatPage: LinearLayout
     private lateinit var previewPage: LinearLayout
-    private lateinit var pubPage: LinearLayout
+    // 是 FrameLayout 不是 LinearLayout：发布页里「管理发布」那一层要**叠**在原页面上，
+    // 竖排 LinearLayout 会把第二个 MATCH_PARENT 的子视图排到屏幕外面（点不动就是这个原因）
+    private lateinit var pubPage: FrameLayout
     private lateinit var chatList: LinearLayout
     private lateinit var chatScroll: ScrollView
     private lateinit var inputEt: EditText
@@ -2975,7 +2977,14 @@ class MainActivity : AppCompatActivity(), GameUi {
         // 组头收尾：把「跑了多久 / 几轮」钉在上面，展开还能回看这一轮都干了什么
         lastWorkStat = ""
         updateWorkStat("$dur · ${runSteps} 轮 · 完成")
-        setTextIf(runBar, "已完成 · $dur · ${runSteps} 轮 · " + TokenStats.summary())
+        // 收尾把「慢在哪」也报出来：轮次多还是单次慢，解法完全不同
+        val pace = TokenStats.pacing(ms, runSteps)
+        setTextIf(
+            runBar,
+            "已完成 · $dur · ${runSteps} 轮" +
+                (if (pace.isNotEmpty()) " · $pace" else "") +
+                " · " + TokenStats.summary()
+        )
         setTextIf(statusRun, "待命")
         latestActivity = ""
         lastTail = ""

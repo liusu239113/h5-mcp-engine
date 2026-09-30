@@ -36,6 +36,21 @@ object TokenStats {
         calls = 0
     }
 
+    /**
+     * 本轮的耗时明细：这一轮跑了多久、发了几次请求、平均每次多久。
+     *
+     * 为什么要它：用户最常问的就是「为什么这么慢」。光看总时长没用 ——
+     * 得区分「是轮次太多」还是「单次太慢」，这俩的解法完全相反：
+     *   · 轮次多  → 提示词让它少来回（见 COMMON 第 2 条）
+     *   · 单次慢  → 请求体太大 / 模型本身慢 / 网络差
+     * 把平均数摆出来，一眼就能分辨。
+     */
+    fun pacing(durMs: Long, steps: Int): String {
+        if (calls <= 0) return ""
+        val perCall = durMs / calls
+        return "平均每次请求 ${perCall / 1000.0} 秒 · 本轮 ${calls} 次"
+    }
+
     /** 一行摘要：给「思考面板」和结束行用 */
     fun summary(): String =
         "累计 ${inTokens + outTokens} tok（入 $inTokens / 出 $outTokens · $calls 次）"
