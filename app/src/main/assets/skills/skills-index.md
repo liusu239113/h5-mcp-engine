@@ -7,14 +7,29 @@
 
 ---
 
+## 第一步：先分清工程类型
+
+这个引擎**同时支持 H5 和 Maker/UrhoX 两种工程**，写法完全不同，别串：
+
+| 信号 | 类型 |
+|---|---|
+| `scripts/main.lua` 或 `urhox-libs/` 存在 | **Maker / UrhoX**（Lua 引擎） |
+| 只有 `index.html`（且不是占位页） | **H5**（网页游戏） |
+
+不确定 → 读 `engine_status`，或看 `scripts/` 下有没有 `main.lua`。
+也可以在项目里放一个 `.hexora-kind`（内容写 `h5` 或 `maker`）手动指定。
+
+---
+
 ## 怎么选
 
 | 我现在要干什么 | 读这份 |
 |---|---|
 | **不确定该怎么做 / 刚接手一个工程** | `urhox-recipe-map.md`（选型速查 + 症状→解法） |
-| **写 Maker / UrhoX 工程**（有 scripts/main.lua、urhox-libs/） | `urhox-maker-handbook.md`（引擎硬规则与高频坑） |
-| 做 **H5 工程**（index.html + js） | `h5-handbook.md` |
-| 调 **UI / HUD / 菜单 / 字幕** | `ui-design-spec.md` + `urhox-maker-handbook.md` §7 |
+| **写 Maker / UrhoX 工程** | `maker-handbook.md`（工程结构 / 多人判定 / 验证 / 素材）<br>+ `urhox-maker-handbook.md`（引擎硬规则与高频坑） |
+| 做 **H5 工程** | `h5-handbook.md`（骨架 / 循环 / 性能 / 音频 / 适配） |
+| 调 **UI / HUD / 菜单** | `ui-design-spec.md`（通用规范） |
+| **要一套现成的 UI 风格** | `ui-astroon.md`（宇宙霓虹）/ `ui-brawlforge.md`（竞技硬边）/ `ui-pixelforge.md`（像素复古）—— **三套都是完整配色 token，H5 和 Maker 通用** |
 | 做 **像素美术 / 要生成素材** | `pixel-art-generator.md` |
 | **改完代码想确认没搞坏** | 直接调工具 `game_validate`（跑一遍查报错），不用读文档 |
 | **要跑起来、截图看效果** | 直接调工具 `game_shot` / `screenshot` |
@@ -42,10 +57,14 @@
 | 文件 | 讲什么 |
 |---|---|
 | `urhox-recipe-map.md` | 「要做 X 该用什么」选型表 + 脚手架对照 + 症状→解法速查 |
-| `urhox-maker-handbook.md` | Maker/UrhoX 引擎硬规则：米制尺度、坐标系、Lua 陷阱、NanoVG、UI、材质、相机、资源路径、Dispose |
-| `h5-handbook.md` | H5 工程怎么做：单文件结构、Canvas 循环、触摸输入、移动端适配、性能 |
+| `maker-handbook.md` | **Maker 工程**：结构、多人判定、验证工具、素材工具、自检清单 |
+| `urhox-maker-handbook.md` | **Maker/UrhoX 引擎硬规则**：米制尺度、坐标系、Lua 陷阱、NanoVG、UI、材质、相机、资源路径、Dispose |
+| `h5-handbook.md` | **H5 工程**：单文件结构、Canvas 循环、触摸输入、移动端适配、性能 |
 | `game-design-playbook.md` | 做一款**好玩的**游戏：核心循环、难度曲线、反馈、关卡设计、常见设计错误 |
-| `ui-design-spec.md` | UI 设计规范：配色、字号、间距、动效 |
+| `ui-design-spec.md` | UI 设计规范（通用）：配色、字号、间距、动效 |
+| `ui-astroon.md` | **UI 风格**：宇宙 / 太空 / 霓虹渐变（完整色板 + 8 条设计规则） |
+| `ui-brawlforge.md` | **UI 风格**：竞技 / 美式卡通 / 硬边 HUD（完整色板 + 8 条设计规则） |
+| `ui-pixelforge.md` | **UI 风格**：像素 / 复古 / 8-bit 街机（完整色板 + 6 条设计规则） |
 | `pixel-art-generator.md` | 像素美术生成：调色板、尺寸、动画帧 |
 
 ---

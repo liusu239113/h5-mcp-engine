@@ -154,22 +154,29 @@ object SkillPresets {
           （申请 https://www.koukoutu.com/user/dev，1 积分/张、png 再 +1）——
           **这不是常规流程**，能用 `transparent=true` 就不要走它。
 10. 【技能包 · 动手前先查，别凭印象写】
-   _skills/ 目录下有一套手册（game_read 只报文件名就行）。**按需读，不要全读** ——
+   ⚠️ **这个引擎同时支持两种工程，写法完全不同，先分清再动手**：
+     · 有 scripts/main.lua 或 urhox-libs/  → **Maker / UrhoX**（Lua 引擎）
+     · 只有 index.html（且不是占位页）    → **H5**（网页游戏）
+   判不准就读 engine_status，或看 scripts/ 下有没有 main.lua。
+
+   _skills/ 下有一套手册（game_read 只报文件名就行）。**按需读，不要全读** ——
    全读要几万 token。先看 _skills/skills-index.md 那张表，它会告诉你该读哪份。
 
-   速查（先记这几条最常用的）：
+   速查：
    · **不确定怎么做** → `_skills/urhox-recipe-map.md`（选型表 + 症状→解法速查）
-   · **Maker / UrhoX 工程**（有 scripts/main.lua 或 urhox-libs/）→ `urhox-maker-handbook.md`
-     硬规则：长度单位是**米**（角色 1.5~2.0，不是像素）；Y-up 左手系（同 Unity）；
+   · **Maker / UrhoX 工程** → `maker-handbook.md`（结构 / 多人判定 / 验证 / 素材）
+     硬规则速记：长度单位是**米**（角色 1.5~2.0，不是像素）；Y-up 左手系（同 Unity）；
      Lua 数组从 **1** 开始；graphics:SetMode() 已禁用；NanoVG 必须挂 NanoVGRender 事件；
      UI 一律用 urhox-libs/UI（原生 UI 已废弃）；程序化材质只有 PBRNoTexture /
      PBRNoTextureAlpha / NoTextureUnlit 三个 Technique；第三人称相机用 ThirdPersonCamera 库；
-     鼠标键用 MOUSEB_LEFT 不要用数字 0。
-   · **H5 工程**（index.html + js）→ `h5-handbook.md`
+     鼠标键用 MOUSEB_LEFT 不要用数字 0。细节看 `urhox-maker-handbook.md`。
+   · **H5 工程** → `h5-handbook.md`
      骨架、dt 夹上限、DPR 封顶 2、pointer 事件、离屏缓存、音频要等首次交互、安全区
    · **要做得「好玩」** → `game-design-playbook.md`
      核心循环、难度曲线、反馈、数值、怎么自动试玩 20 局看分布
-   · **UI / HUD** → `ui-design-spec.md`；**要生成像素素材** → `pixel-art-generator.md`
+   · **要一套现成的 UI 风格** → `ui-astroon.md`（宇宙霓虹）/ `ui-brawlforge.md`（竞技硬边）/
+     `ui-pixelforge.md`（像素复古）—— 三套都是**完整色板 + 设计规则，H5 和 Maker 通用**。
+     通用 UI 规范看 `ui-design-spec.md`；生成像素素材看 `pixel-art-generator.md`。
 
    违反手册里的规则，代码要么直接报错、要么画面错乱且不报错。
    **不要跳过这一步凭印象写。**
