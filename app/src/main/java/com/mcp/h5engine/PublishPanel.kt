@@ -84,6 +84,14 @@ class PublishPanel(
      */
     private val moduleStats = HashMap<String, Pair<Int, Int>>()
 
+    /**
+     * 各字段的原始数据（`current_value` / `image_spec` / `required` …），按 field_id 存。
+     *
+     * 素材槽位要用它显示「这个位置现在是什么、该传什么规格」——
+     * 光有「3/3 已完成」这种计数不够，用户要知道**具体哪个位置空着**。
+     */
+    private val fieldCache = HashMap<String, JSONObject>()
+
     /** 拉各模块字段统计（发布页那三个分组用得到的那几个模块） */
     private fun loadModules() {
         if (appId.isBlank() || devId.isBlank()) return
@@ -101,6 +109,8 @@ class PublishPanel(
             var done = 0
             for (k in fields.keys()) {
                 val f = fields.optJSONObject(k) ?: continue
+                // 全量缓存：素材槽位要按 field_id 查当前值（包括非必填的素材字段）
+                fieldCache[k] = f
                 if (!f.optBoolean("visible", true)) continue
                 if (!f.optBoolean("required", false)) continue
                 total++
@@ -145,7 +155,8 @@ class PublishPanel(
                     "就能看到每个模块还缺什么、能不能提审。"
             ))
         }
-        container.addView(toolsCard())
+        // 素材槽位：按字段列，上传后直接写进对应字段（不是只丢进素材库）
+        if (appId.isNotBlank()) container.addView(materialSlotsCard())
     }
 
     /** 进页面时自动拉一次：先看登录状态，登录了就顺带定位厂商 */
@@ -271,10 +282,24 @@ class PublishPanel(
 
             if (url.isBlank() || code.isBlank()) {
                 busy = false
+                // 网络类失败要说人话 —— 「TapTap OAuth request failed」这种原文
+                // 用户看不懂，也不知道该干嘛。
+                val isNet = start.raw.contains("network") || start.raw.contains("transport") ||
+                    start.raw.contains("timeout") || start.raw.contains("refused")
                 post {
                     host.pubConfirm(
-                        "登录 TapTap",
-                        "没能拿到授权链接。CLI 原始输出：\n\n" + start.raw.take(700),
+                        "登录 TapTap 失败",
+                        if (isNet) {
+                            "连不上 TapTap 的服务器。常见原因：\n\n" +
+                                "① **手机上开着 VPN / 代理**，而发布工具没走那个代理 ——\n" +
+                                "   本版已自动把系统代理传给发布工具；如果还不行，\n" +
+                                "   试着把 VPN 换成全局模式，或者暂时关掉它再登录。\n" +
+                                "② 网络本身不通（切换 WiFi / 流量再试）。\n" +
+                                "③ 公司网络 / 校园网有防火墙，拦了 taptap 的域名。\n\n" +
+                                "原始错误：\n" + start.raw.take(500)
+                        } else {
+                            "没能拿到授权链接。原始输出：\n\n" + start.raw.take(700)
+                        },
                         {}
                     )
                 }
@@ -647,7 +672,10 @@ class PublishPanel(
                     "做完直接上传到素材库（app $appId，厂商 $devId）。"
             )
         })
-        ops.addView(iconBtn("upload", "上传 icon") { uploadFlow() })
+        // 走统一的槽位上传（传素材库 + 写进 icon 字段两步）
+        ops.addView(iconBtn("upload", "上传 icon") {
+            uploadToSlot(SLOTS.first { it.fieldId == "icon" })
+        })
         holder.addView(ops, FrameLayout.LayoutParams(-2, -2).apply { gravity = Gravity.TOP or Gravity.END })
 
         box.addView(holder, LinearLayout.LayoutParams(dp(96), dp(96)))
@@ -708,26 +736,200 @@ class PublishPanel(
 
     // ==================== 底部动作 ====================
 
+    /**
+     * 底部那一个按钮 —— **我要发布**。
+     *
+     * 用户要的就是这个：前面所有素材先在本地备好（发布页是**预览台**），
+     * 点这一下才真正动手，而且**一次把该做的全做完**：
+     *   ① 把本地备好的素材逐个传上去 → 写进对应字段
+     *   ② 复查一遍还缺不缺（analyze-app-status）
+     *   ③ 生成快照 → 预检 → 让用户确认 → 提审
+     *
+     * 中途任何一步失败都会**停在那儿并说清是哪一步**，
+     * 不会闷头往下走（否则会出现「图没传成功但已经提审了」这种事）。
+     */
     private fun actionBar(st: JSONObject): View {
         val col = LinearLayout(host.pubCtx).apply { orientation = LinearLayout.VERTICAL }
+        val staged = SLOTS.count { stagedFile(it.fieldId) != null }
         val blockers = st.optJSONArray("blockers")?.length() ?: 0
+
         col.addView(btn(
-            if (blockers > 0) "还有 $blockers 项要补，先去补" else "更新线上版本",
+            when {
+                staged > 0 -> "我要发布（含 $staged 项本地素材）"
+                blockers > 0 -> "我要发布（还有 $blockers 项待补）"
+                else -> "我要发布"
+            },
             primary = true,
             wide = true
         ) {
-            // 不用 return@btn：尾随 lambda 里用标签返回，可读性和可靠性都差，
-            // 直接 if/else 表达同样的意思
-            if (blockers > 0) host.pubToast("先把上面的待办补完") else submitFlow()
+            publishAll(staged)
         })
         col.addView(TextView(host.pubCtx).apply {
-            setText("玩家玩到的线上版本将会随之更新")
+            setText("会把本地备好的素材传上去、写进对应字段，然后提审。过程中每一步都会让你确认。")
             textSize = 11f
             setTextColor(pal.faint)
             gravity = Gravity.CENTER
             setPadding(0, dp(8), 0, 0)
         })
         return col
+    }
+
+    /**
+     * 一键发布：传素材 → 写字段 → 提审。
+     *
+     * 分阶段跑、每阶段报结果 —— 因为这是**不可逆**的操作链，
+     * 用户必须知道走到哪一步了、卡在哪一步。
+     */
+    private fun publishAll(staged: Int) {
+        if (busy) return
+        if (appId.isBlank() || devId.isBlank()) { host.pubToast("先登录并选一个游戏"); return }
+
+        val todo = SLOTS.filter { stagedFile(it.fieldId) != null }
+        host.pubConfirm(
+            "开始发布",
+            buildString {
+                append("会按顺序做：\n")
+                if (todo.isEmpty()) append("  ① 本地没有待传素材，跳过上传\n")
+                else {
+                    append("  ① 上传 ${todo.size} 项本地素材并写进对应字段：\n")
+                    todo.forEach { append("      · ${it.title}\n") }
+                }
+                append("  ② 复查资料还缺什么\n")
+                append("  ③ 生成快照 → 预检 → 你确认 → 提交审核\n\n")
+                append("提交后版本会进审核流，这一步不可撤销。")
+            }
+        ) {
+            busy = true
+            host.pubToast("开始发布…")
+            Thread { runPublishPipeline(todo) }.start()
+        }
+    }
+
+    private fun runPublishPipeline(todo: List<Slot>) {
+        val log = StringBuilder()
+
+        // ---------- ① 传素材 + 写字段 ----------
+        var uploaded = 0
+        for (slot in todo) {
+            val f = stagedFile(slot.fieldId) ?: continue
+            post { host.pubToast("上传「${slot.title}」…") }
+
+            if (slot.video) {
+                // 视频走另一条命令，拿到的是 videoId 而不是 URL
+                val (up, vid) = TapCli.uploadVideoId(host.pubCtx, f, devId, appId, slot.fieldId)
+                if (!up.ok || vid.isBlank()) {
+                    busy = false
+                    post {
+                        host.pubConfirm(
+                            "卡在「${slot.title}」",
+                            "视频上传失败，**后面的步骤都还没做**：\n\n" +
+                                up.message + "\n" + up.raw.take(600),
+                            {}
+                        )
+                    }
+                    return
+                }
+                val ch = org.json.JSONArray().put(
+                    JSONObject().put("field_id", slot.fieldId).put("op", "replace").put("value", vid)
+                ).toString()
+                val save = TapCli.saveChanges(
+                    host.pubCtx, devId, appId, ch,
+                    idempotencyKey = "pub-" + appId + "-" + slot.fieldId + "-" + System.currentTimeMillis()
+                )
+                if (!save.ok) {
+                    busy = false
+                    post {
+                        host.pubConfirm(
+                            "卡在「${slot.title}」",
+                            "视频传上去了（videoId $vid），但写进字段失败：\n\n" +
+                                save.message + "\n" + save.raw.take(600),
+                            {}
+                        )
+                    }
+                    return
+                }
+            } else {
+                val (up, url) = TapCli.uploadImageUrl(host.pubCtx, f, devId, appId)
+                if (!up.ok || url.isBlank()) {
+                    busy = false
+                    post {
+                        host.pubConfirm(
+                            "卡在「${slot.title}」",
+                            "图片上传失败，**后面的步骤都还没做**：\n\n" +
+                                up.message + "\n" + up.raw.take(600),
+                            {}
+                        )
+                    }
+                    return
+                }
+                val ch = org.json.JSONArray().put(
+                    JSONObject().put("field_id", slot.fieldId).put("op", "replace").put("value", url)
+                ).toString()
+                val save = TapCli.saveChanges(
+                    host.pubCtx, devId, appId, ch,
+                    idempotencyKey = "pub-" + appId + "-" + slot.fieldId + "-" + System.currentTimeMillis()
+                )
+                if (!save.ok) {
+                    busy = false
+                    post {
+                        host.pubConfirm(
+                            "卡在「${slot.title}」",
+                            "图传上去了（$url），但写进字段失败 —— 多半是规格不符。\n\n" +
+                                save.message + "\n" + save.raw.take(600) +
+                                "\n\n→ 用「让 AI 做」重做一张，或换个尺寸再试。",
+                            {}
+                        )
+                    }
+                    return
+                }
+            }
+            uploaded++
+            log.append("✅ ${slot.title} 已写入\n")
+            // 传完一张就清掉暂存，避免重复传
+            unstage(slot.fieldId)
+        }
+
+        // ---------- ② 复查 ----------
+        post { host.pubToast("复查资料…") }
+        val st = TapCli.analyzeStatus(host.pubCtx, devId, appId)
+        val blockers = if (st.ok) (st.data.optJSONArray("blockers")?.length() ?: 0) else -1
+        status = if (st.ok) st.data else status
+
+        if (!st.ok) {
+            busy = false
+            post {
+                render()
+                host.pubConfirm(
+                    "素材处理完了，但复查失败",
+                    log.toString() + "\n复查那步没成功，**没有继续提审**：\n" + st.message,
+                    {}
+                )
+            }
+            return
+        }
+        if (blockers > 0) {
+            busy = false
+            post {
+                render()
+                host.pubConfirm(
+                    "素材处理完了，但还不能提审",
+                    log.toString() + "\n还差 $blockers 项必填。补完再点一次「我要发布」。",
+                    {}
+                )
+            }
+            return
+        }
+
+        // ---------- ③ 提审 ----------
+        busy = false
+        post {
+            render()
+            host.pubConfirm(
+                "素材齐了，要提审吗？",
+                log.toString() + "\n没有阻断项了。接下来生成快照 → 预检 → 提交审核。",
+                { submitFlow() }
+            )
+        }
     }
 
     /**
@@ -821,68 +1023,341 @@ class PublishPanel(
 
     // ==================== 素材工具 ====================
 
-    private fun toolsCard(): View {
-        val c = card(pal.cardAlt, pal.border)
+    /**
+     * 素材槽位 —— 对齐官方「按**字段**管素材」的模型。
+     *
+     * 之前这里只有一个「上传图片」按钮，**根本没说传的是哪张、传到哪个字段**。
+     * 而 TapTap 商店页需要的是一整套：icon、游戏截图（多张）、
+     * 横版封面、竖版封面、方形宣传图、实机视频……每个都是**独立的字段**。
+     * 只传一张图扔进素材库，等于什么都没做（官方原话：
+     * 「上传成功不等于资料字段已写入，也不等于可提审」）。
+     *
+     * 所以这里按字段列槽位：每个槽位显示当前值、规格、以及「换/加」按钮，
+     * 上传完**立刻写进对应字段**（upload → save-changes 两步走）。
+     */
+    private fun materialSlotsCard(): View {
+        val c = card(pal.card, pal.border)
         c.addView(TextView(host.pubCtx).apply {
-            setText("素材")
-            textSize = 13f
+            setText("商店页素材")
+            textSize = 15f
             typeface = MEDIUM
             setTextColor(pal.text)
         })
         c.addView(TextView(host.pubCtx).apply {
-            setText("上传一张图到 TapTap 素材库，或者让 AI 现做一张。传成功的图会进素材库，后面补资料能直接引用。")
+            setText("每个位置是独立的字段。上传后会**直接写进对应字段**，不是只丢进素材库。")
             textSize = 11.5f
             setTextColor(pal.sub)
-            setPadding(0, dp(5), 0, 0)
+            setPadding(0, dp(5), 0, dp(4))
         })
-        val row = LinearLayout(host.pubCtx).apply {
-            orientation = LinearLayout.HORIZONTAL
-            setPadding(0, dp(10), 0, 0)
+
+        for (slot in SLOTS) {
+            val online = currentFieldValue(slot.fieldId)     // 线上现在是什么
+            val local = stagedFile(slot.fieldId)             // 本地备好了什么
+            val extra = stagedCount(slot.fieldId)
+
+            val row = LinearLayout(host.pubCtx).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(0, dp(11), 0, 0)
+            }
+
+            // 缩略图：本地有就显示本地那张（这才是要发布的），否则显示线上的
+            val iv = ImageView(host.pubCtx).apply {
+                scaleType = ImageView.ScaleType.CENTER_CROP
+                background = roundCard(host.pubCtx, pal.cardAlt, pal.border, 10)
+                clipToOutline = true
+                setImageDrawable(LineIcon(if (slot.video) "video" else "image", pal.faint, 1.8f))
+                setPadding(dp(18), dp(18), dp(18), dp(18))
+                when {
+                    local != null -> {
+                        setPadding(0, 0, 0, 0)
+                        runCatching { android.graphics.BitmapFactory.decodeFile(local.absolutePath) }
+                            .getOrNull()?.let { setImageBitmap(it) }
+                    }
+                    online.startsWith("http") -> loadThumbInto(this, online)
+                }
+            }
+            row.addView(iv, LinearLayout.LayoutParams(dp(58), dp(58)).apply { rightMargin = dp(12) })
+
+            val col = LinearLayout(host.pubCtx).apply { orientation = LinearLayout.VERTICAL }
+            col.addView(TextView(host.pubCtx).apply {
+                setText(slot.title)
+                textSize = 13.5f
+                typeface = MEDIUM
+                setTextColor(pal.text)
+            })
+            col.addView(TextView(host.pubCtx).apply {
+                // 三态说清楚：本地备好了 / 线上已有 / 两边都空
+                setText(
+                    when {
+                        local != null ->
+                            "已备好${if (extra > 1) "（共 $extra 张）" else ""} · " +
+                                "${local.length() / 1024} KB · 待发布"
+                        slot.video && online.isNotBlank() -> "线上已设置"
+                        !slot.video && online.isNotBlank() -> "线上已有（可换）"
+                        else -> "还没准备 · ${slot.spec}"
+                    }
+                )
+                textSize = 11f
+                setTextColor(
+                    when {
+                        local != null -> pal.accent      // 本地备好 = 可以发了
+                        online.isNotBlank() -> pal.sub
+                        else -> pal.errText              // 空着 = 要补
+                    }
+                )
+                setPadding(0, dp(3), 0, 0)
+            })
+            row.addView(col, LinearLayout.LayoutParams(0, -2, 1f))
+
+            // 加一张 / 换一张（存本地，不上传）
+            row.addView(iconBtn("upload", "从相册选一张放进「${slot.title}」") {
+                pickIntoSlot(slot)
+            })
+            if (local != null) {
+                row.addView(iconBtn("clear", "清掉本地的这一张") {
+                    unstage(slot.fieldId)
+                    render()
+                })
+            }
+            row.addView(iconBtn("skill", "让 AI 为「${slot.title}」做一张") {
+                host.pubAskAi(
+                    "帮我为 TapTap 商店页的「${slot.title}」位置做一张素材。" +
+                        "规格要求：${slot.spec}（**控制在 4MB 以内**）。" +
+                        "做完存到发布暂存区 _publish/${slot.fieldId}.jpg，先别上传 —— " +
+                        "我要在发布页确认后再一起发。"
+                )
+            })
+            c.addView(row)
         }
-        row.addView(btn("上传图片") { uploadFlow() })
-        row.addView(btn("让 AI 做图") {
-            host.pubAskAi(
-                "帮我为 TapTap 商店页做一张宣传图。先看当前游戏是什么、已经有哪些素材，" +
-                    "需要什么尺寸就按官方规格来。做完直接上传到 TapTap 素材库" +
-                    "（app $appId，厂商 $devId）。"
+
+        c.addView(TextView(host.pubCtx).apply {
+            setText(
+                "这里只是**本地准备区** —— 选好的图先存这儿，你能看到齐不齐、长什么样。\n" +
+                    "确认无误后点最下面的「我要发布」，才会一次性传上去并写进对应字段。\n" +
+                    "（图会自动压到 4MB 以内 —— 官方对宣传图就是限 4MB。）"
             )
+            textSize = 11f
+            setTextColor(pal.faint)
+            setPadding(0, dp(11), 0, 0)
         })
-        c.addView(row)
         return c
     }
 
-    private fun uploadFlow() {
+    /** 从相册选一张，存进本地暂存区（**不上传**） */
+    private fun pickIntoSlot(slot: Slot) {
+        host.pubPickImage { f ->
+            busy = true
+            Thread {
+                val out = stageImage(slot.fieldId, f)
+                busy = false
+                post {
+                    if (out == null) host.pubToast("这张图读不了，换一张试试")
+                    else {
+                        host.pubToast("已备好「${slot.title}」（${out.length() / 1024} KB）")
+                        render()
+                    }
+                }
+            }.start()
+        }
+    }
+
+    // ==================== 本地素材暂存 ====================
+
+    /**
+     * 本地发布素材暂存区：`<项目>/_publish/`。
+     *
+     * 这是用户要的「先把图存在发布区域」——
+     * 发布页先看**本地这批**备齐没有、长什么样，确认了再一键推上去。
+     * 不是「点一下传一张、传到哪不知道」。
+     *
+     * 文件名 = 字段名（截图带序号），所以一个字段对应一个本地文件，一目了然。
+     */
+    private fun stageDir(): File = File(host.pubWorkspaceDir().parentFile, "_publish").apply { mkdirs() }
+
+    /** 这个槽位本地有没有备好的图 */
+    private fun stagedFile(fieldId: String): File? {
+        val d = stageDir()
+        // 精确名优先；截图那种多图的取第一个匹配
+        val exact = File(d, "$fieldId.jpg")
+        if (exact.isFile) return exact
+        val png = File(d, "$fieldId.png")
+        if (png.isFile) return png
+        return d.listFiles()
+            ?.filter { it.isFile && it.name.startsWith("${fieldId}_") }
+            ?.sortedBy { it.name }
+            ?.firstOrNull()
+    }
+
+    /** 这个槽位本地备了几张（截图可能多张） */
+    private fun stagedCount(fieldId: String): Int =
+        stageDir().listFiles()?.count { it.isFile && it.name.startsWith("${fieldId}_") } ?: 0
+
+    /**
+     * 把一张图收进暂存区。
+     *
+     * **同时压到 4MB 以下** —— 官方 `banner_4` 等字段的 `maxSizeMB` 就是 4，
+     * 超了会被拒；而手机拍/生成的大图很容易超。这里统一压好，
+     * 免得用户在「上传失败」里才发现是尺寸问题。
+     */
+    private fun stageImage(fieldId: String, src: File): File? = runCatching {
+        val d = stageDir()
+        val raw = src.readBytes()
+        val out = File(d, "$fieldId.jpg")
+
+        // 先按最长边 2048 缩，再按质量压，直到 ≤ 4MB
+        val bmp = android.graphics.BitmapFactory.decodeByteArray(raw, 0, raw.size)
+            ?: return@runCatching null
+        var scale = 1.0f
+        if (maxOf(bmp.width, bmp.height) > 2048) {
+            scale = 2048f / maxOf(bmp.width, bmp.height)
+        }
+        val w = (bmp.width * scale).toInt().coerceAtLeast(1)
+        val h = (bmp.height * scale).toInt().coerceAtLeast(1)
+        val scaled = if (scale < 1f) android.graphics.Bitmap.createScaledBitmap(bmp, w, h, true) else bmp
+
+        var quality = 88
+        var bytes: ByteArray
+        while (true) {
+            val bos = java.io.ByteArrayOutputStream()
+            scaled.compress(android.graphics.Bitmap.CompressFormat.JPEG, quality, bos)
+            bytes = bos.toByteArray()
+            // 4MB 是官方硬上限，留点余量
+            if (bytes.size <= 3_900_000 || quality <= 40) break
+            quality -= 12
+        }
+        if (scaled !== bmp) scaled.recycle()
+        bmp.recycle()
+        out.writeBytes(bytes)
+        out
+    }.getOrNull()
+
+    /** 从暂存区删掉（用户反悔了） */
+    private fun unstage(fieldId: String) {
+        val d = stageDir()
+        d.listFiles()?.filter { it.isFile && (it.name == "$fieldId.jpg" || it.name.startsWith("${fieldId}_")) }
+            ?.forEach { runCatching { it.delete() } }
+    }
+
+    /** 读某个字段的当前值（从已缓存的模块数据里取） */
+    private fun currentFieldValue(fieldId: String): String {
+        val f = fieldCache[fieldId] ?: return ""
+        val v = f.opt("current_value") ?: return ""
+        return when (v) {
+            is String -> if (v == "null") "" else v
+            is org.json.JSONArray -> if (v.length() > 0) v.optString(0) else ""
+            JSONObject.NULL -> ""
+            else -> v.toString()
+        }
+    }
+
+    /**
+     * 上传一张图到**指定字段**。
+     *
+     * 两步走（官方流程）：
+     *   ① `upload` 把图收进素材库，拿到 https URL
+     *   ② `save-changes` 用 `op=replace` 把它写进目标字段
+     *
+     * 少任何一步都不算完成 —— 只做 ① 的话图只是躺在素材库里，商店页看不到。
+     */
+    private fun uploadToSlot(slot: Slot) {
         if (appId.isBlank()) { host.pubToast("先选一个游戏"); return }
         host.pubPickImage { f ->
             busy = true
-            host.pubToast("正在上传 ${f.name}…")
+            host.pubToast("正在上传到「${slot.title}」…")
             Thread {
-                // 先 dry-run 让用户看清要传什么，再真传 —— 官方要求写操作先预览
-                val pre = TapCli.uploadImage(host.pubCtx, f, devId, appId, dryRun = true)
+                // ① 先预览一次，让用户看清要传什么
+                val (pre, _) = TapCli.uploadImageUrl(host.pubCtx, f, devId, appId, dryRun = true)
                 post {
                     host.pubConfirm(
-                        "上传这张图？",
+                        "上传到「${slot.title}」？",
                         "文件：${f.name}（${f.length() / 1024} KB）\n" +
-                            "到：app $appId / 厂商 $devId 的素材库\n\n" +
-                            (if (pre.raw.isNotBlank()) pre.raw.take(500) + "\n\n" else "") +
-                            "确认后才会真正上传。"
+                            "写入字段：${slot.fieldId}\n" +
+                            "规格要求：${slot.spec}\n\n" +
+                            "会先传进素材库，再写进这个字段。确认后执行。" +
+                            (if (pre.raw.isNotBlank()) "\n\n预览：\n" + pre.raw.take(400) else "")
                     ) {
                         Thread {
-                            val r = TapCli.uploadImage(host.pubCtx, f, devId, appId, dryRun = false)
+                            val (up, url) = TapCli.uploadImageUrl(host.pubCtx, f, devId, appId)
+                            if (!up.ok || url.isBlank()) {
+                                busy = false
+                                post {
+                                    host.pubConfirm(
+                                        "上传失败",
+                                        "第一步（传素材库）就没过：" + up.message + "\n\n" + up.raw.take(700),
+                                        {}
+                                    )
+                                }
+                                return@Thread
+                            }
+                            // ② 写进字段
+                            val changes = org.json.JSONArray().put(
+                                JSONObject()
+                                    .put("field_id", slot.fieldId)
+                                    .put("op", "replace")
+                                    .put("value", url)
+                            ).toString()
+                            val save = TapCli.saveChanges(
+                                host.pubCtx, devId, appId, changes,
+                                idempotencyKey = "slot-" + appId + "-" + slot.fieldId + "-" + System.currentTimeMillis()
+                            )
                             busy = false
                             post {
-                                host.pubToast(if (r.ok) "已上传" else "上传失败：" + r.message)
-                                if (r.ok) loadStatus()
-                                else host.pubConfirm("上传失败", r.raw.take(800), {})
+                                if (save.ok) {
+                                    host.pubToast("已写入「${slot.title}」")
+                                    status = null
+                                    loadStatus()
+                                } else {
+                                    host.pubConfirm(
+                                        "图传上去了，但写进字段失败",
+                                        "素材库那一步成功了（$url），" +
+                                            "但写进 ${slot.fieldId} 被拒：\n\n" +
+                                            save.message + "\n" + save.raw.take(700),
+                                        {}
+                                    )
+                                }
                             }
                         }.start()
                     }
-                    // 用户确认之前不算忙，别再拦住别的操作
                     busy = false
                 }
             }.start()
         }
     }
+
+    /** 把 http(s) 图片异步拉下来塞进 ImageView（缩略图用，失败就保持占位图标） */
+    private fun loadThumbInto(iv: ImageView, url: String) {
+        Thread {
+            val bytes = runCatching {
+                val conn = java.net.URL(url).openConnection() as java.net.HttpURLConnection
+                conn.connectTimeout = 8000
+                conn.readTimeout = 8000
+                conn.inputStream.use { it.readBytes() }
+            }.getOrNull() ?: return@Thread
+            val bmp = runCatching {
+                val o = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size, o)
+                var s = 1
+                while (o.outWidth / (s * 2) >= 160) s *= 2
+                android.graphics.BitmapFactory.decodeByteArray(
+                    bytes, 0, bytes.size,
+                    android.graphics.BitmapFactory.Options().apply { inSampleSize = s }
+                )
+            }.getOrNull() ?: return@Thread
+            post {
+                iv.setPadding(0, 0, 0, 0)
+                iv.setImageBitmap(bmp)
+            }
+        }.start()
+    }
+
+    /** 商店页需要的素材槽位（字段 id 照官方 app-edit-field-map） */
+    private data class Slot(
+        val fieldId: String,
+        val title: String,
+        val spec: String,
+        val video: Boolean = false
+    )
 
     // ==================== 小工具 ====================
 
@@ -999,6 +1474,25 @@ class PublishPanel(
             "basic-info", "developer-info", "platform-status",
             "assets-upload", "release-settings",
             "profile-promotion", "windows-exclusive"
+        )
+
+        /**
+         * 商店页要的素材槽位 —— 字段 id 照官方 `app-edit-field-map`。
+         *
+         * 官方原话：「上传成功不等于资料字段已写入」。
+         * 所以 UI 按**字段**列，而不是给一个笼统的「上传图片」按钮 ——
+         * 后者用户根本不知道传的是哪张、会出现在商店页的哪个位置。
+         *
+         * 规格写的是官方常见值；**实际以字段返回的 `image_spec` 为准**，
+         * 这里只是给用户一个直观预期（AI 侧会去读真的 spec）。
+         */
+        private val SLOTS = listOf(
+            Slot("icon", "游戏 icon", "正方形，1:1，建议 512×512 以上"),
+            Slot("screenshots", "游戏截图", "多张，按上传顺序展示，建议 ≥3 张"),
+            Slot("banner_4", "横版封面", "16:9 横版宣传主图"),
+            Slot("square_promo_image", "方形宣传图", "1:1 方形推广图"),
+            Slot("trailer", "实机视频", "宣传视频（上传后写 videoId）", video = true),
+            Slot("gameplay_demo_video", "玩法演示视频", "与实机视频**不能是同一个**", video = true)
         )
     }
 }

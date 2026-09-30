@@ -7547,6 +7547,38 @@ makerRow1.addView(ghostBtnOf(ctx, pal, "扫码登录").apply {
                 assets.open("skills/$n").use { input -> out.outputStream().use { input.copyTo(it) } }
             }
         }
+
+        // 预制的 UI 风格包（10 套主题：水墨 / 像素 / 卡通 / 霓虹 / 暗夜 …）。
+        //
+        // 为什么要释放出来：它们原本只躺在 APK 的 assets 里，**AI 读不到** ——
+        // 于是每次做界面都自己瞎编配色，而 kit.json 里明明写着
+        // 「做任何界面之前先按题材挑一套，禁止用浏览器默认样式」。
+        // 现在整个目录树复制到工程根 _ui/，AI 用 game_read path=_ui/kit.json 就能看到全部主题。
+        //
+        // 只补不覆盖：用户在设置里换过的主题（applyUiKit 写进项目的那份）不能被覆盖掉。
+        runCatching {
+            copyAssetTreeSkipExisting("ui-kits", File(gameRoot, "_ui"))
+        }
+    }
+
+    // （copyAssetTree 已经在上面定义过了 —— 复用它，别再写一个）
+    // 注意：那个版本会**覆盖**已存在文件；UI 风格包那边要的是「只补不覆盖」，
+    // 所以下面用 skipExisting 包一层。
+
+    /** 只补不覆盖的目录复制：已存在的文件跳过（保护用户自己改过的主题） */
+    private fun copyAssetTreeSkipExisting(assetDir: String, dst: File) {
+        val kids = assets.list(assetDir)?.toList().orEmpty()
+        if (kids.isEmpty()) {
+            dst.parentFile?.mkdirs()
+            if (!dst.exists()) {
+                runCatching {
+                    assets.open(assetDir).use { i -> dst.outputStream().use { i.copyTo(it) } }
+                }
+            }
+            return
+        }
+        dst.mkdirs()
+        for (k in kids) copyAssetTreeSkipExisting("$assetDir/$k", File(dst, k))
     }
 
     // ==================== 生命周期 ====================

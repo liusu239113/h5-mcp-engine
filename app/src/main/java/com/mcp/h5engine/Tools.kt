@@ -433,8 +433,13 @@ class EngineTools(private val ui: GameUi, private val root: File) {
                     "  login      取 TapTap 授权链接（把链接原样贴给用户，别让他自己去设置页翻）\n" +
                     "  apps       列出该账号下的游戏（拿 app_id）\n" +
                     "  modules    读某个资料模块的当前值（如 basic-info / assets-upload）\n" +
-                    "  upload     上传一张图到素材库（path 传工作区里的图片）\n" +
+                    "  upload     传一张图**并写进指定字段**（path + field 都要传）\n" +
                     "  save       保存资料修改（fields 传 {字段:值}）\n" +
+                    "⚠️ **上传成功 ≠ 资料已写好**：TapTap 的素材是**按字段**管理的" +
+                    "（icon / screenshots / banner_4 / square_promo_image / trailer …），" +
+                    "upload 只把图收进素材库，还必须写进对应字段才会出现在商店页。\n" +
+                    "本工具的 upload 已经把这两步串起来了，但你**必须传 field**；" +
+                    "不确定有哪些字段、什么规格，先 action=modules 读 assets-upload。\n" +
                     "  submit     提交审核（**高风险**：会走 快照→预检→提交，每一步都先返回给用户确认）\n" +
                     "纪律：save / upload / submit 都是写操作。**先把要改什么、从什么改成什么摊给用户看**，" +
                     "拿到明确同意再执行；submit 尤其如此 —— 提交后版本就进审核流了。",
@@ -443,6 +448,8 @@ class EngineTools(private val ui: GameUi, private val root: File) {
                    "developer_id":{"type":"string","description":"厂商 ID；一般不用传"},
                    "module":{"type":"string","description":"action=modules 时要读的模块 id"},
                    "path":{"type":"string","description":"action=upload 时的图片路径（工作区相对路径或文件名）"},
+                   "field":{"type":"string","description":"action=upload 必填：写进哪个字段。icon / screenshots / banner_4 / square_promo_image 等，以 get-app-module 返回为准"},
+                   "op":{"type":"string","description":"action=upload 时的写入方式：replace（默认，整组替换）/ append（截图追加）/ remove（删除）"},
                    "fields":{"type":"object","description":"action=save 时要写入的字段，形如 {字段名: 新值}"}}""",
                 listOf("action")),
 
@@ -748,6 +755,12 @@ class EngineTools(private val ui: GameUi, private val root: File) {
         return File(root, g)
     }
 
+    /**
+     * 预制 UI 风格包的根目录（`<工程根>/_ui`，启动时从 assets/ui-kits 释放）。
+     * AI 用 `game_read path=_ui/kit.json` 看全部主题，`_ui/neon/theme.css` 拿具体配色。
+     */
+    private val uiKitRoot: File get() = File(root, "_ui")
+
     /** 防目录穿越 */
     private fun safe(base: File, rel: String): File {
         val b = base.canonicalFile
@@ -779,6 +792,15 @@ class EngineTools(private val ui: GameUi, private val root: File) {
             }
             r == "_skills" -> File(root, "_skills")
             r.startsWith("_skills/") -> safe(File(root, "_skills"), r.removePrefix("_skills/"))
+            // 预制的 UI 风格包（随 APK 分发，**不在工程目录里**）。
+            // AI 要按题材挑一套主题时必须能读到它 —— 之前这条路是断的：
+            // 包在 assets/ui-kits/ 躺着，而 resolve 只认工程目录，
+            // 于是 AI 根本不知道有这 10 套主题，只能自己瞎编配色。
+            r == "_ui" || r.startsWith("_ui/") -> {
+                val tail = if (r == "_ui") "" else r.removePrefix("_ui/")
+                val f = File(uiKitRoot, tail)
+                if (f.exists()) f else null
+            }
             else -> {
                 val f = safe(gameDir(game), r)
                 // 用户只报文件名也要能读到：素材/文档/技能散在 _uploads、_skills 里
@@ -799,7 +821,8 @@ class EngineTools(private val ui: GameUi, private val root: File) {
             File(gameDir(null), "_uploads"),   // 当前项目的工作区：素材/文档优先命中
             File(root, "_skills"),
             File(root, "_uploads"),            // 旧版本遗留在工程根的素材
-            File(root, "_shared")
+            File(root, "_shared"),
+            uiKitRoot                          // 预制 UI 风格包：报 theme.css / HOWTO.md 也能找到
         )
         for (d in dirs) {
             if (!d.isDirectory) continue
@@ -1329,14 +1352,56 @@ class EngineTools(private val ui: GameUi, private val root: File) {
                     "upload" -> {
                         needIds()?.let { return it }
                         val p = a.optString("path").trim()
-                        if (p.isBlank()) ToolResult("要传哪张图？path 传工作区里的文件名。")
-                        else {
+                        val field = a.optString("field").trim()
+                        if (p.isBlank()) {
+                            ToolResult("要传哪张图？path 传工作区里的文件名。")
+                        } else if (field.isBlank()) {
+                            // 官方铁律：上传成功 ≠ 字段已写入。
+                            // 不说清写哪个字段的话，图只是躺在素材库里，商店页看不到。
+                            ToolResult(
+                                "要写进哪个字段？**上传只是第一步** —— 传完还要 save-changes 写进字段，" +
+                                    "否则图只在素材库里、商店页看不到。\n" +
+                                    "常用字段：icon（游戏图标）/ screenshots（截图，可多张）/" +
+                                    "banner_4（横版封面）/ square_promo_image（方形宣传图）/" +
+                                    "trailer（实机视频，走 video 参数）。\n" +
+                                    "先调 action=modules 看 assets-upload 模块有哪些字段和规格。"
+                            )
+                        } else {
                             val f = fuzzyFind(p)
                             if (f == null) ToolResult("找不到文件：$p")
                             else {
-                                val r = TapCli.uploadImage(ctx, f, dev, app, dryRun = false)
-                                if (r.ok) ToolResult("已上传 ${f.name} 到素材库。\n" + r.raw.take(800))
-                                else ToolResult("上传失败：${r.message}\n" + r.raw.take(800))
+                                // ① 传素材库拿 URL
+                                val (up, url) = TapCli.uploadImageUrl(ctx, f, dev, app)
+                                if (!up.ok || url.isBlank()) {
+                                    ToolResult("第一步（传素材库）失败：${up.message}\n${up.raw.take(700)}")
+                                } else {
+                                    // ② 写进字段 —— 少了这步等于白传
+                                    val changes = JSONArray().put(
+                                        JSONObject()
+                                            .put("field_id", field)
+                                            .put("op", a.optString("op", "replace"))
+                                            .put("value", url)
+                                    ).toString()
+                                    val save = TapCli.saveChanges(
+                                        ctx, dev, app, changes,
+                                        idempotencyKey = "ai-" + app + "-" + field + "-" + System.currentTimeMillis()
+                                    )
+                                    if (save.ok) {
+                                        ToolResult(
+                                            "已完成两步：\n" +
+                                                "  ① 上传 ${f.name} → 素材库（$url）\n" +
+                                                "  ② 写入字段 $field\n" +
+                                                save.raw.take(400)
+                                        )
+                                    } else {
+                                        ToolResult(
+                                            "⚠️ 图传上去了但**字段没写成**：\n" +
+                                                "  素材库 URL：$url\n" +
+                                                "  写 $field 被拒：${save.message}\n${save.raw.take(700)}\n" +
+                                                "→ 用 action=modules 读一下这个字段的 image_spec（可能是尺寸/比例不符）。"
+                                        )
+                                    }
+                                }
                             }
                         }
                     }

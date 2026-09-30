@@ -127,6 +127,33 @@ object TapCli {
             env["TAPTAP_CLI_HOME"] = home(ctx).absolutePath
             // 静态二进制不需要解释器，但把 PATH 指清楚总没坏处
             env["PATH"] = ctx.applicationInfo.nativeLibraryDir
+            // 网络出口：**优先走我们自己的本地代理**。
+            //
+            // 为什么必须有这一步（实测报错：`上传请求至 https://api.tapapis.cn/... 运输失败`）：
+            // CLI 是**静态链接的原生二进制**，它读 /etc/resolv.conf 做 DNS ——
+            // 而 Android 沙箱里**没有这个文件**（系统 DNS 走 netd，不是文件）。
+            // 于是它「能连 IP 但连不上域名」，报 transport failed。
+            //
+            // 我们起一个本地 CONNECT 代理，让 CLI 把请求发给它，
+            // 由**我们**解析域名（App 走 Android 的 resolver，解析正常），
+            // 再开隧道把字节原样搬过去。TLS 端到端，中间看不到内容。
+            //
+            // 代理起不来时退回系统代理（有些机型系统代理本身就能用）；
+            // 两个都没有就直连（至少别比原来更差）。
+            val proxyUrl = runCatching {
+                val p = LocalProxy.ensure()
+                if (p > 0) "http://127.0.0.1:$p" else systemProxyUrl(ctx)
+            }.getOrNull() ?: systemProxyUrl(ctx)
+
+            proxyUrl?.let { p ->
+                env["HTTP_PROXY"] = p
+                env["HTTPS_PROXY"] = p
+                env["http_proxy"] = p
+                env["https_proxy"] = p
+                // 本地服务不要绕代理
+                env["NO_PROXY"] = "127.0.0.1,localhost"
+                env["no_proxy"] = "127.0.0.1,localhost"
+            }
 
             val p = pb.start()
             runCatching {
@@ -185,6 +212,20 @@ object TapCli {
         // 不是信封（比如二进制没起来、或者打印了别的）—— 把原文截一段给用户看
         return Result(false, JSONObject(), raw.take(500), raw)
     }
+
+    /**
+     * 读出 Android 当前配的系统 HTTP 代理，拼成 `http://host:port`。
+     * 没配代理就返回 null（保持直连）。
+     *
+     * 为什么需要它：手机上挂 VPN / 代理类 App 时，代理信息在系统设置里，
+     * App 自己走 OkHttp 能读到，但**子进程读不到** —— Go 写的 CLI 只认
+     * `HTTP_PROXY` 环境变量。不传下去就会「浏览器能打开、CLI 连不上」。
+     */
+    private fun systemProxyUrl(ctx: Context): String? = runCatching {
+        val host = android.net.Proxy.getDefaultHost()?.trim().orEmpty()
+        val port = android.net.Proxy.getDefaultPort()
+        if (host.isBlank() || port <= 0) null else "http://$host:$port"
+    }.getOrNull()
 
     /**
      * 这条命令认不认 `--format json`（而不是 `--json`）。
@@ -292,9 +333,97 @@ object TapCli {
     }
 
     /**
-     * 保存资料修改（改简介 / 换 icon 等）。
+     * 读一个资料模块的当前值（含每个字段的 `current_value` / `image_spec` / `required`）。
      *
-     * @param changes 一个 JSON 串，字段名照 CLI 的 schema 来
+     * 写素材字段之前**必须**先读 —— 官方要求：
+     *   · 用字段当次返回的 `image_spec` 判断规格，不要凭记忆复述尺寸；
+     *   · `replace_one` 要传从最新字段值读出来的 `old_value`；
+     *   · `expected` 是「本批变更后的最终值」，得基于当前值算。
+     */
+    fun getModule(ctx: Context, devId: String, appId: String, module: String): Result =
+        run(
+            ctx,
+            listOf("app", "get-app-module", "--dev-id", devId, "--app-id", appId, "--module", module),
+            timeoutMs = 90_000
+        )
+
+    /**
+     * 清点一个目录里有什么可上传的物料（**只读，不上传**）。
+     *
+     * 官方把它作为上传编排的第一步：先看清目录里有哪些图/视频/包体、
+     * 哪些识别不了、哪些有歧义，再决定传什么。
+     * 返回的 `materials[]` 每项带 `path` / `name` / `kind`。
+     */
+    fun inspectMaterials(ctx: Context, dir: File): Result =
+        run(ctx, listOf("materials", "+inspect", dir.name), cwd = dir, timeoutMs = 90_000)
+
+    /**
+     * 上传一张图片到素材库，**返回它的 HTTPS URL**（写字段要用这个 URL）。
+     *
+     * ⚠️ 上传成功 ≠ 资料字段已写入。拿到 URL 之后还要调 [saveChanges]
+     * 把它写进具体字段（icon / screenshots / banner_4 …），否则图只是躺在素材库里。
+     */
+    fun uploadImageUrl(
+        ctx: Context,
+        file: File,
+        devId: String,
+        appId: String,
+        dryRun: Boolean = false
+    ): Pair<Result, String> {
+        val r = uploadImage(ctx, file, devId, appId, dryRun)
+        // 上传返回里带图片的 https 地址；字段写入要用它
+        val url = r.data.optString("url").ifBlank {
+            r.obj("result")?.optString("url").orEmpty()
+        }.ifBlank {
+            Regex("https://[^\\s\"']+?\\.(?:png|jpg|jpeg|webp|gif)")
+                .find(r.raw)?.value.orEmpty()
+        }
+        return r to url
+    }
+
+    /**
+     * 上传一个视频，返回数字 `videoId`（**不是 URL**）。
+     *
+     * 官方明确：拿到 videoId 即视为上传完成，直接写字段，
+     * **不要**去轮询转码/审核状态（那是异步的，不影响「字段已写入」）。
+     */
+    fun uploadVideoId(
+        ctx: Context,
+        file: File,
+        devId: String,
+        appId: String,
+        scene: String,
+        dryRun: Boolean = false
+    ): Pair<Result, String> {
+        val dir = file.parentFile ?: ctx.filesDir
+        val args = mutableListOf(
+            "asset-library", "+upload-video", file.name,
+            "--dev-id", devId, "--app-id", appId,
+            "--scene", scene
+        )
+        if (dryRun) args += "--dry-run" else args += "--yes"
+        val r = run(ctx, args, cwd = dir, timeoutMs = 300_000)
+        val vid = r.data.optString("video_id").ifBlank {
+            r.data.optString("videoId").ifBlank {
+                r.obj("result")?.optString("video_id").orEmpty()
+            }
+        }.ifBlank {
+            Regex("\"video_?[iI]d\"\\s*:\\s*\"?(\\d+)").find(r.raw)?.groupValues?.get(1).orEmpty()
+        }
+        return r to vid
+    }
+
+    /**
+     * 保存资料修改（改简介 / 写素材字段 等）。
+     *
+     * 官方要求的 `changes[]` 结构，每项：
+     *   · `field_id` 字段名（`icon` / `screenshots` / `banner_4` / `square_promo_image` / `trailer` …）
+     *   · `op`       操作：`append` 追加 / `remove` 删除 / `replace` 整组重传 / `replace_one` 替换一张
+     *   · `value`    新值（图片是 HTTPS URL；视频是数字 videoId）
+     *   · `old_value` 仅 `replace_one` 需要，从最新字段值读
+     *   · `expected` 「本批变更后的最终值」数组，用于乐观锁校验
+     *
+     * @param changesJson 一个 JSON **数组**串，如 `[{"field_id":"icon","op":"replace","value":"https://..."}]`
      */
     fun saveChanges(
         ctx: Context,
@@ -304,10 +433,11 @@ object TapCli {
         idempotencyKey: String,
         dryRun: Boolean = false
     ): Result {
+        val data = JSONObject().put("changes", org.json.JSONArray(changesJson))
         val args = mutableListOf(
             "app", "save-changes",
             "--dev-id", devId, "--app-id", appId,
-            "--data", changesJson,
+            "--data", data.toString(),
             "--idempotency-key", idempotencyKey
         )
         if (!dryRun) args += "--yes"

@@ -28,8 +28,8 @@
 | **不确定该怎么做 / 刚接手一个工程** | `urhox-recipe-map.md`（选型速查 + 症状→解法） |
 | **写 Maker / UrhoX 工程** | `maker-handbook.md`（工程结构 / 多人判定 / 验证 / 素材）<br>+ `urhox-maker-handbook.md`（引擎硬规则与高频坑） |
 | 做 **H5 工程** | `h5-handbook.md`（骨架 / 循环 / 性能 / 音频 / 适配） |
-| 调 **UI / HUD / 菜单** | `ui-design-spec.md`（通用规范） |
-| **要一套现成的 UI 风格** | `ui-astroon.md`（宇宙霓虹）/ `ui-brawlforge.md`（竞技硬边）/ `ui-pixelforge.md`（像素复古）—— **三套都是完整配色 token，H5 和 Maker 通用** |
+| **要做任何界面（UI / HUD / 菜单）** | **先读 `ui-kits-guide.md`** —— 引擎自带 10 套主题，按题材挑一套。<br>`game_read path=_ui/kit.json` 看全部 |
+| 10 套都不合适 | `ui-astroon.md` / `ui-brawlforge.md` / `ui-pixelforge.md`（另外三套风格）<br>+ `ui-design-spec.md`（通用规范） |
 | 做 **像素美术 / 要生成素材** | `pixel-art-generator.md` |
 | **改完代码想确认没搞坏** | 直接调工具 `game_validate`（跑一遍查报错），不用读文档 |
 | **要跑起来、截图看效果** | 直接调工具 `game_shot` / `screenshot` |

@@ -174,9 +174,12 @@ object SkillPresets {
      骨架、dt 夹上限、DPR 封顶 2、pointer 事件、离屏缓存、音频要等首次交互、安全区
    · **要做得「好玩」** → `game-design-playbook.md`
      核心循环、难度曲线、反馈、数值、怎么自动试玩 20 局看分布
-   · **要一套现成的 UI 风格** → `ui-astroon.md`（宇宙霓虹）/ `ui-brawlforge.md`（竞技硬边）/
-     `ui-pixelforge.md`（像素复古）—— 三套都是**完整色板 + 设计规则，H5 和 Maker 通用**。
-     通用 UI 规范看 `ui-design-spec.md`；生成像素素材看 `pixel-art-generator.md`。
+   · **做任何界面（UI / HUD / 菜单）** → **先读 `ui-kits-guide.md`**：
+     引擎自带 **10 套预制 UI 主题**（水墨 / 像素 / 卡通 / 美漫 / 二次元 / 霓虹 / 暗夜 /
+     纸感 / 商务 / 卷轴），`game_read path=_ui/kit.json` 能看到全部。
+     **按题材挑一套，禁止用浏览器原生默认样式**（灰按钮 / sans-serif 裸字号 / alert 弹窗）。
+     10 套都不合适才自己设计：`ui-astroon.md` / `ui-brawlforge.md` / `ui-pixelforge.md`，
+     通用规范看 `ui-design-spec.md`。生成像素素材看 `pixel-art-generator.md`。
 
    违反手册里的规则，代码要么直接报错、要么画面错乱且不报错。
    **不要跳过这一步凭印象写。**
