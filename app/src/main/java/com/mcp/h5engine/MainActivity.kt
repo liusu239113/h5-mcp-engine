@@ -453,6 +453,9 @@ class MainActivity : AppCompatActivity(), GameUi {
 
             // 发布页「上传图片」也会走这条通道：它要的是**磁盘上的原图**（要传给 TapTap），
             // 不是压缩后喂给模型的 JPEG。所以这里先把原图落到工作区，再交回给面板。
+            // ⚠️ 这里**不能**用 return@registerForActivityResult —— 我们已经在 Thread {} 里了，
+            // Thread 的 lambda 不是 inline 的，非局部返回是不允许的（编译报 'return' is not allowed here）。
+            // 用 if/else 分流。
             val forPublish = pickPublishImage
             if (forPublish != null && bytes != null) {
                 pickPublishImage = null
@@ -465,15 +468,14 @@ class MainActivity : AppCompatActivity(), GameUi {
                 main.post {
                     if (saved == null) toast("保存图片失败") else forPublish(saved)
                 }
-                return@registerForActivityResult
-            }
-
-            main.post {
-                if (small == null) {
-                    toast("读取图片失败")
-                } else {
-                    pendingShots += small
-                    updateAttachInfo()
+            } else {
+                main.post {
+                    if (small == null) {
+                        toast("读取图片失败")
+                    } else {
+                        pendingShots += small
+                        updateAttachInfo()
+                    }
                 }
             }
         }.start()
