@@ -365,6 +365,19 @@ class EngineTools(private val ui: GameUi, private val root: File) {
                    "assertions":{"type":"array","description":"可选断言列表，每项 [表达式, 失败说明]"}}""",
                 emptyList()),
 
+            fn("game_shot_motion",
+                "【判断「动得对不对」】连抓多帧拼成一张网格图 —— 用来看**运动**。\n" +
+                    "**单帧判不了运动**：旋转朝哪转、是「左右摆」还是「360°公转」、动画播得对不对、" +
+                    "物理轨迹对不对，都必须多帧对比。\n" +
+                    "会先把帧图拼成一张 contact sheet 再给你看 —— 这样你**一次就能看到整段过程**，" +
+                    "而不是拿到 N 张图自己脑补。\n" +
+                    "想让某帧停在一个确定状态（比如把角度冻结成 0/90/180），" +
+                    "用 setup 传一段 JS，它会带上帧号执行。",
+                """{"frames":{"type":"integer","description":"抓几帧，默认 6，最多 16"},
+                   "interval_ms":{"type":"integer","description":"每帧间隔毫秒，默认 120"},
+                   "setup":{"type":"string","description":"可选。每帧前执行的 JS，可用变量 i（帧号）。用来把状态冻结到受控值"}}""",
+                emptyList()),
+
             fn("game_shot", "**离屏抓一张「游戏画面」**（不切页、不动用户屏幕、不点击）。" +
                 "这是你自己的调试眼：确认游戏画面有没有白屏/错位/被遮挡、素材有没有渲染出来。" +
                 "拿不到图会说明原因，**不要**据此断言「游戏坏了」",
@@ -517,6 +530,69 @@ class EngineTools(private val ui: GameUi, private val root: File) {
                 listOf("action"))
         )
     }
+
+    /**
+     * 把 N 帧截图拼成一张网格图（contact sheet）。
+     *
+     * 为什么非拼不可：**模型看不了动图** —— GIF 读进来只是静态的一帧，
+     * 拿到 N 张独立图片也只能一张张看，很难比较「这一帧比上一帧差在哪」。
+     * 拼成一张网格，整段过程在一张图里，运动方向 / 轨迹一眼就能看出来。
+     * （那套桌面 skill 的文档里也是同一个结论：contact sheet 给 AI 看，GIF 给人看。）
+     *
+     * 列数按帧数自适应，尽量接近正方形；每格缩到固定宽高，间距留一点，
+     * 背景用深色 —— 跟游戏画面区分开，也方便看清边界。
+     */
+    private fun buildContactSheet(frames: List<ByteArray>, want: Int): ByteArray? = runCatching {
+        if (frames.isEmpty()) return@runCatching null
+
+        val cols = when {
+            frames.size <= 4 -> 2
+            frames.size <= 9 -> 3
+            frames.size <= 16 -> 4
+            else -> 5
+        }
+        val rows = (frames.size + cols - 1) / cols
+
+        val cellW = 260
+        val cellH = 200
+        val pad = 4
+        val sheetW = cols * cellW + (cols + 1) * pad
+        val sheetH = rows * cellH + (rows + 1) * pad
+
+        val sheet = android.graphics.Bitmap.createBitmap(
+            sheetW, sheetH, android.graphics.Bitmap.Config.ARGB_8888
+        )
+        val cv = android.graphics.Canvas(sheet)
+        cv.drawColor(0xFF14141C.toInt())   // 深底：和游戏画面区分开
+
+        val paint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+            isFilterBitmap = true
+        }
+
+        for ((i, raw) in frames.withIndex()) {
+            val bmp = android.graphics.BitmapFactory
+                .decodeByteArray(raw, 0, raw.size) ?: continue
+            // 等比缩放 + 居中放进格子
+            val scale = minOf(cellW.toFloat() / bmp.width, cellH.toFloat() / bmp.height)
+            val w = (bmp.width * scale).toInt().coerceAtLeast(1)
+            val h = (bmp.height * scale).toInt().coerceAtLeast(1)
+            val col = i % cols
+            val row = i / cols
+            val left = pad + col * (cellW + pad) + (cellW - w) / 2
+            val top = pad + row * (cellH + pad) + (cellH - h) / 2
+            cv.drawBitmap(
+                bmp, null,
+                android.graphics.Rect(left, top, left + w, top + h),
+                paint
+            )
+            bmp.recycle()
+        }
+
+        val out = java.io.ByteArrayOutputStream()
+        sheet.compress(android.graphics.Bitmap.CompressFormat.JPEG, 82, out)
+        sheet.recycle()
+        out.toByteArray()
+    }.getOrNull()
 
     /**
      * 把 runJsSync 回传的 JSON 串排一下版。
@@ -1483,6 +1559,57 @@ class EngineTools(private val ui: GameUi, private val root: File) {
                     "**别只凭截图判断** —— 截图看不出「哪一行抛了异常」。"
             )
             ToolResult(sb.toString())
+        }
+
+        "game_shot_motion" -> {
+            // 连抓多帧 → 拼成一张 contact sheet。
+            //
+            // 为什么必须拼图：模型**看不了动图**（GIF 读进来只是静态的一帧），
+            // 拿到 N 张独立图片也只能一张张看，很难比较「这一帧和上一帧差在哪」。
+            // 拼成一张网格，整段过程就在一张图里，运动方向/轨迹一眼可见。
+            // （那套桌面 skill 的文档里也是这个结论：contact sheet 给 AI，GIF 给人。）
+            val n = a.optInt("frames", 6).coerceIn(2, 16)
+            val gap = a.optInt("interval_ms", 120).coerceIn(30, 3000)
+            val setup = a.optString("setup").trim()
+
+            val shots = ArrayList<ByteArray>(n)
+            for (i in 0 until n) {
+                // 受控值：让调用方能把状态**冻结**在第 i 个值上，
+                // 这样「第几帧是什么样」是可复现的，不依赖真实渲染速度
+                if (setup.isNotEmpty()) {
+                    runCatching {
+                        ui.runJsSync(
+                            "(function(){var i=$i;" + setup + "})()", 5000
+                        )
+                    }
+                }
+                runCatching { Thread.sleep(gap.toLong()) }
+                val img = ui.snapshotGameOffscreen(360) ?: continue
+                if (img.size > 128) shots.add(img)
+            }
+
+            if (shots.isEmpty()) {
+                ToolResult(
+                    "一帧都没抓到。先用 game_shot 确认单帧能不能抓到 —— " +
+                        "单帧都抓不到的话，多帧更抓不到（原因和 game_shot 一样）。"
+                )
+            } else {
+                val sheet = buildContactSheet(shots, n)
+                if (sheet == null) {
+                    ToolResult("抓到 ${shots.size} 帧，但拼图失败。", shots)
+                } else {
+                    ToolResult(
+                        "抓了 ${shots.size} 帧、按时间顺序拼成一张网格图（左→右、上→下）。\n" +
+                            "看图判断**运动**：\n" +
+                            "  · 方向对不对（该左转的在左转吗）\n" +
+                            "  · 是「来回摆」还是「整圈公转」—— 看轨迹是不是闭合的\n" +
+                            "  · 动画帧有没有跳、有没有卡住不动\n" +
+                            "  · 物理轨迹自不自然（抛物线？匀速？越跑越偏？）\n" +
+                            "⚠️ 别只看最后一帧就下结论 —— 单帧看不出这些。",
+                        listOf(sheet)
+                    )
+                }
+            }
         }
 
         "game_shot" -> {

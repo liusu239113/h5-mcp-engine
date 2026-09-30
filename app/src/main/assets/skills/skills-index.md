@@ -18,6 +18,7 @@
 | 做 **像素美术 / 要生成素材** | `pixel-art-generator.md` |
 | **改完代码想确认没搞坏** | 直接调工具 `game_validate`（跑一遍查报错），不用读文档 |
 | **要跑起来、截图看效果** | 直接调工具 `game_shot` / `screenshot` |
+| **判断「动得对不对」**（旋转方向、动画、物理轨迹） | 直接调工具 `game_shot_motion`（连抓多帧拼成一张网格）|
 | 要**设计一个完整游戏**（系统、数值、关卡） | `game-design-playbook.md` |
 | 要**接广告 / 变现** | `adkit` 相关：先调工具 `ad_guide`，再读 `_shared/adkit.js` |
 
