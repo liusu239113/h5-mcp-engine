@@ -41,8 +41,14 @@ object TapCli {
     private const val CA_ASSET = "ca/cacert.pem"
 
     /**
-     * 凭证目录。走 TAPTAP_CLI_HOME 环境变量告诉 CLI，
-     * **不要**让它用默认的 ~/.taptap —— 那个路径在 Android 上可能不可写。
+     * 凭证目录。
+     *
+     * ⚠️ **CLI 不认 `TAPTAP_CLI_HOME`** —— 实测（`auth status --json` 的 configPath）：
+     *   · `TAPTAP_CLI_HOME=/tmp/a`        → configPath 仍是 ~/.taptap-cli/taptap.json（无效）
+     *   · `TAPTAP_CLI_CONFIG_DIR=/tmp/b`  → configPath = /tmp/b/taptap.json ✅
+     *   · `HOME=/tmp/d`                   → configPath = /tmp/d/.taptap-cli/taptap.json ✅
+     * 所以真正要设的是 **`TAPTAP_CLI_CONFIG_DIR`**（[exec] 里同时也会设 HOME 兜底）。
+     * 别让它用默认的 ~/.taptap-cli —— 那个路径在 Android 上可能不可写。
      */
     fun home(ctx: Context): File = File(McpRt.rtDir(ctx), "home/taptapcli").apply { mkdirs() }
 
@@ -126,6 +132,24 @@ object TapCli {
 
         fun obj(key: String): JSONObject? = data.optJSONObject(key)
         fun arr(key: String) = data.optJSONArray(key)
+
+        /**
+         * 载荷本体：`data.result`，取不到就退回 `data`。
+         *
+         * ★ 这个访问器是**必需的**，不是锦上添花。
+         *
+         * 实测 CLI 的 `--json` 信封里，业务数据几乎都裹在 `data.result` 里：
+         *   · `developer +list`        → data.result.developers[]
+         *   · `list-developer-apps`    → data.result.list[]
+         *   · `auth login --no-wait`   → data.result 没有，字段**直接**在 data 下
+         *
+         * 而原先所有调用点都直接读 `data`，于是**永远取不到东西**：
+         * 厂商列表解不出来 → devId 永远是空串 → 界面一直显示「还没定位到厂商」，
+         * 点「检查发布状态」也永远说「先登录」。登录本身其实早就成功了。
+         *
+         * 所以取业务字段一律走 [payload]，别直接 `r.data.opt...`。
+         */
+        val payload: JSONObject get() = data.optJSONObject("result") ?: data
     }
 
     /**
@@ -265,6 +289,10 @@ object TapCli {
             val env = pb.environment()
             env["HOME"] = home(ctx).absolutePath
             env["TMPDIR"] = home(ctx).absolutePath
+            // ⚠️ 关键是 CONFIG_DIR：实测 CLI **不认** TAPTAP_CLI_HOME（configPath 纹丝不动）。
+            // 不设它的话，凭据会写到 CLI 的默认位置（Android 上多半不可写），
+            // 表现为「登录看着成功、回来还是没登录」。
+            env["TAPTAP_CLI_CONFIG_DIR"] = home(ctx).absolutePath
             env["TAPTAP_CLI_HOME"] = home(ctx).absolutePath
             // 静态二进制不需要解释器，但把 PATH 指清楚总没坏处
             env["PATH"] = ctx.applicationInfo.nativeLibraryDir
@@ -598,9 +626,9 @@ object TapCli {
         dryRun: Boolean = false
     ): Pair<Result, String> {
         val r = uploadImage(ctx, file, devId, appId, dryRun)
-        // 上传返回里带图片的 https 地址；字段写入要用它
-        val url = r.data.optString("url").ifBlank {
-            r.obj("result")?.optString("url").orEmpty()
+        // 上传返回里带图片的 https 地址；字段写入要用它（在 data.result 下）
+        val url = r.payload.optString("url").ifBlank {
+            r.payload.optString("image_url")
         }.ifBlank {
             Regex("https://[^\\s\"']+?\\.(?:png|jpg|jpeg|webp|gif)")
                 .find(r.raw)?.value.orEmpty()
@@ -630,10 +658,8 @@ object TapCli {
         )
         if (dryRun) args += "--dry-run" else args += "--yes"
         val r = run(ctx, args, cwd = dir, timeoutMs = 300_000)
-        val vid = r.data.optString("video_id").ifBlank {
-            r.data.optString("videoId").ifBlank {
-                r.obj("result")?.optString("video_id").orEmpty()
-            }
+        val vid = r.payload.optString("video_id").ifBlank {
+            r.payload.optString("videoId")
         }.ifBlank {
             Regex("\"video_?[iI]d\"\\s*:\\s*\"?(\\d+)").find(r.raw)?.groupValues?.get(1).orEmpty()
         }
@@ -666,8 +692,7 @@ object TapCli {
     ): Result {
         // ① 先读字段当前值 —— expected 要「原样回填」它
         val mod = getModule(ctx, devId, appId, module)
-        val field = mod.obj("result")?.optJSONObject("fields")?.optJSONObject(fieldId)
-            ?: mod.data.optJSONObject("fields")?.optJSONObject(fieldId)
+        val field = mod.payload.optJSONObject("fields")?.optJSONObject(fieldId)
         val current = field?.opt("current_value")
 
         val change = JSONObject()

@@ -1290,18 +1290,19 @@ class EngineTools(private val ui: GameUi, private val root: File) {
                         needIds()?.let { return it }
                         val r = TapCli.analyzeStatus(ctx, dev, app)
                         if (!r.ok) ToolResult("查发布状态失败：${r.message}\n${r.raw.take(800)}")
-                        else ToolResult(summarizeStatus(r.data))
+                        // blockers/suggestions/warnings 在 data.result 下
+                        else ToolResult(summarizeStatus(r.payload))
                     }
 
                     "login" -> {
                         // 官方给 AI 用的两段式：先 --no-wait 拿链接，再拿 device_code 轮询。
                         // 轮询会阻塞到用户点完（最长 10 分钟），所以直接在这一步里等他。
                         val start = TapCli.authLoginStart(ctx)
-                        val url = start.data.optString("verification_url").ifBlank {
+                        val url = start.payload.optString("verification_url").ifBlank {
                             Regex("\"verification_url\"\\s*:\\s*\"([^\"]+)\"")
                                 .find(start.raw)?.groupValues?.get(1).orEmpty()
                         }
-                        val code = start.data.optString("device_code").ifBlank {
+                        val code = start.payload.optString("device_code").ifBlank {
                             Regex("\"device_code\"\\s*:\\s*\"([^\"]+)\"")
                                 .find(start.raw)?.groupValues?.get(1).orEmpty()
                         }

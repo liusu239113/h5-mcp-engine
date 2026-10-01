@@ -102,9 +102,8 @@ class PublishPanel(
                 timeoutMs = 90_000
             )
             if (!r.ok) continue
-            val fields = r.obj("result")?.optJSONObject("fields")
-                ?: r.data.optJSONObject("fields")
-                ?: continue
+            // fields 在 data.result 下 —— 走 payload，别直接读 data
+            val fields = r.payload.optJSONObject("fields") ?: continue
             var total = 0
             var done = 0
             for (k in fields.keys()) {
@@ -221,11 +220,24 @@ class PublishPanel(
 
     // ==================== 登录 ====================
 
+    /**
+     * 判断「是否已登录」。
+     *
+     * ⚠️ `auth status --json` **永远返回 ok:true** —— 没登录时它照样是
+     * `{"ok":true,"data":{"hasAccessToken":false,...}}`。
+     * 所以**绝不能**用 `r.ok` 当登录依据，必须看 `hasAccessToken`。
+     * （旧实现就是 `r.ok || data.length()>0`，等于「永远已登录」。）
+     */
     private fun looksLoggedIn(r: TapCli.Result): Boolean {
+        // 首选：结构化字段
+        val d = r.payload
+        if (d.has("hasAccessToken")) return d.optBoolean("hasAccessToken", false)
+        // 兜底：认证失败类错误就是没登录
         val t = (r.raw + r.message).lowercase()
-        if (t.contains("not logged") || t.contains("未登录") || t.contains("no credential")) return false
-        // auth status 成功、且没提「未登录」，就当已登录
-        return r.ok || r.data.length() > 0
+        if (t.contains("not authenticated") || t.contains("not logged") ||
+            t.contains("未登录") || t.contains("token_missing") || t.contains("no credential")
+        ) return false
+        return false
     }
 
     private fun authCard(): View {
@@ -271,11 +283,11 @@ class PublishPanel(
         host.pubToast("正在取授权链接…")
         Thread {
             val start = TapCli.authLoginStart(host.pubCtx)
-            val url = start.data.optString("verification_url").ifBlank {
+            val url = start.payload.optString("verification_url").ifBlank {
                 Regex("\"verification_url\"\\s*:\\s*\"([^\"]+)\"")
                     .find(start.raw)?.groupValues?.get(1).orEmpty()
             }
-            val code = start.data.optString("device_code").ifBlank {
+            val code = start.payload.optString("device_code").ifBlank {
                 Regex("\"device_code\"\\s*:\\s*\"([^\"]+)\"")
                     .find(start.raw)?.groupValues?.get(1).orEmpty()
             }
@@ -395,8 +407,10 @@ class PublishPanel(
             val r = TapCli.appList(host.pubCtx, devId)
             busy = false
             val items = mutableListOf<Pair<String, String>>()   // id to title
-            r.arr("list")?.let { a -> collectApps(a, items) }
-            if (items.isEmpty()) collectApps(r.data.optJSONArray("items"), items)
+            // 游戏列表在 data.result.list[] —— 必须走 payload，别直接读 data
+            collectApps(r.payload.optJSONArray("list"), items)
+            if (items.isEmpty()) collectApps(r.payload.optJSONArray("items"), items)
+            if (items.isEmpty()) collectApps(r.payload.optJSONArray("apps"), items)
             post {
                 if (items.isEmpty()) {
                     host.pubConfirm(
@@ -445,7 +459,8 @@ class PublishPanel(
         render()
         Thread {
             val r = TapCli.analyzeStatus(host.pubCtx, devId, appId)
-            if (r.ok) status = r.data
+            // blockers/suggestions/warnings 都在 data.result 下，必须走 payload
+            if (r.ok) status = r.payload
             busy = false
             post {
                 if (!r.ok) {
@@ -902,8 +917,8 @@ class PublishPanel(
         // ---------- ② 复查 ----------
         post { host.pubToast("复查资料…") }
         val st = TapCli.analyzeStatus(host.pubCtx, devId, appId)
-        val blockers = if (st.ok) (st.data.optJSONArray("blockers")?.length() ?: 0) else -1
-        status = if (st.ok) st.data else status
+        val blockers = if (st.ok) (st.payload.optJSONArray("blockers")?.length() ?: 0) else -1
+        status = if (st.ok) st.payload else status
 
         if (!st.ok) {
             busy = false
@@ -1429,16 +1444,27 @@ class PublishPanel(
         return ""
     }
 
+    /**
+     * 从一个列表型响应里挑第一个 id。
+     *
+     * ⚠️ 必须看 `data.result`（见 [TapCli.Result.payload]）—— 厂商列表的
+     * `developer_id` 就在 `data.result.developers[]` 里，只读 `data` 永远取不到，
+     * 结果就是「登录成功了但一直显示没定位到厂商」。
+     *
+     * 数组键名各接口不一样，都试一遍：developers（厂商）/ list（游戏、包体）。
+     */
     private fun firstId(r: TapCli.Result, vararg keys: String): String {
-        r.arr("list")?.let { a ->
-            for (i in 0 until a.length()) {
-                a.optJSONObject(i)?.let { o ->
-                    val v = firstNonBlank(o, *keys)
-                    if (v.isNotBlank()) return v
+        for (listKey in listOf("developers", "list", "items", "apps")) {
+            r.payload.optJSONArray(listKey)?.let { a ->
+                for (i in 0 until a.length()) {
+                    a.optJSONObject(i)?.let { o ->
+                        val v = firstNonBlank(o, *keys)
+                        if (v.isNotBlank()) return v
+                    }
                 }
             }
         }
-        return firstNonBlank(r.data, *keys)
+        return firstNonBlank(r.payload, *keys)
     }
 
     private fun findUrl(s: String): String? {
@@ -1448,9 +1474,8 @@ class PublishPanel(
 
     private fun findFingerprint(r: TapCli.Result): String {
         for (k in listOf("review_fingerprint", "fingerprint", "reviewFingerprint")) {
-            val v = r.data.optString(k, "")
+            val v = r.payload.optString(k, "")
             if (v.isNotBlank()) return v
-            r.obj("result")?.optString(k, "")?.let { if (it.isNotBlank()) return it }
         }
         // 兜底：从原始输出里抠
         return Regex("\"review_fingerprint\"\\s*:\\s*\"([^\"]+)\"").find(r.raw)?.groupValues?.get(1).orEmpty()
