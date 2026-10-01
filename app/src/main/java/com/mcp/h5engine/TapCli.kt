@@ -154,25 +154,70 @@ object TapCli {
 
         // ① **先直连**。
         //
-        // 直连优先本身是对的：给 CLI 塞一个连不上的代理，会把本来能用的网络搞坏
-        // （报错**恰好**也是 `transport / TapTap OAuth request failed` ——
-        //  和证书问题**共用同一句文案**，这正是我之前误判的原因）。
-        // 但**代理从来不是用户登录失败的根因**：直连和走代理**都要过 TLS**，
-        // 证书缺失时两条路都必然失败。真正的根因见 [caBundle]。
+        // 直连优先是对的：给 CLI 塞一个连不上的代理，会把本来能用的网络搞坏
+        // （报错**恰好**也是 `transport / TapTap OAuth request failed`）。
         val direct = exec(ctx, args, cwd, timeoutMs, stdin, null)
 
         // ② 直连失败、而且看着像网络问题，才退到本地代理重试一次。
         //
-        // 本地代理是给「CLI 解析不了域名」那种情况准备的（它读 /etc/resolv.conf，
-        // 而 Android 没有这个文件）。由 App 去解析域名，再开隧道转发。
+        // ★ 这一步是**必需的**，不是兜底 —— 见下面「两个独立的坑」的说明。
         if (direct.ok || !looksLikeNetworkError(direct)) return direct
 
         val port = runCatching { LocalProxy.ensure() }.getOrDefault(0)
-        if (port <= 0) return direct
+        if (port <= 0) {
+            return direct.withDiag("本地代理没起来（端口=$port）")
+        }
         val viaProxy = exec(ctx, args, cwd, timeoutMs, stdin, "http://127.0.0.1:$port")
         // 代理也没救回来就返回**直连那次**的结果 —— 那是更本质的失败原因
-        return if (viaProxy.ok) viaProxy else direct
+        return if (viaProxy.ok) viaProxy else direct.withDiag(
+            "本地代理(127.0.0.1:$port)也失败：" +
+                LocalProxy.lastError.ifBlank { "（代理无报错记录）" } +
+                "；走代理那次=" + viaProxy.message
+        )
     }
+
+    /**
+     * 给失败结果补一行诊断信息。
+     *
+     * 为什么需要：CLI 把 TLS 失败、DNS 失败、连不上**全都**包成同一句话
+     * （`transport / TapTap OAuth request failed`），光看它根本分不清是哪一种。
+     * 这一行把「我们自己这边知道的情况」附上去，用户截个图就能定位。
+     */
+    private fun Result.withDiag(extra: String): Result =
+        copy(message = message + "\n[诊断] " + extra)
+
+    /*
+     * ==========================================================================
+     * 为什么 taptap-cli 在 Android 上会失败 —— 两个**互相独立**的坑
+     * ==========================================================================
+     *
+     * 这两个坑是分别踩出来的（各修一版才弄清楚），报错文案**完全一样**：
+     *     {"type":"network","subtype":"transport","message":"TapTap OAuth request failed"}
+     * 所以「报同一个错」不代表「同一个原因」，别看到就以为没修好。
+     *
+     * ── 坑 1：TLS 找不到 CA 根证书 ──────────────────────────────────────────
+     * 它是静态链接的 Go 二进制，Go 的 crypto/x509 **只认 Linux 那几个固定路径**
+     * （/etc/ssl/certs/ca-certificates.crt 等），而 Android 上一个都没有。
+     * 修法：[caBundle] + SSL_CERT_FILE / TAPTAP_CLI_CA_PATH。
+     *
+     * ── 坑 2：DNS 解析不了（**本文件的 [LocalProxy] 就是为它准备的**）──────
+     * Go 的**纯**解析器读 /etc/resolv.conf 拿 DNS 服务器地址，而 Android 沙箱里
+     * **没有这个文件**（系统的 DNS 走 netd，不是文件）。
+     * → 拿不到 nameserver → 解析失败 → 同一个报错。
+     *
+     * 这正是 Maker 那条链路早就踩过、并用 dnsfix.js 绕开的坑
+     * （见 assets/rt.tar 里的 dnsfix.js 开头注释，以及 MakerCli.newProcess 的
+     *  `node --use-bundled-ca -r dnsfix.js`）—— 只是 taptap-cli 不是 node 脚本，
+     * 塞不进 `-r`，所以只能改用「本地 CONNECT 代理」这个等价办法：
+     * **由 App 去解析域名**（App 走 Android 的 resolver，解析是好的），
+     * 再把 TCP 隧道转出去。CLI 只需要连 127.0.0.1（字面 IP，不用解析）即可。
+     *
+     * 已验证：CLI 走这条 CONNECT 代理链路可以正常完成 OAuth 请求
+     * （`HTTPS_PROXY=http://127.0.0.1:<port>` → `ok:true`）。
+     *
+     * ⚠️ 所以 ② 那一步**不能删**。删了的话，只要用户的网络不能直连
+     * （而 Android 上 DNS 本来就直连不了），登录就必然失败。
+     */
 
     /** 这次失败像不像网络问题（决定要不要退到代理重试） */
     private fun looksLikeNetworkError(r: Result): Boolean {
@@ -224,26 +269,34 @@ object TapCli {
             // 静态二进制不需要解释器，但把 PATH 指清楚总没坏处
             env["PATH"] = ctx.applicationInfo.nativeLibraryDir
 
-            // ★★★ 关键修复：把 CA 根证书显式指给 CLI ★★★
+            // ★★★ 修复坑 1：把 CA 根证书显式指给 CLI ★★★
             //
             // Go 的证书加载只看 /etc/ssl/certs/ca-certificates.crt 那几个 Linux 固定路径，
             // 而 Android 上一个都没有 → TLS 握手找不到可信根 → 直接失败。
             // 失败被包装成 `transport / TapTap OAuth request failed`，看着像网络问题，
-            // 其实是证书问题。这是「登录一直失败」的**真正根因**（详见 [caBundle]）。
+            // 其实是证书问题。详见 [caBundle]。
+            //
+            // 两条都设：`TAPTAP_CLI_CA_PATH` 是 CLI **自己的**配置项（一等公民），
+            // `SSL_CERT_FILE` 是 Go 的通用约定 —— 实测两者都能生效，都设上更稳。
             caBundle(ctx)?.let { ca ->
+                env["TAPTAP_CLI_CA_PATH"] = ca.absolutePath
                 env["SSL_CERT_FILE"] = ca.absolutePath
                 // 显式清掉：Go 会去遍历 SSL_CERT_DIR 这个**目录**，
                 // 留着上一层的值只会往错误信息里掺噪音。
                 env.remove("SSL_CERT_DIR")
             }
-            // 代理只由 [run] 显式传进来（直连失败后才会传）。
+            // ★★★ 修复坑 2：走本地代理，绕开 CLI 自己解析不了域名的问题 ★★★
             //
-            // ⚠️ **不要再在这里读 android.net.Proxy 塞给子进程** ——
-            // 那个 API 在不少新 Android 上返回垃圾值（不是 null），
-            // 一塞进去就等于「给 CLI 设了个连不上的代理」，
-            // 报错恰好是 `transport / TapTap OAuth request failed`，
-            // 把本来能直连的网络搞坏。用户明明没开 VPN 却登录失败，就是这个原因。
+            // 代理只由 [run] 显式传进来（直连失败后才会传），**不要**在这里读
+            // android.net.Proxy 自作主张 —— 那个 API 在不少新 Android 上返回垃圾值
+            // （不是 null），一塞进去就等于「给 CLI 设了个连不上的代理」。
             proxy?.let { p ->
+                // CLI 自己的配置项（一等公民，实测有效）。
+                // 注意 `TAPTAP_CLI_PROXY_ENABLE=1` 是开关，少了它 ADDRESS 不生效。
+                env["TAPTAP_CLI_PROXY_ENABLE"] = "1"
+                env["TAPTAP_CLI_PROXY_ADDRESS"] = p
+                env["TAPTAP_CLI_NO_PROXY"] = "127.0.0.1,localhost"
+                // 通用约定，两条都设上更稳。
                 env["HTTP_PROXY"] = p
                 env["HTTPS_PROXY"] = p
                 env["http_proxy"] = p

@@ -42,6 +42,17 @@ object LocalProxy {
     @Volatile private var port = 0
     private val running = AtomicBoolean(false)
 
+    /**
+     * 最近一次出错的原因（给用户看的一句话）。
+     *
+     * 为什么留着它：CLI 把 TLS / DNS / 连不上**全包成同一句**
+     * `transport / TapTap OAuth request failed`，光看它分不清是哪种。
+     * 代理这边知道的（哪个域名没解析出来、上游连不上）才是真正有用的信息，
+     * 所以记下来，失败时由 [TapCli.run] 附到错误信息里。
+     */
+    @Volatile var lastError: String = ""
+        private set
+
     /** 代理当前监听的端口；0 = 没起来 */
     val listenPort: Int get() = port
 
@@ -59,7 +70,8 @@ object LocalProxy {
                 Log.i(TAG, "本地代理已启动，端口 $port")
                 port
             }.getOrElse {
-                Log.e(TAG, "代理启动失败: ${it.message}")
+                lastError = "代理启动失败：${it.javaClass.simpleName}: ${it.message}"
+                Log.e(TAG, lastError)
                 0
             }
         }
@@ -100,13 +112,20 @@ object LocalProxy {
             // **关键这一步**：由 App 来解析域名（走 Android 的 resolver，能解析）
             val addr = runCatching { InetAddress.getByName(host) }.getOrNull()
             if (addr == null) {
+                lastError = "解析不了 $host"
                 Log.w(TAG, "解析不了 $host")
                 out.write("HTTP/1.1 502 Bad Gateway\r\n\r\n".toByteArray())
                 out.flush()
                 return
             }
 
-            val upstream = Socket(addr, p)
+            val upstream = runCatching { Socket(addr, p) }.getOrElse { e ->
+                lastError = "连不上 $host:$p（${e.javaClass.simpleName}）"
+                Log.w(TAG, lastError)
+                out.write("HTTP/1.1 502 Bad Gateway\r\n\r\n".toByteArray())
+                out.flush()
+                return
+            }
             upstream.soTimeout = 60_000
             out.write("HTTP/1.1 200 Connection Established\r\n\r\n".toByteArray())
             out.flush()

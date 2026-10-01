@@ -298,6 +298,10 @@ class PublishPanel(
                                 (if (caOk) "" else
                                     "⚠️ 这个包里的 CA 根证书缺失（打包时漏了 assets/ca/cacert.pem）——\n" +
                                         "   装上带它的新版本即可，不用改网络设置。\n\n") +
+                                // 诊断行是关键：CLI 把 TLS / DNS / 连不上全包成同一句话，
+                                // 这行才是「到底卡在哪」的信息。截图带上它就能直接定位。
+                                (start.message.takeIf { it.contains("[诊断]") }
+                                    ?.let { it.substringAfter("[诊断]") }?.let { "诊断：$it\n\n" } ?: "") +
                                 "可以试：\n" +
                                 "  · 切换一下网络（WiFi ↔ 流量）再试\n" +
                                 "  · 如果开着 VPN / 代理类 App，换全局模式或先关掉再试\n" +
