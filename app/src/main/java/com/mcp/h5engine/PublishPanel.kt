@@ -92,6 +92,9 @@ class PublishPanel(
     /** 看门狗阈值。上传素材那条链最长，给它留够；超过就当它卡死了 */
     private val BUSY_TIMEOUT_MS = 8 * 60_000L
 
+    /** 是否有登录轮询正在跑（避免重复起） */
+    @Volatile private var loginActive = false
+
     /**
      * busy 看门狗：超过 [BUSY_TIMEOUT_MS] 还锁着就强制解锁并提示。
      *
@@ -189,6 +192,9 @@ class PublishPanel(
             container.addView(notInstalledCard())
             return
         }
+        // 上次登录若卡在半路（授权在浏览器完成、而轮询被后台冻结），这里接着跑完。
+        // 放在 render 里是因为它每次进面板 / 切回来都会走 —— 正好是「用户授权完回来了」的时机。
+        resumeLoginIfPending()
         container.addView(header())
         container.addView(authCard())
         if (devId.isNotBlank() || appId.isNotBlank()) {
@@ -227,6 +233,61 @@ class PublishPanel(
     }
 
     private fun post(r: () -> Unit) = android.os.Handler(android.os.Looper.getMainLooper()).post(r)
+
+    // ==================== 登录的「可恢复」支持 ====================
+    //
+    // 为什么需要：授权是**在浏览器里**完成的 —— 用户点「登录 TapTap」后 App 被切到后台，
+    // 而完成授权的那个「轮询」进程在后台**会被系统冻结**（Android 会冻后台 App）。
+    // 等他点完确认切回来，轮询其实没跑完，凭据也就没写下来
+    // （症状：授权页明明写着「授权已完成」，App 里却还是 configExists:false、未登录）。
+    //
+    // 所以把 device code 落盘：App 回来时（或被杀后重开）还能接着把授权换回来。
+    private fun pendingLoginFile() = java.io.File(host.pubCtx.filesDir, "pending_login.txt")
+
+    private fun savePendingLogin(code: String) {
+        runCatching { pendingLoginFile().writeText(code) }
+    }
+
+    private fun readPendingLogin(): String =
+        runCatching { pendingLoginFile().takeIf { it.isFile }?.readText()?.trim().orEmpty() }
+            .getOrDefault("")
+
+    private fun clearPendingLogin() {
+        runCatching { pendingLoginFile().delete() }
+    }
+
+    /**
+     * 面板出现时调一次：如果上次登录卡在半路（有落盘的 device code），
+     * 就接着把轮询跑完。跑完自动刷新，用户不用管。
+     */
+    private fun resumeLoginIfPending() {
+        if (loginActive) return
+        val code = readPendingLogin()
+        if (code.isBlank()) return
+        loginActive = true
+        host.pubToast("正在确认登录结果…")
+        Thread {
+            val done = TapCli.authLoginPoll(host.pubCtx, code)
+            // 以 auth status 为准 —— 轮询可能被冻过、报失败，但授权其实已经完成
+            val st = TapCli.authStatus(host.pubCtx)
+            val ok = done.ok || looksLoggedIn(st)
+            if (ok) clearPendingLogin()
+            loginActive = false
+            post {
+                if (ok) {
+                    host.pubToast("登录成功")
+                    refresh()
+                } else {
+                    host.pubConfirm(
+                        "登录没完成",
+                        "授权页那边可能没点确认，或者已经过期了。再点一次「登录 TapTap」即可。\n\n" +
+                            done.raw.take(500),
+                        {}
+                    )
+                }
+            }
+        }.start()
+    }
 
     // ==================== 头部 ====================
 
@@ -393,16 +454,22 @@ class PublishPanel(
             // 授权已经交给浏览器了，面板没有理由继续锁着。
             // 轮询放后台跑，成功了再自动刷新。
             busy = false
+            // 把 device code 落盘：App 被切后台/被冻结时轮询会断，
+            // 落盘之后用户切回来还能接着换凭据（见 resumeLoginIfPending）。
+            savePendingLogin(code)
+            loginActive = true
             post { render() }
 
             // ② 轮询等他点完（CLI 自己会一直等到授权成功或过期）
             val done = TapCli.authLoginPoll(host.pubCtx, code)
+            loginActive = false
             post {
                 // 不管 CLI 怎么报，都用**权威的** auth status 复核一次 ——
                 // 轮询可能因为超时/解析等原因报失败，但授权其实已经完成了。
                 // 以「能不能拿到厂商」为准，比信一句 message 可靠。
                 val st = TapCli.authStatus(host.pubCtx)
                 if (done.ok || looksLoggedIn(st)) {
+                    clearPendingLogin()
                     host.pubToast("登录成功")
                     refresh()
                 } else {
