@@ -66,7 +66,57 @@ class PublishPanel(
     private val dp = { v: Int -> host.pubDp(v) }
 
     // ---------- 状态 ----------
-    @Volatile private var busy = false
+    /**
+     * 「有后台任务在跑」的锁。**所有按钮入口都是 `if (busy) return`** ——
+     * 也就是说这个值一旦卡在 true，整个面板会变成「点什么都没反应」。
+     *
+     * 所以除了每个流程自己复位，还有 [busySince] + [busyWatchdog] 兜底：
+     * 万一某条后台线程抛异常没走到复位，看门狗会把它救回来。
+     */
+    @Volatile private var busyFlag = false
+
+    /**
+     * 读写 `busy` 会自动维护 [busySince]，所以**不用改任何一处 `busy = true/false`**，
+     * 看门狗就能知道它锁了多久。这样比在 30 多个赋值点各写一遍可靠。
+     */
+    private var busy: Boolean
+        get() = busyFlag
+        set(v) {
+            busyFlag = v
+            busySince = if (v) System.currentTimeMillis() else 0L
+        }
+
+    /** busy 是什么时候置上的（看门狗用）。0 = 空闲 */
+    @Volatile private var busySince = 0L
+
+    /** 看门狗阈值。上传素材那条链最长，给它留够；超过就当它卡死了 */
+    private val BUSY_TIMEOUT_MS = 8 * 60_000L
+
+    /**
+     * busy 看门狗：超过 [BUSY_TIMEOUT_MS] 还锁着就强制解锁并提示。
+     *
+     * 为什么要它：12 条后台线程里**一个 try/catch 都没有**，任何一处抛异常
+     * （JSON 结构不对、字符串越界…）都会跳过 `busy = false`，
+     * 于是面板永久变哑巴 —— 用户看到的就是「登录完了点什么都没反应」。
+     * 与其让用户重开 App，不如自己解开、并说清楚发生了什么。
+     */
+    private val busyWatchdog = object : Runnable {
+        override fun run() {
+            val t = busySince
+            if (busy && t > 0 && System.currentTimeMillis() - t > BUSY_TIMEOUT_MS) {
+                busy = false
+                host.pubToast("上一步卡住了，已自动恢复 —— 可以再点一次")
+                render()
+            }
+            android.os.Handler(android.os.Looper.getMainLooper()).postDelayed(this, 3000)
+        }
+    }
+
+    // ⚠️ init 必须放在 busyWatchdog **之后**：Kotlin 按声明顺序初始化，
+    //    写在前面的话这里拿到的还是 null，看门狗就起不来了。
+    init {
+        android.os.Handler(android.os.Looper.getMainLooper()).postDelayed(busyWatchdog, 5000)
+    }
     /** 当前账号下的厂商 id（选游戏要用） */
     private var devId = ""
     /** 当前选中的游戏 */
@@ -333,11 +383,26 @@ class PublishPanel(
                 host.pubToast("已打开授权页 —— 在那边点确认，这边会自动完成")
             }
 
+            // ★★★ 这里必须**立刻解锁**，不能等到轮询结束 ★★★
+            //
+            // 踩过的坑：以前 busy=false 写在轮询**之后**，而轮询最长要等 10 分钟
+            // （CLI 自己的上限）。用户跳去浏览器点完确认、切回来一看 ——
+            // busy 还是 true，而每个按钮都是 `if (busy) return`，
+            // 于是「登录完了，点什么都没反应」，像是界面死了。
+            //
+            // 授权已经交给浏览器了，面板没有理由继续锁着。
+            // 轮询放后台跑，成功了再自动刷新。
+            busy = false
+            post { render() }
+
             // ② 轮询等他点完（CLI 自己会一直等到授权成功或过期）
             val done = TapCli.authLoginPoll(host.pubCtx, code)
-            busy = false
             post {
-                if (done.ok) {
+                // 不管 CLI 怎么报，都用**权威的** auth status 复核一次 ——
+                // 轮询可能因为超时/解析等原因报失败，但授权其实已经完成了。
+                // 以「能不能拿到厂商」为准，比信一句 message 可靠。
+                val st = TapCli.authStatus(host.pubCtx)
+                if (done.ok || looksLoggedIn(st)) {
                     host.pubToast("登录成功")
                     refresh()
                 } else {
