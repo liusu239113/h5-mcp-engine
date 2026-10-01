@@ -343,10 +343,7 @@ object TapCli {
     private fun parseEnvelope(raw: String): Result {
         if (raw.isBlank()) return Result(false, JSONObject(), "没有任何输出", "")
 
-        val candidates = raw.lines().asReversed().filter { it.trim().startsWith("{") }
-        for (line in candidates) {
-            val o = runCatching { JSONObject(line.trim()) }.getOrNull() ?: continue
-            if (!o.has("ok") && !o.has("data")) continue
+        for (o in envelopeCandidates(raw)) {
             val ok = o.optBoolean("ok", false)
             val data = o.optJSONObject("data") ?: JSONObject()
             val err = o.optJSONObject("error")
@@ -362,6 +359,94 @@ object TapCli {
 
         // 不是信封（比如二进制没起来、或者打印了别的）—— 把原文截一段给用户看
         return Result(false, JSONObject(), raw.take(500), raw)
+    }
+
+    /*
+     * ★★★ 曾经把「成功」判成「失败」的地方 ★★★
+     *
+     * 老实现是「按行找以 { 开头的行，逐行 JSONObject(...)」——
+     * 但 CLI 的 `--json` 输出是**缩进的多行 pretty-print**：
+     *
+     *     {
+     *       "ok": true,
+     *       "data": { ... }
+     *     }
+     *
+     * 于是候选行只有孤零零一个 `{`，解析成空对象后被跳过，
+     * **永远匹配不到信封** → 一律返回 ok=false。
+     *
+     * 后果非常隐蔽：CLI 明明**成功**了（raw 里白纸黑字 `"ok": true`、
+     * 连 verification_url 都拿到了），代码却当失败处理，还顺手去重试本地代理。
+     * 用户看到的永远是「登录失败」。
+     *
+     * 这个 bug 害我对着证书和 DNS 连修了三版 —— 因为它们**本来就修对了**，
+     * 只是结果被这里吃掉了。教训：解析失败时要把 raw 露出来，
+     * 不能静默降级成「失败」。
+     */
+    private fun envelopeCandidates(raw: String): List<JSONObject> {
+        // ① 整段就是一个 JSON —— 这才是常态
+        runCatching { JSONObject(raw.trim()) }.getOrNull()
+            ?.takeIf { it.has("ok") || it.has("data") }
+            ?.let { return listOf(it) }
+
+        // ② 扫出所有**配对完整**的 {...} 块（不是「以 { 开头的行」！）
+        val found = mutableListOf<JSONObject>()
+        var i = 0
+        while (i < raw.length) {
+            if (raw[i] != '{') { i++; continue }
+            val end = matchBrace(raw, i) ?: break
+            runCatching { JSONObject(raw.substring(i, end + 1)) }.getOrNull()
+                ?.takeIf { it.has("ok") || it.has("data") }
+                ?.let { found += it }
+            i = end + 1
+        }
+
+        // ③ 兜底：单行 JSON（万一某个命令只打一行）
+        if (found.isEmpty()) {
+            raw.lines().forEach { line ->
+                val t = line.trim()
+                if (t.startsWith("{") && t.endsWith("}")) {
+                    runCatching { JSONObject(t) }.getOrNull()
+                        ?.takeIf { it.has("ok") || it.has("data") }
+                        ?.let { found += it }
+                }
+            }
+        }
+
+        // 后出现的优先：进度行在前，真正的信封在后
+        return found.asReversed()
+    }
+
+    /**
+     * 从 s[from]（必须是 `{`）开始找配对的那个 `}` 的下标，找不到返回 null。
+     * 会正确跳过字符串字面量与转义 —— 否则 data 里的 `}` 会把层级带偏。
+     */
+    private fun matchBrace(s: String, from: Int): Int? {
+        var depth = 0
+        var inStr = false
+        var esc = false
+        var i = from
+        while (i < s.length) {
+            val c = s[i]
+            if (inStr) {
+                when {
+                    esc -> esc = false
+                    c == '\\' -> esc = true
+                    c == '"' -> inStr = false
+                }
+            } else {
+                when (c) {
+                    '"' -> inStr = true
+                    '{' -> depth++
+                    '}' -> {
+                        depth--
+                        if (depth == 0) return i
+                    }
+                }
+            }
+            i++
+        }
+        return null
     }
 
     // （原来这里有个 systemProxyUrl()，读 android.net.Proxy.getDefaultHost() 给子进程设代理。
