@@ -26,7 +26,8 @@
 | 我现在要干什么 | 读这份 |
 |---|---|
 | **用户给了参考图 / 设计稿，要照着做** | **`reference-to-game.md`** —— 拆解 → 生成素材 → 九宫格拼装 → 对齐。**不许用代码凑图** |
-| **改完了要验证 / 要试玩 / 找 bug** | **`playtest-verify.md`** —— 静态自检 + 断言脚本 + 真机试玩三层，缺一层不算完 |
+| **H5 工程改完了要验证 / 试玩 / 找 bug** | **`playtest-verify.md`**（H5 专用）—— 静态自检 + 断言脚本 + tap 真机试玩三层 |
+| **Maker 工程改完了要验证** | **`maker-handbook.md` 第 3 节** —— 构建是唯一权威信号；截图在 Maker 侧无效 |
 | **不确定该怎么做 / 刚接手一个工程** | `urhox-recipe-map.md`（选型速查 + 症状→解法） |
 | **写 Maker / UrhoX 工程** | `maker-handbook.md`（工程结构 / 多人判定 / 验证 / 素材）<br>+ `urhox-maker-handbook.md`（引擎硬规则与高频坑） |
 | 做 **H5 工程** | `h5-handbook.md`（骨架 / 循环 / 性能 / 音频 / 适配） |
@@ -69,7 +70,7 @@
 | `ui-pixelforge.md` | **UI 风格**：像素 / 复古 / 8-bit 街机（完整色板 + 6 条设计规则） |
 | `pixel-art-generator.md` | 像素美术生成：调色板、尺寸、动画帧 |
 | `reference-to-game.md` | **参考图 1:1 还原**：拆解设计稿 → 生成素材 → 九宫格拼装 → 逐项对齐 |
-| `playtest-verify.md` | **验收与试玩**：断言脚本 + tap 真机试玩 + 边界用例，三层验证 |
+| `playtest-verify.md` | **H5 验收与试玩**：断言脚本 + tap 真机试玩 + 边界用例，三层验证 |
 
 ---
 
