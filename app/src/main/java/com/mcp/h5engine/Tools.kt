@@ -434,6 +434,27 @@ class EngineTools(private val ui: GameUi, private val root: File) {
                    "space":{"type":"string","description":"css（默认）或 shot（截图内像素）"}}""",
                 listOf("x", "y")),
 
+            fn("game_playtest",
+                "**【一次跑完一段试玩剧本】—— 验证游戏逻辑优先用它，别一步一个 tap。**\n" +
+                    "为什么要有它：逐步调 tap / game_shot 时，每一步都是一次完整的 API 往返，\n" +
+                    "玩一遍要几十个来回、又慢又贵。这里把整段操作写成**一个数组**，一次调用跑完，\n" +
+                    "中间不用你盯 —— 这才是「写脚本测」的正确姿势。\n" +
+                    "steps 每一项是一个动作：\n" +
+                    "  · {\"act\":\"tap\",\"x\":180,\"y\":520}            点一下\n" +
+                    "  · {\"act\":\"swipe\",\"x1\":180,\"y1\":600,\"x2\":180,\"y2\":200,\"ms\":300}  滑\n" +
+                    "  · {\"act\":\"key\",\"code\":\"Space\"}              按一次键（Space / ArrowLeft / KeyA …）\n" +
+                    "  · {\"act\":\"eval\",\"code\":\"window.__G.score\"}   读一个值（断言用）\n" +
+                    "  · {\"act\":\"shot\"} / {\"act\":\"shot\",\"name\":\"结算页\"}   截一张图（给 AI 看）\n" +
+                    "  · {\"act\":\"wait\",\"ms\":500}                    等一会儿\n" +
+                    "可选 assert：一个 {表达式: 期望值} 的数组，会在剧本**跑完之后**逐个求值，\n" +
+                    "任一不符就在回执里标红 —— 这样你一次就能知道「哪一步之后状态不对」。\n" +
+                    "坐标默认是网页 CSS 像素；先用 game_shot 截一张、按图量坐标（那是 CSS 坐标）。\n" +
+                    "回执会列出每一步的返回值 / 截图数量 / 断言结果。",
+                """{"steps":{"type":"array","description":"按顺序执行的动作列表，见描述","items":{"type":"object"}},
+                   "assert":{"type":"array","description":"可选。跑完后求值的断言：[{\"window.__G.score\":\">0\"}] 这种单键对象","items":{"type":"object"}},
+                   "shotWidth":{"type":"integer","description":"可选。截图用的模拟真机宽度（CSS 像素），如 390"}}""",
+                listOf("steps")),
+
             fn("swipe", "从一点滑到另一点（拖拽/翻页）",
                 """{"x1":{"type":"number"},"y1":{"type":"number"},
                    "x2":{"type":"number"},"y2":{"type":"number"},
@@ -1934,6 +1955,125 @@ class EngineTools(private val ui: GameUi, private val root: File) {
                 } else {
                     ToolResult("已点击 ($x, $y)")
                 }
+            }
+        }
+
+        "game_playtest" -> {
+            val steps = a.optJSONArray("steps")
+            if (steps == null || steps.length() == 0) {
+                ToolResult("steps 不能为空 —— 至少要有一个动作。")
+            } else {
+                val log = StringBuilder()
+                val shots = mutableListOf<ByteArray>()
+                val shotW = a.optInt("shotWidth", 0)
+                var failed = 0
+
+                fun tapAt(x: Float, y: Float) {
+                    ui.pointer(x, y, 0)
+                    Thread.sleep(50)
+                    ui.pointer(x, y, 1)
+                    Thread.sleep(140)   // 等游戏把这一下处理完（状态机 / 动画起始）
+                }
+
+                for (i in 0 until steps.length()) {
+                    val st = steps.optJSONObject(i) ?: continue
+                    val act = st.optString("act", "").lowercase()
+                    val idx = i + 1
+                    when (act) {
+                        "tap" -> {
+                            val x = st.optDouble("x", 0.0).toFloat()
+                            val y = st.optDouble("y", 0.0).toFloat()
+                            tapAt(x, y)
+                            log.append("$idx. tap(${x.toInt()}, ${y.toInt()})\n")
+                        }
+                        "swipe" -> {
+                            val x1 = st.optDouble("x1", 0.0).toFloat()
+                            val y1 = st.optDouble("y1", 0.0).toFloat()
+                            val x2 = st.optDouble("x2", 0.0).toFloat()
+                            val y2 = st.optDouble("y2", 0.0).toFloat()
+                            val ms = st.optInt("ms", 300).coerceIn(50, 3000)
+                            val n = 12
+                            ui.pointer(x1, y1, 0)
+                            for (k in 1 until n) {
+                                ui.pointer(
+                                    x1 + (x2 - x1) * k / n,
+                                    y1 + (y2 - y1) * k / n, 2
+                                )
+                                Thread.sleep((ms / n).toLong())
+                            }
+                            ui.pointer(x2, y2, 1)
+                            Thread.sleep(140)
+                            log.append("$idx. swipe(${x1.toInt()},${y1.toInt()} → ${x2.toInt()},${y2.toInt()})\n")
+                        }
+                        "key" -> {
+                            val code = st.optString("code", "")
+                            if (code.isNotBlank()) {
+                                // 用 KeyboardEvent 直接派发给页面：比真实按键快，且不依赖输入法焦点
+                                ui.runJsSync(
+                                    "(function(){var e=new KeyboardEvent('keydown',{code:'$code',key:'$code',bubbles:true});" +
+                                        "document.dispatchEvent(e);window.dispatchEvent(e);" +
+                                        "var u=new KeyboardEvent('keyup',{code:'$code',key:'$code',bubbles:true});" +
+                                        "document.dispatchEvent(u);window.dispatchEvent(u);return 'ok'})()",
+                                    3000
+                                )
+                                Thread.sleep(120)
+                                log.append("$idx. key($code)\n")
+                            }
+                        }
+                        "eval" -> {
+                            val code = st.optString("code", "")
+                            val v = if (code.isBlank()) "null" else ui.runJsSync("(function(){return ($code)})()", 4000)
+                            log.append("$idx. eval($code) → ${v.take(200)}\n")
+                        }
+                        "wait" -> {
+                            val ms = st.optInt("ms", 300).coerceIn(0, 10_000)
+                            Thread.sleep(ms.toLong())
+                            log.append("$idx. wait(${ms}ms)\n")
+                        }
+                        "shot" -> {
+                            val nm = st.optString("name", "第 $idx 步")
+                            val img = ui.snapshotGameOffscreen(1080, shotW, 0)
+                            if (img != null && img.size > 128) {
+                                shots += img
+                                log.append("$idx. shot「$nm」→ 已抓到\n")
+                            } else {
+                                log.append("$idx. shot「$nm」→ 没抓到（页面可能没有 canvas）\n")
+                            }
+                        }
+                        else -> log.append("$idx. 未知动作「$act」，已跳过\n")
+                    }
+                }
+
+                // 断言：跑完之后逐个求值
+                val asserts = a.optJSONArray("assert")
+                val assertLines = mutableListOf<String>()
+                if (asserts != null) {
+                    for (i in 0 until asserts.length()) {
+                        val o = asserts.optJSONObject(i) ?: continue
+                        val key = o.keys().asSequence().firstOrNull() ?: continue
+                        val want = o.optString(key, "")
+                        val got = runCatching { ui.runJsSync("(function(){return ($key)})()", 4000) }
+                            .getOrDefault("null")
+                            .trim().trim('"')
+                        // 期望值支持两种写法：`>0` 这种比较符，或直接写等价值
+                        val ok = when {
+                            want.startsWith(">") -> (got.toDoubleOrNull() ?: 0.0) > (want.drop(1).toDoubleOrNull() ?: 0.0)
+                            want.startsWith("<") -> (got.toDoubleOrNull() ?: 0.0) < (want.drop(1).toDoubleOrNull() ?: 0.0)
+                            want.startsWith("!=") -> got != want.drop(2)
+                            else -> got == want
+                        }
+                        if (!ok) failed++
+                        assertLines += (if (ok) "  ✅ " else "  ❌ ") + "$key = $got（期望 $want）"
+                    }
+                }
+
+                val head = if (failed == 0) "剧本跑完（${steps.length()} 步，断言全过）"
+                else "剧本跑完，但**有 $failed 条断言没过**"
+                ToolResult(
+                    head + "\n\n执行记录：\n" + log.toString() +
+                        (if (assertLines.isEmpty()) "" else "\n断言：\n" + assertLines.joinToString("\n")),
+                    shots
+                )
             }
         }
 
