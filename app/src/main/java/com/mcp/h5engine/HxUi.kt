@@ -224,11 +224,20 @@ class HxDialog internal constructor(
         spec.onShow?.invoke(this)
     }
 
-    /** 屏幕高度的 52% —— 长正文（git 输出、文件清单）在这之内滚动 */
-    private fun maxBodyHeight(): Int {
+    /** 屏幕高度的一半 —— 单个滚动区（正文或内容）的上限 */
+    private fun halfScreen(): Int {
         val dm = ctx.resources.displayMetrics
-        return (dm.heightPixels * 0.52f).toInt()
+        return (dm.heightPixels * 0.5f).toInt()
     }
+
+    /**
+     * 正文 / 内容区各自的高度上限。
+     *
+     * 两者**同时存在**时各让一半 —— 否则「长正文 52% + 长内容 52%」加起来超过整屏，
+     * 又会把按钮行顶出去（这正是项目列表按钮消失的同一个坑）。
+     */
+    private val msgCap: Int get() = if (spec.body != null) (halfScreen() * 0.45f).toInt() else halfScreen()
+    private val bodyCap: Int get() = if (spec.message?.isNotBlank() == true) (halfScreen() * 0.55f).toInt() else halfScreen()
 
     private fun buildRoot(): View {
         // 外层负责左右留白，让卡片不贴屏幕边
@@ -263,16 +272,41 @@ class HxDialog internal constructor(
                 setPadding(ctx.dp(20), ctx.dp(10), ctx.dp(20), 0)
                 setTextIsSelectable(true)
             }
-            // 短内容按内容高，长的封顶到屏高一半后滚动 —— 用 MaxHeightScrollView
-            // 而不是写死高度，否则两行字的提示也会占掉半屏
-            card.addView(HxScrollView(ctx, maxBodyHeight()).apply {
+            // 短内容按内容高，长的封顶后滚动 —— 用限高容器而不是写死高度，
+            // 否则两行字的提示也会占掉半屏。
+            card.addView(HxScrollView(ctx, msgCap).apply {
                 isFillViewport = false
                 addView(tv, LinearLayout.LayoutParams(-1, -2))
             }, LinearLayout.LayoutParams(-1, -2))
         }
 
+        // ⚠️ 自定义内容**必须封顶高度**。
+        //
+        // 系统 AlertDialog 会自动把 setView 的内容套进一个限高的滚动区；
+        // 这里如果直接把内容塞进卡片，项目一多（比如 8 个项目）列表就会撑满整屏，
+        // 把下面的按钮行**顶到屏幕外**——用户看到的就是「新建项目 / 导出当前 / 关闭
+        // 全都不见了」（真实反馈：「什么时候给我新建项目这些删了？」）。
+        //
+        // 做法：统一让它落进一个**自带限高**的 ScrollView。
+        // 注意不能只在外层夹高度 —— 那样 ScrollView 会以为自己放得下，
+        // 结果是「被裁掉但滚不动」。必须让 ScrollView 自己量成受限高度，它才会滚。
         spec.body?.let { b ->
-            card.addView(b, LinearLayout.LayoutParams(-1, -2).apply {
+            val content: View = if (b is ScrollView && b.childCount > 0) {
+                // 调用方已经包了 ScrollView（项目列表 / 设置页 / 文件清单）：
+                // 把它里面的内容搬到限高的那个里，原 ScrollView 弃用。
+                val inner = b.getChildAt(0)
+                b.removeView(inner)
+                HxScrollView(ctx, bodyCap).apply {
+                    isFillViewport = false
+                    addView(inner, LinearLayout.LayoutParams(-1, -2))
+                }
+            } else {
+                HxScrollView(ctx, bodyCap).apply {
+                    isFillViewport = false
+                    addView(b, LinearLayout.LayoutParams(-1, -2))
+                }
+            }
+            card.addView(content, LinearLayout.LayoutParams(-1, -2).apply {
                 topMargin = ctx.dp(14)
                 leftMargin = ctx.dp(20)
                 rightMargin = ctx.dp(20)
@@ -297,7 +331,7 @@ class HxDialog internal constructor(
                 }
             }
             card.addView(
-                HxScrollView(ctx, maxBodyHeight()).apply { addView(box) },
+                HxScrollView(ctx, bodyCap).apply { addView(box) },
                 LinearLayout.LayoutParams(-1, -2)
             )
         }
