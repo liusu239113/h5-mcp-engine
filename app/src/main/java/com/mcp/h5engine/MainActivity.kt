@@ -7947,9 +7947,12 @@ makerRow1.addView(ghostBtnOf(ctx, pal, "扫码登录").apply {
             // 页面是空的 → 截出来的图必然也是空的（纯色）。用 looksBlank 认出来，
             // **顺手自动重载一次**（等于用户手动「切项目再切回来」），再截一张。
             // 这样「白屏」这个假象就不会再被当成游戏 bug 报上去。
-            if (bytes != null && bytes.size > 128) {
+            // 注意：`bytes` 会被下面的 lambda 捕获，Kotlin 因此不能对它做智能转换 ——
+            // 先取到局部变量再判空，否则报 "Smart cast to 'ByteArray' is impossible"。
+            val shotNow = bytes
+            if (shotNow != null && shotNow.size > 128) {
                 val bmp = runCatching {
-                    android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+                    android.graphics.BitmapFactory.decodeByteArray(shotNow, 0, shotNow.size)
                 }.getOrNull()
                 val blank = bmp != null && looksBlank(bmp)
                 bmp?.recycle()
