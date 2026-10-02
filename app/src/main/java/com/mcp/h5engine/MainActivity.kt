@@ -429,6 +429,29 @@ class MainActivity : AppCompatActivity(), GameUi {
     @Volatile
     private var runner: AgentRunner? = null
 
+    /**
+     * 正在跑的那个**子任务**的 runner。
+     *
+     * 为什么必须单独存一份：`runSubtask` 里的 `val runner = AgentRunner(...)`
+     * 是个**局部变量**，把同名字段遮蔽掉了 —— 于是 `doStop()` 里的
+     * `runner?.cancel()` 只掐得到主线，子任务那条线程完全没被碰。
+     *
+     * 真实事故（用户原话：「他都完成任务了，结果子任务还在跑，还在动我的文件，
+     * 你觉得这合理吗？」）：主线因为「说了要做却没动手」被自动催满 2 次后收尾了，
+     * 而它派出去的子任务还阻塞在工具里继续跑几十轮、继续写文件、继续触发热重载，
+     * 把用户的预览反复冲掉。停止按钮也停不掉它。
+     */
+    @Volatile private var subtaskRunnerRef: AgentRunner? = null
+
+    /**
+     * 子任务是否已被放弃。
+     *
+     * 主线收尾（不管是正常完成还是用户按停止）就该**立刻**中止子任务 ——
+     * 用户要的是「这件事做完了」，不是一个还在后台偷偷改他文件的僵尸助手。
+     * 子任务自己的收尾动作（刷预览 / 弹结论卡）在这个标记下全部跳过。
+     */
+    @Volatile private var subtaskAbandoned = false
+
     private var activeTab = 0
     /** 预览里现在该不该出声：默认静音，只有停在「预览」页时才放开 */
     @Volatile private var previewMuted = true
@@ -2917,6 +2940,9 @@ class MainActivity : AppCompatActivity(), GameUi {
         runSeq++                      // 作废当前轮：旧线程的回调从此全部被丢弃
         running = false
         runner?.let { runCatching { it.cancel() } }
+        // 子任务也要一起掐掉。以前这里只取消了主线 —— 子任务的 runner 是
+        // runSubtask 里的局部变量，够不着，于是「停止」停不掉它，它会继续写文件。
+        abandonSubtask()
         runTicker?.let { main.removeCallbacks(it) }
         AiClient.onProgress = null
         stopBtn.visibleIf(false)
@@ -3049,6 +3075,10 @@ class MainActivity : AppCompatActivity(), GameUi {
 
     private fun finishRun() {
         running = false
+        // 主线这一轮结束了 —— 不管它是正常做完、出错还是被停，
+        // 都不该再留着子任务在后台继续跑、继续改用户的文件。
+        // （真实事故：主线「做完了」，子任务还在跑几十轮，用户问「这合理吗」。）
+        abandonSubtask()
         AiClient.onProgress = null
         runTicker?.let { main.removeCallbacks(it) }
         stopBtn.visibleIf(false)
@@ -6900,6 +6930,9 @@ makerRow1.addView(ghostBtnOf(ctx, pal, "扫码登录").apply {
         // 打上「当前是子任务在执行」的标记：子任务写文件也会触发热重载，
         // 主线看到预览被冲掉时，靠 file_journal 里这个标记才知道是自己派的子任务干的。
         EngineTools.subtaskMode = true
+        // 登记到字段上：这样「停止」按钮 / 主线收尾能真的掐掉它
+        subtaskRunnerRef = runner
+        subtaskAbandoned = false
         val result = try {
             runner.run(
                 subHistory,
@@ -6926,6 +6959,15 @@ makerRow1.addView(ghostBtnOf(ctx, pal, "扫码登录").apply {
         } finally {
             EngineTools.subtaskMode = false
             subtaskDepth = depth
+            subtaskRunnerRef = null
+        }
+
+        // 已经被放弃（用户按了停止 / 主线这一轮已经收尾）：
+        // **不要再动界面、不要刷预览** —— 用户要的是「停下来」。
+        // 之前这里无条件刷新预览，等于被中止的子任务还要去重载一次用户的页面。
+        if (subtaskAbandoned) {
+            main.post { subtaskCards.remove(title)?.let { /* 卡片留个痕迹即可，不刷预览 */ } }
+            return "（子任务已中止：主线这一轮已经结束，不再继续改文件）"
         }
 
         main.post {
@@ -6934,6 +6976,22 @@ makerRow1.addView(ghostBtnOf(ctx, pal, "扫码登录").apply {
             ensurePreviewFresh()
         }
         return result
+    }
+
+    /**
+     * 中止正在跑的子任务。
+     *
+     * 由两处调用：① 用户按「停止」；② 主线这一轮收尾（正常完成 / 出错 / 被停）。
+     *
+     * 为什么主线收尾也要停子任务：子任务是主线派出去的**辅助**，
+     * 主线都说「我做完了」，辅助却还在后台跑几十轮、继续写文件、继续热重载 ——
+     * 用户看到的就是「他都完成任务了，子任务还在动我的文件」。
+     */
+    private fun abandonSubtask() {
+        val r = subtaskRunnerRef ?: return
+        subtaskAbandoned = true
+        runCatching { r.cancel() }
+        main.post { addSystemLine("已中止还在后台跑的子任务（主线这一轮已经结束，不再继续改文件）") }
     }
 
     /** 对话里那张「子任务」卡：标题 + 状态 + 过程行 */
@@ -7965,6 +8023,7 @@ makerRow1.addView(ghostBtnOf(ctx, pal, "扫码登录").apply {
         // 退出 / 被回收前再兜一次落盘（onPause 到 onDestroy 之间可能又说过话）
         runCatching { persistSessions() }
         runCatching { runner?.cancel() }
+        runCatching { subtaskRunnerRef?.cancel() }
         runCatching { web.destroy() }
         super.onDestroy()
     }
