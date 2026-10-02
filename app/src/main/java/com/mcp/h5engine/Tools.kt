@@ -459,6 +459,19 @@ class EngineTools(private val ui: GameUi, private val root: File) {
                    "timeoutMs":{"type":"integer","description":"可选，超时毫秒，默认 3000"}}""",
                 listOf("code")),
 
+            fn("workspace",
+                "【工作区文件】读写用户授权的**工作区目录**（SAF，不需要 Shizuku）。\n" +
+                    "这是读手机文件的**首选**路子：用户在「发布页 → 工作区目录」授权一个目录后，" +
+                    "你就能对它做 list / read / write / mkdir / delete / import（搬进引擎工程）。\n" +
+                    "path 是**相对工作区根**的路径，如 `h5游戏项目/大运卡车/index.html`。\n" +
+                    "⚠️ 用户说「读我的项目 / 看那个文件夹 / 把 xxx 导进来」时先看这里 —— " +
+                    "工作区没设就先提示用户去设（一句话说明在哪设），别急着用 shell。",
+                """{"action":{"type":"string","description":"list/read/write/mkdir/delete/import"},
+                   "path":{"type":"string","description":"相对工作区根的路径；list 不传=根目录"},
+                   "text":{"type":"string","description":"action=write 时要写入的内容"},
+                   "game":{"type":"string","description":"action=import 时搬进哪个游戏目录；不传=当前项目"}}""",
+                listOf("action")),
+
             fn("git_op",
                 "【git 操作】对**任意项目目录**做 git：init / status / diff / log / add / commit / " +
                     "remote / push / pull / clone。\n" +
@@ -984,6 +997,67 @@ class EngineTools(private val ui: GameUi, private val root: File) {
                         { ToolResult(it.take(4000)) },
                         { ToolResult("脚本出错：${it.message}") }
                     )
+            }
+        }
+
+        "workspace" -> {
+            val c = ctxRef
+            if (c == null) ToolResult("App 上下文不可用，重启一次 App 再试")
+            else if (!SafWorkspace.isSet(c)) {
+                ToolResult(
+                    "还没设置工作区目录 —— 让用户去「发布页 → 工作区目录（免 Shizuku）」选一个，" +
+                        "选完我就能读写它了（不需要装 Shizuku）。"
+                )
+            } else {
+                val act = a.optString("action").trim().lowercase()
+                val path = a.optString("path").trim().trimStart('/')
+                when (act) {
+                    "list" -> {
+                        val items = SafWorkspace.list(c, path)
+                        if (items == null) ToolResult("读不了这个目录：$path")
+                        else if (items.isEmpty()) ToolResult("（空目录）$path")
+                        else ToolResult(
+                            "工作区「$path」共 ${items.size} 项：\n" +
+                                items.joinToString("\n") { (n, d, sz) ->
+                                    (if (d) "📁 " else "📄 ") + n + if (d) "" else "  ($sz B)"
+                                }
+                        )
+                    }
+                    "read" -> {
+                        val t = SafWorkspace.readText(c, path)
+                        if (t == null) ToolResult("读不了：$path")
+                        else ToolResult("$path（${t.length} 字符）\n\n" + t.take(16_000))
+                    }
+                    "write" -> {
+                        val text = a.optString("text")
+                        if (path.isBlank()) ToolResult("write 需要 path")
+                        else ToolResult(
+                            if (SafWorkspace.writeText(c, path, text)) "已写入 $path（${text.length} 字符）"
+                            else "写不了：$path（权限或路径问题）"
+                        )
+                    }
+                    "mkdir" -> ToolResult(
+                        if (path.isBlank()) "mkdir 需要 path"
+                        else if (SafWorkspace.mkdir(c, path)) "已创建目录 $path" else "建不了：$path"
+                    )
+                    "delete" -> ToolResult(
+                        if (path.isBlank()) "delete 需要 path"
+                        else if (SafWorkspace.delete(c, path)) "已删除 $path" else "删不了：$path"
+                    )
+                    "import" -> {
+                        if (path.isBlank()) ToolResult("import 需要 path")
+                        else {
+                            val g = a.optString("game").ifBlank { ui.currentGameId() }
+                            val dest = File(root, g).apply { mkdirs() }
+                            val n = SafWorkspace.copyInto(c, path, dest)
+                            ToolResult(
+                                if (n > 0) "已把「$path」搬进项目 $g（$n 个文件）"
+                                else "搬不动：$path（路径不存在或权限不足）"
+                            )
+                        }
+                    }
+                    else -> ToolResult("未知 action：$act（可用 list/read/write/mkdir/delete/import）")
+                }
             }
         }
 

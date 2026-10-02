@@ -896,6 +896,79 @@ class MainActivity : AppCompatActivity(), GameUi {
             onPickedMany(uris.toList())
         }
 
+    // ==================== 工作区目录（SAF，免 Shizuku） ====================
+    //
+    // 用户指出：Operit **不用开 Shizuku 也能读写文件** —— 靠的是 SAF。
+    // 之前我只做了 Shizuku 一条路，漏了这条。SAF 的好处：
+    //   · 不需要任何特殊权限，也不需要 Shizuku；
+    //   · 用户授权一个目录（比如 /sdcard/A代码库），我们就能**完整读写**它；
+    //   · 缺点：只能碰授权的那一棵子树（不是全盘），而且要走 DocumentFile 的 API。
+
+    /** 选一个目录当工作区 */
+    private val pickWorkspaceDir =
+        registerForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
+            if (uri == null) return@registerForActivityResult
+            // 持久化授权：不 take 的话，重启 App 就失效了（用户会以为又坏了）
+            runCatching {
+                contentResolver.takePersistableUriPermission(
+                    uri, Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+                )
+            }
+            cfgStore.workspaceUri = uri.toString()
+            toast("工作区已设为：${SafWorkspace.displayName(this, uri)}")
+            refreshSafRow()
+        }
+
+    /** 让用户选工作区目录 */
+    private fun askWorkspaceDir() {
+        runCatching { pickWorkspaceDir.launch(null) }
+            .onFailure { toast("打不开目录选择器：${it.message}") }
+    }
+
+    private fun safSubtitle(): String {
+        val uri = cfgStore.workspaceUri
+        if (uri.isBlank()) {
+            return "未设置 —— 选一个目录后，AI 就能读写它（不需要 Shizuku）"
+        }
+        val name = SafWorkspace.displayName(this, Uri.parse(uri))
+        return "已授权：$name（AI 可读写这个目录，不需要 Shizuku）"
+    }
+
+    private fun refreshSafRow() {
+        safRowView?.let { (_, sub) -> sub.text = safSubtitle() }
+    }
+
+    private var safRowView: Pair<LinearLayout, TextView>? = null
+
+    /** 工作区入口：设置 / 清除 */
+    private fun askWorkspace() {
+        val cur = cfgStore.workspaceUri
+        if (cur.isBlank()) {
+            AlertDialog.Builder(themed())
+                .setTitle("设置工作区目录")
+                .setMessage(
+                    "选一个目录（比如 /sdcard/A代码库），之后 AI 就能直接读写它 —— " +
+                        "**不需要 Shizuku，也不需要任何特殊权限**。\n\n" +
+                        "这是「免 Shizuku 读写文件」的正路：你授权哪个目录，它就能动哪个目录。"
+                )
+                .setPositiveButton("去选目录") { _, _ -> askWorkspaceDir() }
+                .setNegativeButton("取消", null)
+                .show()
+        } else {
+            AlertDialog.Builder(themed())
+                .setTitle("工作区目录")
+                .setMessage(safSubtitle())
+                .setPositiveButton("换一个") { _, _ -> askWorkspaceDir() }
+                .setNeutralButton("清除") { _, _ ->
+                    cfgStore.workspaceUri = ""
+                    refreshSafRow()
+                    toast("已清除")
+                }
+                .setNegativeButton("好", null)
+                .show()
+        }
+    }
+
     private fun showTab(tab: Int) {
         activeTab = tab
         chatPage.visibleIf(tab == 0)
@@ -5401,6 +5474,7 @@ class MainActivity : AppCompatActivity(), GameUi {
                 // dp 是 Context 的扩展函数，包成普通 lambda 传进去（::dp 不是 (Int)->Int）
                 FileBrowser(this, pal, { dp(it) }, { toast(it) }).show()
             }),
+            Triple("工作区目录（免 Shizuku）", safSubtitle(), { askWorkspace() }),
             Triple("Shizuku 提权", shizukuSubtitle(), { askShizuku() }),
             Triple("git 操作", "给项目建版本管理、提交、推到 GitHub", { showGitMenu() }),
             Triple("查看 console 输出", "游戏里的 log / warn / error", { showConsole() }),
@@ -5415,10 +5489,13 @@ class MainActivity : AppCompatActivity(), GameUi {
             row.setOnClickListener { action() }
             // 记住 Shizuku 那行，好在授权状态变化时改它的副标题
             // （listRowOf 的结构：row[0] = 竖排容器，容器[0] = 标题，容器[1] = 副标题）
-            if (title == "Shizuku 提权") {
-                val col = row.getChildAt(0) as? LinearLayout
-                val subTv = col?.getChildAt(1) as? TextView
-                if (subTv != null) shizukuRowView = row to subTv
+            val col = row.getChildAt(0) as? LinearLayout
+            val subTv = col?.getChildAt(1) as? TextView
+            if (subTv != null) {
+                when (title) {
+                    "Shizuku 提权" -> shizukuRowView = row to subTv
+                    "工作区目录（免 Shizuku）" -> safRowView = row to subTv
+                }
             }
             pubScroll.addView(row, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(10) })
         }

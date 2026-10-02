@@ -42,6 +42,19 @@ class AiConfigStore(ctx: Context) {
         set(v) {
             sp.edit().putString("last_root", v).apply()
         }
+
+    /**
+     * SAF 工作区目录（用户授权的那棵树）。
+     *
+     * 存的是 `content://...` 的 tree URI。有了它，AI 就能读写这个目录 ——
+     * **不需要 Shizuku、不需要任何特殊权限**（这是 Operit 那条免提权的路子）。
+     * 空串 = 还没设置。
+     */
+    var workspaceUri: String
+        get() = sp.getString("workspace_uri", "") ?: ""
+        set(v) {
+            sp.edit().putString("workspace_uri", v).apply()
+        }
     /**
      * 上次停留的会话 id（按项目分开记）。
      *
