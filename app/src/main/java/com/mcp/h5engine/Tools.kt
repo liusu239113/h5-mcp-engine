@@ -459,6 +459,23 @@ class EngineTools(private val ui: GameUi, private val root: File) {
                    "timeoutMs":{"type":"integer","description":"可选，超时毫秒，默认 3000"}}""",
                 listOf("code")),
 
+            fn("git_op",
+                "【git 操作】对**任意项目目录**做 git：init / status / diff / log / add / commit / " +
+                    "remote / push / pull / clone。\n" +
+                    "用途：给项目建版本管理、提交改动、推到 GitHub 等远端。\n" +
+                    "⚠️ 纪律：\n" +
+                    "  · 改完一批代码再 commit，别改一行提一次；\n" +
+                    "  · **commit / push 前先把「要提交什么」摊给用户看**（用 action=status / diff），拿到同意再动手；\n" +
+                    "  · push 是**对外可见**的操作，没让用户确认过绝不要推；\n" +
+                    "  · 私有仓库需要 token：让用户在设置里填，或用带 token 的 https 地址。\n" +
+                    "  · 目标是「当前项目」时不用传 dir，默认就是它。",
+                """{"action":{"type":"string","description":"init/status/diff/log/add/commit/remote/push/pull/clone"},
+                   "dir":{"type":"string","description":"可选。要操作的项目目录（绝对路径或项目名）；不传=当前项目"},
+                   "message":{"type":"string","description":"action=commit 时的提交说明"},
+                   "url":{"type":"string","description":"action=remote 时要设置的远端地址；action=clone 时是要克隆的地址"},
+                   "token":{"type":"string","description":"可选。私有仓库的访问令牌（会拼进 https 地址，不会回显）"}}""",
+                listOf("action")),
+
             fn("shell_run",
                 "【执行系统命令】在当前设备上跑一条命令并拿回输出（经 sh -c 解释）。" +
                     "用于查设备状态 / 文件 / 进程。危险命令先告诉用户你想干什么。\n" +
@@ -967,6 +984,67 @@ class EngineTools(private val ui: GameUi, private val root: File) {
                         { ToolResult(it.take(4000)) },
                         { ToolResult("脚本出错：${it.message}") }
                     )
+            }
+        }
+
+        "git_op" -> {
+            val c = ctxRef
+            if (c == null) ToolResult("App 上下文不可用，重启一次 App 再试")
+            else if (!GitTools.available(c)) {
+                ToolResult(
+                    "内置 git 还没解包（缺少 gitrt）。打开一次 App 让它释放运行时，" +
+                        "或重装带运行时的版本。"
+                )
+            } else {
+                val act = a.optString("action").trim().lowercase()
+                // 目标目录：不传就是当前项目
+                val dirName = a.optString("dir").trim()
+                val dir = when {
+                    dirName.isBlank() -> File(root, ui.currentGameId())
+                    dirName.startsWith("/") -> File(dirName)
+                    else -> File(root, dirName)
+                }
+                if (!dir.isDirectory) {
+                    ToolResult("目录不存在：${dir.absolutePath}")
+                } else {
+                    val msg = a.optString("message").trim()
+                    val url = a.optString("url").trim()
+                    val token = a.optString("token").trim()
+                    val r = when (act) {
+                        "init" -> GitTools.init(c, dir)
+                        "status" -> GitTools.status(c, dir)
+                        "diff" -> GitTools.diffStat(c, dir)
+                        "log" -> GitTools.log(c, dir, a.optInt("n", 20))
+                        "add" -> GitTools.addAll(c, dir)
+                        "commit" -> if (msg.isBlank()) {
+                            GitTools.Res(-1, "commit 需要 message")
+                        } else {
+                            // 先 add -A 再提交，省得模型还要记得多调一步
+                            GitTools.addAll(c, dir)
+                            GitTools.commit(c, dir, msg)
+                        }
+                        "remote" -> if (url.isBlank()) {
+                            val cur = GitTools.remoteUrl(c, dir)
+                            GitTools.Res(0, if (cur.isBlank()) "还没有配置远端" else "当前远端：${GitTools.maskToken(cur)}")
+                        } else {
+                            GitTools.setRemote(c, dir, GitTools.withToken(url, token))
+                        }
+                        "push" -> GitTools.push(c, dir)
+                        "pull" -> GitTools.pull(c, dir)
+                        "clone" -> if (url.isBlank()) {
+                            GitTools.Res(-1, "clone 需要 url")
+                        } else {
+                            GitTools.clone(c, dir, GitTools.withToken(url, token))
+                        }
+                        else -> GitTools.Res(-1, "未知 action：$act")
+                    }
+                    // 输出里的 token 一律抹掉，免得它流进对话历史 / 界面
+                    val body = GitTools.maskToken(r.brief())
+                    ToolResult(
+                        (if (r.ok) "" else "[退出码 ${r.code}]\n") +
+                            "目录：${dir.absolutePath}\n" + body
+                    )
+                }
             }
         }
 

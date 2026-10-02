@@ -2,11 +2,12 @@ package com.mcp.h5engine
 
 import android.content.Context
 import android.content.pm.PackageManager
-import android.os.IBinder
 import android.util.Log
+import moe.shizuku.server.IRemoteProcess
+import moe.shizuku.server.IShizukuService
+import rikka.shizuku.HexoraProcessFactory
 import rikka.shizuku.Shizuku
 import rikka.shizuku.ShizukuRemoteProcess
-import java.io.File
 import java.util.concurrent.TimeUnit
 
 /**
@@ -196,34 +197,43 @@ object Shizuku2 {
     /**
      * 拿到 IShizukuService 的远程代理。
      *
-     * ## 为什么用反射，而不是直接 import
+     * ## 为什么这些 stub 是**源码**放在项目里，而不是靠依赖
      *
-     * `moe.shizuku.server.IShizukuService` 是**服务端**的类，只在 Shizuku App 里，
-     * 我们的编译期依赖（dev.rikka.shizuku:api / :provider）**并不包含它** ——
-     * 直接 import 会编译不过。
+     * `moe.shizuku.server.IShizukuService` 是**服务端**的 AIDL 接口。
+     * `dev.rikka.shizuku:api` / `:provider` 两个依赖里**都没有它** ——
+     * 官方把它单独发在 `dev.rikka.shizuku:aidl`，而那个 artifact **只有 sources**，
+     * 没有编译好的 jar。
      *
-     * 但运行时它一定在：`Shizuku.getBinder()` 拿到 binder 后，
-     * 用服务端生成的 `Stub.asInterface(binder)` 就能得到代理。
-     * 所以这里用反射走这一步（Operit 是自己带了一份 stub，我们不想为了这个塞副本）。
+     * 所以正确做法是：把这些**已生成好的 Java stub**（官方 sources jar 里就是
+     * 编译前的 .java）放进源码树 `app/src/main/java/moe/shizuku/server/`，
+     * 由我们的编译器一起编。Operit 也是这么干的。
+     *
+     * ⚠️ 之前这里用反射 `Class.forName("...IShizukuService$Stub")` —— **必然失败**：
+     * 那个类只在 Shizuku 自己的进程里，我们的进程里根本没有，
+     * 反射查不到类。真机上的报错就是「拿不到 Shizuku 服务（反射 newProcess 失败）」。
      */
-    private fun serviceProxy(): Any? = runCatching {
+    private fun serviceProxy(): IShizukuService? = runCatching {
         val binder = Shizuku.getBinder() ?: return null
-        val stub = Class.forName("moe.shizuku.server.IShizukuService\$Stub")
-        val asInterface = stub.getMethod("asInterface", IBinder::class.java)
-        asInterface.invoke(null, binder)
-    }.getOrNull()
+        IShizukuService.Stub.asInterface(binder)
+    }.getOrElse {
+        Log.w(TAG, "拿 Shizuku 服务失败: ${it.javaClass.simpleName}: ${it.message}")
+        null
+    }
 
-    /** 反射调 `newProcess(String[], String[], String[])`，返回 ShizukuRemoteProcess */
+    /**
+     * 起一个远程进程（以 shell 身份）。
+     *
+     * `newProcess(cmd, env, dir)` 返回 [IRemoteProcess]，
+     * 它在客户端侧被包成 [ShizukuRemoteProcess]（可当普通 Process 用）。
+     */
     private fun newProcess(cmd: List<String>): ShizukuRemoteProcess? = runCatching {
         val svc = serviceProxy() ?: return null
-        val m = svc.javaClass.getMethod(
-            "newProcess",
-            Array<String>::class.java, Array<String>::class.java, Array<String>::class.java
-        )
-        @Suppress("UNCHECKED_CAST")
-        m.invoke(svc, cmd.toTypedArray(), null, null) as? ShizukuRemoteProcess
+        val remote: IRemoteProcess = svc.newProcess(cmd.toTypedArray(), null, null)
+        // 走同包工厂：ShizukuRemoteProcess 的构造是包级私有，
+        // 直接 new 编译不过（见 HexoraProcessFactory 的说明）
+        HexoraProcessFactory.create(remote)
     }.getOrElse {
-        Log.w(TAG, "newProcess 反射失败: ${it.javaClass.simpleName}: ${it.message}")
+        Log.w(TAG, "newProcess 失败: ${it.javaClass.simpleName}: ${it.message}")
         null
     }
 

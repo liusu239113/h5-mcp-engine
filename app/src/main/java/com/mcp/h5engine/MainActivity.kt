@@ -5397,7 +5397,12 @@ class MainActivity : AppCompatActivity(), GameUi {
         val rows = listOf(
             Triple("导出工程包", "打包成 zip，并自动另存到「下载/H5Games」", { exportZip() }),
             Triple("查看当前游戏文件", "列出文件与体积", { showTree() }),
+            Triple("文件浏览器", "翻手机目录 / 看文件内容 / 重命名删除（开 Shizuku 后能看受保护目录）", {
+                // dp 是 Context 的扩展函数，包成普通 lambda 传进去（::dp 不是 (Int)->Int）
+                FileBrowser(this, pal, { dp(it) }, { toast(it) }).show()
+            }),
             Triple("Shizuku 提权", shizukuSubtitle(), { askShizuku() }),
+            Triple("git 操作", "给项目建版本管理、提交、推到 GitHub", { showGitMenu() }),
             Triple("查看 console 输出", "游戏里的 log / warn / error", { showConsole() }),
             Triple("切换 / 新建项目", "一个项目一个目录，互不干扰", { showProjects() }),
             Triple("后台保活设置", "切后台 / 锁屏 AI 继续跑（需要关掉电池优化）", { askKeepAlive() }),
@@ -6746,6 +6751,113 @@ makerRow1.addView(ghostBtnOf(ctx, pal, "扫码登录").apply {
 
     private fun showConsole() {
         alert("console 输出", logs.tail(120).joinToString("\n").ifBlank { "(暂无输出)" })
+    }
+
+    // ==================== git ====================
+
+    /**
+     * git 操作菜单 —— 对**当前项目**做版本管理。
+     *
+     * 用 App 自带的 git（`assets/gitrt.tar` 里那份 musl/aarch64 版），
+     * 不要求用户另外装 —— 手机上也装不了。
+     */
+    private fun showGitMenu() {
+        val dir = File(gameRoot, currentGame)
+        val items = arrayOf(
+            if (GitTools.isRepo(this, dir)) "查看状态" else "初始化仓库",
+            "查看改动",
+            "查看提交历史",
+            "提交全部改动",
+            "设置 / 查看远端",
+            "推送到远端",
+            "从远端拉取"
+        )
+        AlertDialog.Builder(themed())
+            .setTitle("git · ${currentGame}")
+            .setItems(items) { _, i ->
+                when (i) {
+                    0 -> gitDo(dir) { if (GitTools.isRepo(this, dir)) GitTools.status(this, dir) else GitTools.init(this, dir) }
+                    1 -> gitDo(dir) { GitTools.diffStat(this, dir) }
+                    2 -> gitDo(dir) { GitTools.log(this, dir, 30) }
+                    3 -> gitCommit(dir)
+                    4 -> gitRemote(dir)
+                    5 -> gitConfirmPush(dir)
+                    6 -> gitDo(dir) { GitTools.pull(this, dir) }
+                }
+            }
+            .setNegativeButton("取消", null)
+            .show()
+    }
+
+    /** 跑一条 git 命令并把输出摊给用户看 */
+    private fun gitDo(dir: File, op: () -> GitTools.Res) {
+        toast("执行中…")
+        Thread {
+            val r = op()
+            main.post {
+                alert(
+                    if (r.ok) "git 完成" else "git 失败（退出码 ${r.code}）",
+                    GitTools.maskToken(r.brief(120))
+                )
+            }
+        }.start()
+    }
+
+    private fun gitCommit(dir: File) {
+        // 先把「要提交什么」摊出来 —— 提交前让用户看清是规矩
+        Thread {
+            val st = GitTools.status(this, dir)
+            main.post {
+                if (st.out.isBlank()) {
+                    toast("没有改动可提交")
+                    return@post
+                }
+                val et = EditText(this).apply { hint = "提交说明" }
+                AlertDialog.Builder(themed())
+                    .setTitle("要提交这些改动")
+                    .setMessage(GitTools.maskToken(st.brief(60)) + "\n\n填一句提交说明：")
+                    .setView(et)
+                    .setPositiveButton("提交") { _, _ ->
+                        val m = et.text.toString().trim().ifBlank { "更新" }
+                        gitDo(dir) { GitTools.commit(this, dir, m) }
+                    }
+                    .setNegativeButton("取消", null)
+                    .show()
+            }
+        }.start()
+    }
+
+    private fun gitRemote(dir: File) {
+        val cur = GitTools.remoteUrl(this, dir)
+        val et = EditText(this).apply {
+            setText(GitTools.maskToken(cur))
+            hint = "https://github.com/用户名/仓库.git"
+        }
+        AlertDialog.Builder(themed())
+            .setTitle("远端地址")
+            .setMessage("私有仓库可以在地址里带上 token，或用「用户名:token@」的形式。")
+            .setView(et)
+            .setPositiveButton("保存") { _, _ ->
+                val u = et.text.toString().trim()
+                if (u.isNotBlank()) gitDo(dir) { GitTools.setRemote(this, dir, u) }
+            }
+            .setNegativeButton("取消", null)
+            .show()
+    }
+
+    private fun gitConfirmPush(dir: File) {
+        val url = GitTools.remoteUrl(this, dir)
+        if (url.isBlank()) {
+            toast("先设置远端地址")
+            return
+        }
+        // 推送是对外可见的操作 —— 必须用户明确确认
+        AlertDialog.Builder(themed())
+            .setTitle("推送到远端？")
+            .setMessage("远端：${GitTools.maskToken(url)}\n\n这会把当前分支推上去，别人能看到。")
+            .setPositiveButton("推送") { _, _ -> gitDo(dir) { GitTools.push(this, dir) } }
+            .setNegativeButton("取消", null)
+            .show()
     }
 
     // ==================== Shizuku（ADB 级提权） ====================
