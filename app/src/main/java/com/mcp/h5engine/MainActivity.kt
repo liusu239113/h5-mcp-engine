@@ -7182,7 +7182,10 @@ makerRow1.addView(ghostBtnOf(ctx, pal, "扫码登录").apply {
      * 手机上看 git 的报错基本等于没看。真正的判断在 GitTools.testConnection 里做。
      */
     private fun gitTestConnection(dir: File) {
-        val curUrl = GitTools.remoteUrl(this, dir)
+        // Maker 工程的 origin 指向平台仓库，不是用户的 GitHub —— 不预填，
+        // 免得用户拿它去「测试连接」然后一头雾水。
+        val rawUrl = GitTools.remoteUrl(this, dir)
+        val curUrl = if (GitTools.isMakerRemote(rawUrl)) "" else rawUrl
         val urlBox = hxField(this, pal, "仓库地址", curUrl, hint = "https://github.com/用户名/仓库.git")
         val tokBox = hxField(this, pal, "Token（可留空测公开仓库）", "", password = true,
             hint = "ghp_… 或 用户名:token")
@@ -7313,15 +7316,25 @@ makerRow1.addView(ghostBtnOf(ctx, pal, "扫码登录").apply {
 
     private fun gitRemote(dir: File) {
         val cur = GitTools.remoteUrl(this, dir)
+        // Maker 工程初始化时会自动配一个指向 maker.taptap.cn 的 origin（平台同步用）。
+        // 直接把它显示在「远端地址」里，用户会以为那是自己的仓库、然后去推它 ——
+        // 真实反馈就是这么来的。这里不预填、并说明它不是给你推的。
+        val isMaker = GitTools.isMakerRemote(cur)
         val et = hxInput(this, pal, "https://github.com/用户名/仓库.git").apply {
             // ⚠️ 绝不把 maskToken 的结果回填进输入框：那是 https://***@github.com/…
             // 用户不重输直接保存，就会把真 token 覆盖成字面量 ***，之后推送全失败。
-            // 真实地址带 token 时，给一句提示就够了。
-            if (cur.isNotBlank()) setText(cur)
+            if (cur.isNotBlank() && !isMaker) setText(cur)
         }
         HxDialog.Builder(themed(), pal)
             .setTitle("远端地址")
-            .setMessage("私有仓库可以在地址里带上 token，或用「用户名:token@」的形式。")
+            .setMessage(
+                if (isMaker)
+                    "⚠️ 这个项目当前连的是 **Maker 平台的仓库**（maker.taptap.cn），" +
+                        "那是平台同步代码用的，不是你的 GitHub 仓库、也不能往那儿推。\n\n" +
+                        "要给它做版本管理，就在下面填你自己的 GitHub 仓库地址。"
+                else
+                    "私有仓库可以在地址里带上 token，或用「用户名:token@」的形式。"
+            )
             .setView(et)
             .setPositiveButton("保存") { ->
                 val u = et.text.toString().trim()
@@ -7333,8 +7346,15 @@ makerRow1.addView(ghostBtnOf(ctx, pal, "扫码登录").apply {
 
     private fun gitConfirmPush(dir: File) {
         val url = GitTools.remoteUrl(this, dir)
-        if (url.isBlank()) {
-            toast("先设置远端地址")
+        // 推之前先自检：没有远端 / 远端是 Maker 平台仓库 / 一次提交都没有 ——
+        // 这三种情况 git 只会甩一句看不懂的报错，直接说人话。
+        val blocker = GitTools.pushBlocker(this, dir)
+        if (blocker != null) {
+            HxDialog.Builder(themed(), pal)
+                .setTitle("现在还不能推")
+                .setMessage(blocker + if (url.isNotBlank()) "\n\n当前远端：${GitTools.maskToken(url)}" else "")
+                .setPositiveButton("好", null)
+                .show()
             return
         }
         // 推送是对外可见的操作 —— 必须用户明确确认

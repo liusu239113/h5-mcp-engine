@@ -129,10 +129,54 @@ object GitTools {
     }
 
     /**
+     * 这个远端是不是 **Maker 平台的仓库**（`maker.taptap.cn/git/...`）。
+     *
+     * Maker 工程初始化时会自动配一个指向 maker.taptap.cn 的 origin ——
+     * 那是给平台同步代码用的**内部仓库**，不是给用户推送的。
+     * 而 App 的 git 菜单是按「推到自己的 GitHub」设计的，如果不动脑子直接推 origin，
+     * 就会往 Maker 的后端推，然后收到一句看不懂的
+     * 「src refspec HEAD does not match any / failed to push some refs」——
+     * 用户完全不知道发生了什么（真实反馈：「你这整个流程是不是有问题啊？」）。
+     */
+    fun isMakerRemote(url: String): Boolean = url.contains("maker.taptap.cn")
+
+    /**
+     * 推送前自检。返回一句**人话**说明为什么不能推，能推则返回 null。
+     *
+     * 以前是直接把 git 的原始报错摊给用户看，等于没说。这里把三种常见情况分开讲：
+     *   ① 远端是 Maker 平台的仓库 → 不该推，给正确做法；
+     *   ② 一次提交都还没有 → 先提交再推；
+     *   ③ 没有远端 → 先设远端。
+     */
+    fun pushBlocker(ctx: Context, dir: File): String? {
+        val url = remoteUrl(ctx, dir)
+        if (url.isBlank()) {
+            return "还没有设置远端地址。先「设置 / 查看远端」填上你自己的 GitHub 仓库。"
+        }
+        if (isMakerRemote(url)) {
+            return "这个项目的 origin 指向 **Maker 平台的仓库**（maker.taptap.cn），" +
+                "不是你的 GitHub 仓库 —— 不能往那儿推。\n\n" +
+                "Maker 工程的代码同步由 App 自动做（构建时），不需要你手动推。\n" +
+                "如果你想给这个项目单独做版本管理：先用「设置 / 查看远端」" +
+                "把地址改成你自己的 GitHub 仓库（例如 https://github.com/你的用户名/仓库.git），再推。"
+        }
+        // 有 HEAD 才能推。一条提交都没有时 git 只会甩一句
+        // 「src refspec HEAD does not match any」，用户看不懂。
+        val head = run(ctx, dir, listOf("rev-parse", "--verify", "HEAD"))
+        if (!head.ok) {
+            return "这个仓库**一次提交都还没有**，没有东西可推。\n\n" +
+                "先「提交全部改动」建第一个提交，再推。"
+        }
+        return null
+    }
+
+    /**
      * 推送到远端。
      *
      * ⚠️ 会把**当前分支**推上去（`push -u origin HEAD`），
      * 第一次推会自动建立 upstream 跟踪，省得用户再配。
+     *
+     * 调用前**必须**先跑 [pushBlocker] —— 往 Maker 平台仓库推只会拿到一句看不懂的报错。
      */
     fun push(ctx: Context, dir: File): Res =
         run(ctx, dir, listOf("push", "-u", "origin", "HEAD"), timeoutMs = 300_000)
