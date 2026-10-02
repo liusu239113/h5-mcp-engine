@@ -272,7 +272,15 @@ class AiClient(private val cfg: ProviderConfig) {
         return last
     }
 
-    /** 历史裁剪：保留首条 system + 最近 historyLimit 条。上下文超长时的第一道闸 */
+    /**
+     * 历史裁剪：保留首条 system + 最近 N 条。**这是最后一道保险，不是常规手段**。
+     *
+     * 常规压缩在 [AgentRunner.compressHistory]：按 token 预算（窗口 75%）折老轮次。
+     * 这里只在**条数**也失控时兜底 —— 正常轮不到它（historyLimit 默认 400）。
+     *
+     * ⚠️ 它按条数硬切，切完可能丢上下文，所以**不能**当主力；
+     * 真正的判据是 token 量，见 TokenBudget。
+     */
     private fun limitHistory(src: List<ChatMsg>): List<ChatMsg> {
         val limit = cfg.historyLimit.coerceAtLeast(4)
         if (src.size <= limit + 1) return src

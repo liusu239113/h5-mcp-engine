@@ -493,9 +493,13 @@ class AgentRunner(
     private fun compressHistory(history: MutableList<ChatMsg>, keepRecent: Int = 12) {
         if (history.size <= keepRecent + 2) return
 
-        val budget = 60_000                       // 整段历史的字符预算
-        val total = history.sumOf { it.text?.length ?: 0 }
-        if (total <= budget) return               // 没超就不动，压缩本身也有代价
+        // ★ 按**真实 token 预算**决定要不要压，而不是按条数 / 固定字符数拍脑袋。
+        //
+        // 旧逻辑是「整段超过 6 万字符就折」—— 那个阈值跟模型能装多少毫无关系：
+        //   · 小窗口模型（32k）早就爆了还没压 → 请求 400；
+        //   · 大窗口模型（200k）被压得过早 → 白丢上下文，模型还得重读一遍文件。
+        // 现在只有**估算 token 超过窗口 75%** 才动手（见 TokenBudget）。
+        if (!TokenBudget.shouldCompress(cfg, history)) return
 
         val cut = (history.size - keepRecent).coerceAtLeast(1)
         var saved = 0

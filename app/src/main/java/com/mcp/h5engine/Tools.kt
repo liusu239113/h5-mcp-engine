@@ -109,6 +109,14 @@ interface GameUi {
     fun openGame(id: String)
     fun reloadGame()
 
+    /**
+     * 当前对话历史的**只读快照**（给 context_budget 工具估 token 用）。
+     *
+     * 返回副本而不是原表：工具在子线程跑，直接拿原表会有并发修改风险。
+     * 默认空实现 —— 测试替身不用管它。
+     */
+    fun contextSnapshot(): List<ChatMsg> = emptyList()
+
     /** 同步执行 JS，返回结果 JSON 字符串。必须从子线程调用 */
     fun runJsSync(code: String, timeoutMs: Int = 6000): String
 
@@ -458,6 +466,13 @@ class EngineTools(private val ui: GameUi, private val root: File) {
                 """{"code":{"type":"string","description":"JS 代码，用 return 返回结果"},
                    "timeoutMs":{"type":"integer","description":"可选，超时毫秒，默认 3000"}}""",
                 listOf("code")),
+
+            fn("context_budget",
+                "【上下文预算】查当前对话用了多少 token、还剩多少、离压缩还有多远。\n" +
+                    "用途：做大项目、感觉「聊太久了」时先看一眼 —— 快满了就主动把\n" +
+                    "阶段性成果写进 DESIGN.md / 代码注释，别等被压缩了才发现细节丢了。\n" +
+                    "压缩是按**模型真实上下文窗口**算的（超过 75% 才压），不是按条数。",
+                "{}", emptyList()),
 
             fn("file_op",
                 "【手机文件】直接读写手机上的文件（**用 App 自己的权限，不需要 Shizuku**）。\n" +
@@ -1026,6 +1041,31 @@ class EngineTools(private val ui: GameUi, private val root: File) {
                         { ToolResult(it.take(4000)) },
                         { ToolResult("脚本出错：${it.message}") }
                     )
+            }
+        }
+
+        "context_budget" -> {
+            // 历史在 AgentRunner 手里，这里通过 GameUi 拿一个只读快照
+            val h = runCatching { ui.contextSnapshot() }.getOrNull()
+            val c = ctxRef
+            if (h == null || c == null) {
+                ToolResult("拿不到当前上下文（可能在测试环境）。")
+            } else {
+                val cfgNow = AiConfigStore(c).toConfig()
+                val win = TokenBudget.window(cfgNow)
+                val used = TokenBudget.estimate(h)
+                val left = (win - used).coerceAtLeast(0)
+                val pct = if (win > 0) used * 100 / win else 0
+                ToolResult(
+                    "上下文预算：\n" +
+                        "  窗口 $win token\n" +
+                        "  已用约 $used（$pct%）\n" +
+                        "  剩余约 $left\n" +
+                        "  消息 ${h.size} 条\n" +
+                        "  压缩阈值 ${(win * TokenBudget.THRESHOLD).toInt()}（超过才压）\n" +
+                        (if (pct >= 70) "\n⚠️ 快满了：把阶段性成果写进 DESIGN.md 或代码注释，" +
+                            "别指望对话记得住。" else "")
+                )
             }
         }
 

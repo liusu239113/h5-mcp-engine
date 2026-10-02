@@ -191,6 +191,18 @@ class AiConfigStore(ctx: Context) {
             sp.edit().putInt("hist_limit", v.coerceIn(4, 2000)).apply()
         }
 
+    /**
+     * 模型上下文窗口（token）。**压缩按它算，不是按条数**。
+     *
+     * 0 = 用默认（128k）。用户换小窗口模型（32k 的中转 / 免费档）时应该调小，
+     * 否则历史会撑爆请求体直接 400；用大窗口模型时可以调大，少压一点、多留上下文。
+     */
+    var contextWindow: Int
+        get() = sp.getInt("ctx_window", 0)
+        set(v) {
+            sp.edit().putInt("ctx_window", v.coerceIn(0, 2_000_000)).apply()
+        }
+
     /** 是否把工具定义发给模型（50+ 个工具 JSON 是 token 大头） */
     var sendTools: Boolean
         get() = sp.getBoolean("send_tools", true)
@@ -324,6 +336,7 @@ class AiConfigStore(ctx: Context) {
             vision = visionFor(p, m),
             maxOutTokens = maxOutTokens,
             historyLimit = historyLimit,
+            contextWindow = contextWindow,
             keepImages = keepImages,
             keepToolResults = keepToolResults,
             slimTools = slimTools,
@@ -347,6 +360,7 @@ class AiConfigStore(ctx: Context) {
             vision = visionFor(p, model),
             maxOutTokens = maxOutTokens,
             historyLimit = historyLimit,
+            contextWindow = contextWindow,
             keepImages = keepImages,
             keepToolResults = keepToolResults,
             slimTools = slimTools,

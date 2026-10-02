@@ -42,6 +42,19 @@ data class ProviderConfig(
     val maxOutTokens: Int = 0,
     /** 历史上限：首条 system + 最近 N 条消息。越小请求越轻 */
     val historyLimit: Int = 40,
+
+    /**
+     * 模型上下文窗口（token）。**压缩按它来算，而不是按条数拍脑袋**。
+     *
+     * 为什么要这个：以前压缩是「按条数裁 + 超过固定字符数就折」——
+     * 那个阈值跟模型真实能装多少没关系：小窗口模型早就爆了还没压，
+     * 大窗口模型被压得过早、白丢上下文。
+     *
+     * 现在改成：估算当前历史 token 数，**超过窗口的 75% 才压**（留 25% 给回复 + 工具定义）。
+     * 0 = 用默认值（[DEFAULT_CONTEXT_WINDOW]）。
+     */
+    val contextWindow: Int = 0,
+
     /**
      * 历史里最多保留几张截图。
      *

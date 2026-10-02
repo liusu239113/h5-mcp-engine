@@ -6406,14 +6406,30 @@ makerRow1.addView(ghostBtnOf(ctx, pal, "扫码登录").apply {
             cfgStore.maxOutTokens.toString(), true
         )
 
+        val ctxWinEt = field(
+            "模型上下文窗口（token，0 = 默认 128k）",
+            cfgStore.contextWindow.toString(), true
+        )
+        col.addView(TextView(ctx).apply {
+            text = "压缩按它算：估算历史 token 超过窗口 75% 时才折老轮次 —— " +
+                "**真实需要时才压**，不会像以前那样按条数瞎压。\n" +
+                "换小窗口模型（32k 的中转 / 免费档）就填小，否则会撑爆请求体报 400；" +
+                "大窗口模型（200k）可以填大，少压一点、多留上下文。\n" +
+                "拿不准就留 0（按 128k 算）。"
+            textSize = 11.5f
+            setTextColor(pal.faint)
+            setPadding(dp(2), dp(4), dp(2), 0)
+        })
+
         val histEt = field(
             "每次请求带上最近多少条消息（越小请求越轻）",
             cfgStore.historyLimit.toString(), true
         )
         col.addView(TextView(ctx).apply {
-            text = "⚠ 别调太小：一轮任务动不动几十轮工具往返，条数不够会把**开头那段**" +
-                "（你最初的需求、定过的方案）挤出去，AI 就表现得像「聊两句就断片」。" +
-                "默认 400；除非模型上下文特别小，不建议低于 100。"
+            text = "⚠ 这是**条数**上的最后保险，正常轮不到它（默认 400）。" +
+                "常规压缩走上面的「上下文窗口」按 token 算。\n" +
+                "别调太小：一轮任务动不动几十轮工具往返，条数不够会把**开头那段**" +
+                "（你最初的需求、定过的方案）挤出去，AI 就表现得像「聊两句就断片」。"
             textSize = 11.5f
             setTextColor(pal.faint)
             setPadding(dp(2), dp(4), dp(2), 0)
@@ -6704,7 +6720,8 @@ makerRow1.addView(ghostBtnOf(ctx, pal, "扫码登录").apply {
                 cfgStore.visionFallback = fbCb.isChecked
                 cfgStore.visionMode = visIds[visSel]
                 cfgStore.maxOutTokens = maxOutEt.text.toString().toIntOrNull() ?: 0
-                cfgStore.historyLimit = histEt.text.toString().toIntOrNull() ?: 40
+                cfgStore.contextWindow = ctxWinEt.text.toString().toIntOrNull() ?: 0
+                cfgStore.historyLimit = histEt.text.toString().toIntOrNull() ?: 400
                 cfgStore.sendTools = sendToolsCb.isChecked
                 cfgStore.keepImages = keepImgEt.text.toString().toIntOrNull() ?: 2
                 cfgStore.keepToolResults = keepTrEt.text.toString().toIntOrNull() ?: 6
@@ -7098,6 +7115,11 @@ makerRow1.addView(ghostBtnOf(ctx, pal, "扫码登录").apply {
     // ==================== GameUi 实现 ====================
 
     override fun currentGameId(): String = currentGame
+
+    /** 给 context_budget 工具用的历史快照（拷贝一份，避免和正在跑的一轮抢同一个表） */
+    override fun contextSnapshot(): List<ChatMsg> = runCatching {
+        synchronized(history) { history.toList() }
+    }.getOrDefault(emptyList())
 
     override fun openGame(id: String) {
         // 切项目时先把「挂起的预览重载」取消掉：
