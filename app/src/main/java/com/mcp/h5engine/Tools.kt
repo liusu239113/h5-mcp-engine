@@ -1106,7 +1106,7 @@ class EngineTools(private val ui: GameUi, private val root: File) {
                         "  剩余约 $left\n" +
                         "  消息 ${h.size} 条\n" +
                         "  压缩阈值 ${(win * TokenBudget.THRESHOLD).toInt()}（超过才压）\n" +
-                        (if (pct >= 70) "\n⚠️ 快满了：把阶段性成果写进 DESIGN.md 或代码注释，" +
+                        (if (pct >= 70) "\n注意：快满了，把阶段性成果写进 DESIGN.md 或代码注释，" +
                             "别指望对话记得住。" else "")
                 )
             }
@@ -1134,7 +1134,7 @@ class EngineTools(private val ui: GameUi, private val root: File) {
                         "读不了：App 没有「所有文件访问」权限。\n" +
                             "让用户去「发布页 → 切换 / 新建项目 → 顶部『授权所有文件访问』」开启，" +
                             "或者用「工作区目录（免 Shizuku）」授权这个目录。\n" +
-                            "⚠️ 别把「看不到文件」当成「目录是空的」—— 那是权限被挡。"
+                            "注意：别把「看不到文件」当成「目录是空的」—— 那是权限被挡。"
                     ) else null
 
                 when (act) {
@@ -1147,7 +1147,7 @@ class EngineTools(private val ui: GameUi, private val root: File) {
                                 "${f.absolutePath} 共 ${fs.size} 项：\n" +
                                     fs.sortedWith(compareByDescending<File> { it.isDirectory }.thenBy { it.name })
                                         .joinToString("\n") { x ->
-                                            (if (x.isDirectory) "📁 " else "📄 ") + x.name +
+                                            (if (x.isDirectory) "[目录] " else "[文件] ") + x.name +
                                                 if (x.isDirectory) "" else "  (${x.length()} B)"
                                         }
                             )
@@ -1208,7 +1208,7 @@ class EngineTools(private val ui: GameUi, private val root: File) {
                         else ToolResult(
                             "工作区「$path」共 ${items.size} 项：\n" +
                                 items.joinToString("\n") { (n, d, sz) ->
-                                    (if (d) "📁 " else "📄 ") + n + if (d) "" else "  ($sz B)"
+                                    (if (d) "[目录] " else "[文件] ") + n + if (d) "" else "  ($sz B)"
                                 }
                         )
                     }
@@ -1508,7 +1508,7 @@ class EngineTools(private val ui: GameUi, private val root: File) {
                     "init", "devkit" -> {
                         runCatching { McpRt.ensureGitrt(c, dir) }
                         if (!gitBin.isFile) {
-                            ToolResult("❌ 自带 git 还没释放（" + gitBin.absolutePath + "）。重启一次 App 会自动释放，然后再让我拉取。")
+                            ToolResult("自带 git 还没释放（" + gitBin.absolutePath + "）。重启一次 App 会自动释放，然后再让我拉取。")
                         } else {
                             val cmd = if (act == "init") {
                                 val id = a.optString("app_id", "").trim()
@@ -1519,7 +1519,7 @@ class EngineTools(private val ui: GameUi, private val root: File) {
                             }
                             val r = MakerCli.run(c, cmd, null, 300_000, proj)
                             ToolResult(
-                                (if (r.ok) "✅ " else "❌ ") + "taptap-maker " + cmd.joinToString(" ") +
+                                (if (r.ok) "[成功] " else "[失败] ") + "taptap-maker " + cmd.joinToString(" ") +
                                     "\n工程：" + proj.absolutePath + "\n\n" + r.output.takeLast(3000)
                             )
                         }
@@ -1681,9 +1681,9 @@ class EngineTools(private val ui: GameUi, private val root: File) {
                     l.contains("exception") || l.contains("traceback")
             }
             if (errs.isEmpty()) {
-                sb.append("✅ 这段时间没有 console 报错\n")
+                sb.append("这段时间没有 console 报错\n")
             } else {
-                sb.append("❌ 有 ${errs.size} 条报错（最后 ${minOf(errs.size, 12)} 条）：\n")
+                sb.append("有 ${errs.size} 条报错（最后 ${minOf(errs.size, 12)} 条）：\n")
                 errs.takeLast(12).forEach { sb.append("  · ").append(it.take(220)).append('\n') }
             }
 
@@ -1707,7 +1707,7 @@ class EngineTools(private val ui: GameUi, private val root: File) {
                     }.getOrNull()?.trim().orEmpty()
                     val ok = r == "true"
                     if (!ok) failed++
-                    sb.append(if (ok) "  ✅ " else "  ❌ ").append(why)
+                    sb.append(if (ok) "  [通过] " else "  [失败] ").append(why)
                     if (!ok) sb.append("  （求值结果 ").append(r.take(80)).append("）")
                     sb.append('\n')
                 }
@@ -1766,7 +1766,7 @@ class EngineTools(private val ui: GameUi, private val root: File) {
                             "  · 是「来回摆」还是「整圈公转」—— 看轨迹是不是闭合的\n" +
                             "  · 动画帧有没有跳、有没有卡住不动\n" +
                             "  · 物理轨迹自不自然（抛物线？匀速？越跑越偏？）\n" +
-                            "⚠️ 别只看最后一帧就下结论 —— 单帧看不出这些。",
+                            "注意：别只看最后一帧就下结论 —— 单帧看不出这些。",
                         listOf(sheet)
                     )
                 }
@@ -1799,7 +1799,7 @@ class EngineTools(private val ui: GameUi, private val root: File) {
             // 但要老实告诉模型它截到了什么，否则它会拿聊天界面当游戏画面自欺欺人。
             val pageHint = when (ui.currentTab()) {
                 1 -> ""
-                0 -> "\n⚠这张图是「对话」页，**不是游戏画面**。" +
+                0 -> "\n注意：这张图是「对话」页，不是游戏画面。" +
                     "要看游戏画面请用 game_shot（离屏抓，不动用户屏幕）；" +
                     "验证逻辑也可用 js_eval / console_logs / engine_status。\n"
                 else -> "\n（这张图是「发布」页，不是游戏画面；要看游戏请用 game_shot）\n"
@@ -1831,13 +1831,13 @@ class EngineTools(private val ui: GameUi, private val root: File) {
                 } else ""
                 val blankWarn = if (ui.lastShotWasBlank()) {
                     val probe = runCatching { ui.runJsSync(SHOT_PROBE_JS, 4000) }.getOrNull().orEmpty()
-                    "\n⚠ 这次截出来的图疑似**空白 / 纯色**。两种常见原因：①画面是 WebGL / canvas / " +
+                    "\n注意：这次截出来的图疑似空白 / 纯色。两种常见原因：①画面是 WebGL / canvas / " +
                         "视频这类硬件加速内容，像素没抓到；②页面确实还没渲染完。\n" +
                         "**不要**因此断定「引擎没加载 / 画面没渲染 / Three.js 不存在」——这多半是误判。" +
                         "先看下面的页面自检结果，或用 js_eval 核对真实状态，或等 1-2 秒再截一次。\n" +
                         "页面自检：$probe"
                 } else if (img.size < 3 * 1024) {
-                    " ⚠ 这张图只有 ${img.size} 字节，可能是纯色页（真有问题先看 console_logs）。"
+                    " 这张图只有 ${img.size} 字节，可能是纯色页（真有问题先看 console_logs）。"
                 } else ""
                 ToolResult(
                     "截图完成（整屏），${kb} KB（${img.size} 字节）。$map\n" +

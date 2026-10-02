@@ -1,6 +1,5 @@
 package com.mcp.h5engine
 
-import android.app.AlertDialog
 import android.app.Dialog
 import android.content.Context
 import android.graphics.Typeface
@@ -91,14 +90,11 @@ class FileBrowser(
             setTextIsSelectable(true)
         }
         head.addView(pathTv, LinearLayout.LayoutParams(0, -2, 1f))
-        head.addView(TextView(ctx).apply {
-            text = "✕"
-            textSize = 17f
-            setTextColor(pal.sub)
+        head.addView(iconView(ctx, pal, "close", 17, pal.sub).apply {
             setPadding(dp(10), dp(4), dp(4), dp(4))
             isClickable = true
             setOnClickListener { dlg?.dismiss() }
-        })
+        }, LinearLayout.LayoutParams(dp(31), dp(25)))
         root.addView(head, LinearLayout.LayoutParams(-1, -2))
 
         // ---- 权限提示条 ----
@@ -132,7 +128,10 @@ class FileBrowser(
             LinearLayout.LayoutParams(-1, 0, 1f)
         )
 
-        val d = Dialog(ctx, android.R.style.Theme_Material_Light_NoActionBar)
+        // 深色模式必须用深色宿主主题，否则会弹出一个刺眼的白底窗口
+        val hostTheme = if (pal.dark) android.R.style.Theme_Material_NoActionBar
+        else android.R.style.Theme_Material_Light_NoActionBar
+        val d = Dialog(ctx, hostTheme)
         d.setContentView(root)
         dlg = d
         d.show()
@@ -241,10 +240,10 @@ class FileBrowser(
             gravity = Gravity.CENTER_VERTICAL
             setPadding(dp(6), dp(11), dp(6), dp(11))
         }
-        row.addView(TextView(ctx).apply {
-            text = if (e.dir) "📁" else "📄"
-            textSize = 15f
-        }, LinearLayout.LayoutParams(-2, -2).apply { rightMargin = dp(9) })
+        row.addView(
+            iconView(ctx, pal, if (e.dir) "folder" else "doc", 16, if (e.dir) pal.accent else pal.sub),
+            LinearLayout.LayoutParams(dp(18), dp(18)).apply { rightMargin = dp(9) }
+        )
 
         val col = LinearLayout(ctx).apply { orientation = LinearLayout.VERTICAL }
         col.addView(TextView(ctx).apply {
@@ -292,14 +291,13 @@ class FileBrowser(
     }
 
     private fun jumpTo() {
-        val et = EditText(ctx).apply {
-            setText(cur.absolutePath)
+        val et = hxInput(ctx, pal, "路径", cur.absolutePath).apply {
             inputType = InputType.TYPE_TEXT_VARIATION_URI
         }
-        AlertDialog.Builder(ctx)
+        HxDialog.Builder(ctx, pal)
             .setTitle("跳到路径")
             .setView(et)
-            .setPositiveButton("去") { _, _ ->
+            .setPositiveButton("去") { ->
                 val f = File(et.text.toString().trim())
                 if (f.isDirectory) { cur = f; render() } else toast("不是目录")
             }
@@ -308,11 +306,11 @@ class FileBrowser(
     }
 
     private fun mkdir() {
-        val et = EditText(ctx).apply { hint = "文件夹名" }
-        AlertDialog.Builder(ctx)
+        val et = hxInput(ctx, pal, "文件夹名")
+        HxDialog.Builder(ctx, pal)
             .setTitle("在 ${cur.name} 下新建文件夹")
             .setView(et)
-            .setPositiveButton("建") { _, _ ->
+            .setPositiveButton("建") { ->
                 val n = et.text.toString().trim()
                 if (n.isBlank()) return@setPositiveButton
                 val f = File(cur, n)
@@ -331,9 +329,9 @@ class FileBrowser(
     /** 长按：重命名 / 删除 */
     private fun menuFor(e: Entry) {
         val items = arrayOf("重命名", "删除")
-        AlertDialog.Builder(ctx)
+        HxDialog.Builder(ctx, pal)
             .setTitle(e.name)
-            .setItems(items) { _, i ->
+            .setItems(items) { i ->
                 when (i) {
                     0 -> rename(e)
                     1 -> confirmDelete(e)
@@ -343,11 +341,11 @@ class FileBrowser(
     }
 
     private fun rename(e: Entry) {
-        val et = EditText(ctx).apply { setText(e.name) }
-        AlertDialog.Builder(ctx)
+        val et = hxInput(ctx, pal, "新名字", e.name)
+        HxDialog.Builder(ctx, pal)
             .setTitle("重命名")
             .setView(et)
-            .setPositiveButton("改") { _, _ ->
+            .setPositiveButton("改") { ->
                 val n = et.text.toString().trim()
                 if (n.isBlank() || n == e.name) return@setPositiveButton
                 val dst = File(cur, n).absolutePath
@@ -365,10 +363,10 @@ class FileBrowser(
     }
 
     private fun confirmDelete(e: Entry) {
-        AlertDialog.Builder(ctx)
+        HxDialog.Builder(ctx, pal)
             .setTitle("删除 ${e.name}？")
             .setMessage("删了不可恢复。")
-            .setPositiveButton("删除") { _, _ ->
+            .setPositiveButton("删除") { ->
                 val ok = if (elevated) {
                     Shizuku2.sh("rm -rf ${Shizuku2.shellQuote(e.path)}").first == 0
                 } else {
@@ -387,7 +385,7 @@ class FileBrowser(
         val text = e.name.substringAfterLast('.', "").lowercase() in
             setOf("txt", "md", "json", "js", "ts", "html", "htm", "css", "lua", "xml", "yml", "yaml", "csv", "log", "ini", "cfg")
         if (!text) {
-            AlertDialog.Builder(ctx)
+            HxDialog.Builder(ctx, pal)
                 .setTitle(e.name)
                 .setMessage("${humanSize(e.size)}\n${e.path}")
                 .setPositiveButton("好", null)
@@ -401,14 +399,14 @@ class FileBrowser(
             runCatching { f.readText().take(200_000) }.getOrNull()
         }
         if (content == null) {
-            AlertDialog.Builder(ctx)
+            HxDialog.Builder(ctx, pal)
                 .setTitle(e.name)
                 .setMessage("读不到内容。\n\n" + if (elevated) "可能不是文本文件。" else "去开 Shizuku 才能读这个位置的文件。")
                 .setPositiveButton("好", null)
                 .show()
             return
         }
-        AlertDialog.Builder(ctx)
+        HxDialog.Builder(ctx, pal)
             .setTitle(e.name)
             .setMessage(content.take(20_000))
             .setPositiveButton("好", null)

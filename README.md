@@ -67,9 +67,16 @@ H5McpEngine/
 
 ```bash
 cd /sdcard/AndroidIDEProjects/H5McpEngine
-./gradlew :app:assembleDebug
+gradle :app:assembleDebug        # 本机装了 Gradle 时
 # 产物：app/build/outputs/apk/debug/app-debug.apk
 ```
+
+> ⚠️ 仓库里**没有 gradle wrapper**（`gradlew` / `gradle/wrapper/` 都没提交），
+> 所以 `./gradlew` 跑不起来。要么本机装 Gradle 8.2+，要么直接用 CI。
+
+**推荐：走 CI 构建。** 推到 `main` 后 GitHub Actions 会自动构建、发 Release，
+产物直链形如 `https://github.com/liusu239113/h5-mcp-engine/releases/download/v<版本>/Hexora-v<版本>.apk`
+（公开可下，不用登录）。Actions 里的 artifact 也在，但下载需要登录，手机不方便。
 
 环境要求：JDK 17、Android SDK 34、AGP 8.2.2、Gradle 8.2。
 

@@ -367,6 +367,163 @@ class LineIcon(
                 path.close()
                 path.addCircle(12f, 13.6f, 3.2f, Path.Direction.CW)
             }
+            // 齿轮：设置入口（替代 ⚙）
+            "gear" -> {
+                path.addCircle(12f, 12f, 3.3f, Path.Direction.CW)
+                for (i in 0 until 8) {
+                    val a = Math.toRadians((i * 45).toDouble())
+                    val c = Math.cos(a).toFloat()
+                    val s = Math.sin(a).toFloat()
+                    path.moveTo(12f + c * 5.6f, 12f + s * 5.6f)
+                    path.lineTo(12f + c * 8.3f, 12f + s * 8.3f)
+                }
+            }
+            // 音符：音频素材（替代 🎵）
+            "music" -> {
+                path.moveTo(9.2f, 17.6f)
+                path.lineTo(9.2f, 7.4f)
+                path.lineTo(18.2f, 5.4f)
+                path.lineTo(18.2f, 15.6f)
+                path.addCircle(6.9f, 17.9f, 2.4f, Path.Direction.CW)
+                path.addCircle(15.9f, 15.9f, 2.4f, Path.Direction.CW)
+            }
+            // 对勾：成功状态（替代 ✓ / ✅）
+            "check" -> {
+                path.moveTo(5f, 12.6f)
+                path.lineTo(9.9f, 17.5f)
+                path.lineTo(19f, 6.9f)
+            }
+            // 叉：失败 / 关闭（替代 ✕ / ❌）
+            "close" -> {
+                path.moveTo(6.2f, 6.2f)
+                path.lineTo(17.8f, 17.8f)
+                path.moveTo(17.8f, 6.2f)
+                path.lineTo(6.2f, 17.8f)
+            }
+            // 拼图：子任务（替代 🧩）
+            "puzzle" -> {
+                path.moveTo(5f, 9.2f)
+                path.lineTo(9.2f, 9.2f)
+                path.lineTo(9.2f, 5.4f)
+                path.lineTo(14.8f, 5.4f)
+                path.lineTo(14.8f, 9.2f)
+                path.lineTo(19f, 9.2f)
+                path.lineTo(19f, 14.8f)
+                path.lineTo(14.8f, 14.8f)
+                path.lineTo(14.8f, 18.6f)
+                path.lineTo(9.2f, 18.6f)
+                path.lineTo(9.2f, 14.8f)
+                path.lineTo(5f, 14.8f)
+                path.close()
+            }
+            // 播放三角
+            "play" -> {
+                path.moveTo(8f, 5.6f)
+                path.lineTo(19f, 12f)
+                path.lineTo(8f, 18.4f)
+                path.close()
+            }
+            // 停止方块
+            "stop" -> {
+                path.moveTo(7f, 7f)
+                path.lineTo(17f, 7f)
+                path.lineTo(17f, 17f)
+                path.lineTo(7f, 17f)
+                path.close()
+            }
+            // 垃圾桶：删除
+            "trash" -> {
+                path.moveTo(4.6f, 7f)
+                path.lineTo(19.4f, 7f)
+                path.moveTo(9.5f, 7f)
+                path.lineTo(9.5f, 4.8f)
+                path.lineTo(14.5f, 4.8f)
+                path.lineTo(14.5f, 7f)
+                path.moveTo(6.6f, 7f)
+                path.lineTo(7.7f, 19.4f)
+                path.lineTo(16.3f, 19.4f)
+                path.lineTo(17.4f, 7f)
+                path.moveTo(10.4f, 10.4f)
+                path.lineTo(10.4f, 16.4f)
+                path.moveTo(13.6f, 10.4f)
+                path.lineTo(13.6f, 16.4f)
+            }
+            // 铅笔：编辑
+            "edit" -> {
+                path.moveTo(4.8f, 19.2f)
+                path.lineTo(5.6f, 15.1f)
+                path.lineTo(15.9f, 4.8f)
+                path.lineTo(19.2f, 8.1f)
+                path.lineTo(8.9f, 18.4f)
+                path.close()
+                path.moveTo(14.2f, 6.5f)
+                path.lineTo(17.5f, 9.8f)
+            }
+            // 纸飞机：发送
+            "send" -> {
+                path.moveTo(4.4f, 12f)
+                path.lineTo(19.6f, 4.8f)
+                path.lineTo(14.9f, 19.2f)
+                path.lineTo(11.5f, 13.3f)
+                path.close()
+                path.moveTo(11.5f, 13.3f)
+                path.lineTo(19.6f, 4.8f)
+            }
+            // 五角星：默认配置标记
+            "star" -> {
+                val cx = 12f
+                val cy = 12.4f
+                for (i in 0 until 10) {
+                    val r = if (i % 2 == 0) 8.2f else 3.5f
+                    val a = Math.toRadians((-90 + i * 36).toDouble())
+                    val x = cx + (Math.cos(a) * r).toFloat()
+                    val y = cy + (Math.sin(a) * r).toFloat()
+                    if (i == 0) path.moveTo(x, y) else path.lineTo(x, y)
+                }
+                path.close()
+            }
+            // 盾牌 + 勾：授权 / 已就绪
+            "shield" -> {
+                path.moveTo(12f, 3.6f)
+                path.lineTo(19.4f, 6.6f)
+                path.lineTo(19.4f, 12f)
+                path.quadTo(19.4f, 18f, 12f, 20.6f)
+                path.quadTo(4.6f, 18f, 4.6f, 12f)
+                path.lineTo(4.6f, 6.6f)
+                path.close()
+                path.moveTo(8.8f, 11.9f)
+                path.lineTo(11.2f, 14.3f)
+                path.lineTo(15.4f, 9.5f)
+            }
+            // 钥匙：密钥 / 凭据
+            "key" -> {
+                path.addCircle(8.2f, 12f, 3.6f, Path.Direction.CW)
+                path.moveTo(11.5f, 12f)
+                path.lineTo(20f, 12f)
+                path.moveTo(17.4f, 12f)
+                path.lineTo(17.4f, 15.2f)
+                path.moveTo(20f, 12f)
+                path.lineTo(20f, 14.6f)
+            }
+            // 机器人：AI
+            "robot" -> {
+                path.moveTo(5f, 9.6f)
+                path.lineTo(19f, 9.6f)
+                path.lineTo(19f, 18.6f)
+                path.lineTo(5f, 18.6f)
+                path.close()
+                path.moveTo(12f, 9.6f)
+                path.lineTo(12f, 6.6f)
+                path.addCircle(12f, 5.4f, 1.2f, Path.Direction.CW)
+                path.addCircle(9.4f, 14.1f, 1.1f, Path.Direction.CW)
+                path.addCircle(14.6f, 14.1f, 1.1f, Path.Direction.CW)
+            }
+            // 右尖角：列表项尾部箭头（替代 ❯ 文本）
+            "chevron" -> {
+                path.moveTo(9.6f, 5.6f)
+                path.lineTo(16f, 12f)
+                path.lineTo(9.6f, 18.4f)
+            }
         }
         canvas.drawPath(path, p)
         canvas.restore()
@@ -383,6 +540,23 @@ class LineIcon(
     @Deprecated("Deprecated in Java")
     override fun getOpacity(): Int = PixelFormat.TRANSLUCENT
 }
+
+/**
+ * 小图标 ImageView —— 用来**替代 emoji TextView**。
+ *
+ * 界面上原来散着一批 `text = "🎵"` / `"📁"` / `"✓"` 这类写法：
+ * emoji 的字形由系统字体决定，跟主题色脱节、深色模式下还会发彩，
+ * 跟这套「单色线稿」的视觉口径冲突。换成 LineIcon 现描即可统一。
+ *
+ * @param sizeDp 图标本体尺寸（dp），内部已按 24 单位网格等比缩放
+ */
+fun iconView(ctx: Context, p: Palette, kind: String, sizeDp: Int, color: Int? = null): ImageView =
+    ImageView(ctx).apply {
+        setImageDrawable(LineIcon(kind, color ?: p.sub, 1.8f))
+        // LineIcon 没实现 getIntrinsicWidth，ImageView 会按 0 处理 WRAP_CONTENT ——
+        // 所以这里必须自带一个「有尺寸」的 LayoutParams，调用方不传也不会缩没。
+        layoutParams = LinearLayout.LayoutParams(ctx.dp(sizeDp), ctx.dp(sizeDp))
+    }
 
 /** 图标按钮：38dp 方，带发丝描边和按下反馈 */
 fun iconButton(

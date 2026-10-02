@@ -48,7 +48,6 @@ import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.appcompat.view.ContextThemeWrapper
 import androidx.core.content.FileProvider
@@ -339,7 +338,7 @@ class MainActivity : AppCompatActivity(), GameUi {
     /** 顶栏左上角「项目」入口 */
     private lateinit var projBtn: TextView
 
-    private var projectDlg: AlertDialog? = null
+    private var projectDlg: HxDialog? = null
     private var rootInited = false
 
     // ---------- 运行状态可视化：折叠思考面板 + 计时 ----------
@@ -370,12 +369,12 @@ class MainActivity : AppCompatActivity(), GameUi {
     private val toolVerbCount = LinkedHashMap<String, Int>()
     /** 正在跑的那一行（TOOLRUN 先插行，TOOL/TOOLFAIL 回来再把它定型） */
     private var pendingRow: LinearLayout? = null
-    private var pendingStatus: TextView? = null
+    private var pendingStatus: ImageView? = null
     private var pendingSummary: TextView? = null
     /** 运行中的转圈动画 + 它落脚的两个视图（转圈 ↔ ✓/✕ 在同一个槽位里换） */
     private var pendingSpin: ObjectAnimator? = null
     private var pendingSpinView: ImageView? = null
-    private var pendingMarkView: TextView? = null
+    private var pendingMarkView: ImageView? = null
     /** 组头文案节流：只在字符串真的变了才 setText */
     private var lastWorkStat = ""
     /** 流式文字预览（runBar 第二行）上一次画的内容，避免重复 setText */
@@ -702,13 +701,20 @@ class MainActivity : AppCompatActivity(), GameUi {
             background = roundCard(this@MainActivity, pal.cardAlt, pal.groupBorder, 6)
         }
 
-        val settings = TextView(this).apply {
-            text = "⚙ 设置"
-            textSize = 12.5f
-            letterSpacing = 0.06f
-            setTextColor(pal.sub)
-            setPadding(dp(14), dp(7), dp(14), dp(7))
+        val settings = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(12), dp(6), dp(13), dp(6))
             background = pressable(roundCard(this@MainActivity, pal.cardAlt, pal.border, 10), 0x14000000)
+            isClickable = true
+            addView(iconView(this@MainActivity, pal, "gear", 15, pal.sub),
+                LinearLayout.LayoutParams(dp(17), dp(17)).apply { rightMargin = dp(5) })
+            addView(TextView(this@MainActivity).apply {
+                text = "设置"
+                textSize = 12.5f
+                letterSpacing = 0.06f
+                setTextColor(pal.sub)
+            })
             setOnClickListener { showSettings() }
         }
 
@@ -946,22 +952,22 @@ class MainActivity : AppCompatActivity(), GameUi {
     private fun askWorkspace() {
         val cur = cfgStore.workspaceUri
         if (cur.isBlank()) {
-            AlertDialog.Builder(themed())
+            HxDialog.Builder(themed(), pal)
                 .setTitle("设置工作区目录")
                 .setMessage(
                     "选一个目录（比如 /sdcard/A代码库），之后 AI 就能直接读写它 —— " +
                         "**不需要 Shizuku，也不需要任何特殊权限**。\n\n" +
                         "这是「免 Shizuku 读写文件」的正路：你授权哪个目录，它就能动哪个目录。"
                 )
-                .setPositiveButton("去选目录") { _, _ -> askWorkspaceDir() }
+                .setPositiveButton("去选目录") { -> askWorkspaceDir() }
                 .setNegativeButton("取消", null)
                 .show()
         } else {
-            AlertDialog.Builder(themed())
+            HxDialog.Builder(themed(), pal)
                 .setTitle("工作区目录")
                 .setMessage(safSubtitle())
-                .setPositiveButton("换一个") { _, _ -> askWorkspaceDir() }
-                .setNeutralButton("清除") { _, _ ->
+                .setPositiveButton("换一个") { -> askWorkspaceDir() }
+                .setNeutralButton("清除") { ->
                     cfgStore.workspaceUri = ""
                     refreshSafRow()
                     toast("已清除")
@@ -1180,11 +1186,8 @@ class MainActivity : AppCompatActivity(), GameUi {
                     setPadding(0, dp(2), 0, 0)
                 })
             }, LinearLayout.LayoutParams(0, -2, 1f).apply { leftMargin = dp(2) })
-            addView(TextView(this@MainActivity).apply {
-                text = "❯"
-                textSize = 13f
-                setTextColor(pal.faint)
-            })
+            addView(iconView(this@MainActivity, pal, "chevron", 13, pal.faint),
+                LinearLayout.LayoutParams(dp(15), dp(15)))
             setOnClickListener { openWorkspace(wsTab) }
         }, LinearLayout.LayoutParams(-1, -2))
         page.addView(toolRow)
@@ -1232,15 +1235,11 @@ class MainActivity : AppCompatActivity(), GameUi {
         }
         box.addView(attachInfo)
 
-        inputEt = EditText(this).apply {
-            hint = "说出你想做的游戏，或问 AI 现在的画面哪里不对…"
-            textSize = 14f
-            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE
+        inputEt = hxInput(this, pal, "说出你想做的游戏，或问 AI 现在的画面哪里不对…", multiLine = true).apply {
             minLines = 1
             maxLines = 5
-            setTextColor(pal.text)
-            setHintTextColor(pal.faint)
-            setPadding(dp(12), dp(10), dp(12), dp(10))
+            // 输入框比普通弹窗输入更「厚」一点，圆角也大一档，跟底部这块大留白相称
+            setPadding(dp(14), dp(11), dp(14), dp(11))
             background = roundCard(this@MainActivity, pal.card, pal.border, 14)
         }
         // 待发送队列：贴在输入框上方，没有待发消息时整个隐藏
@@ -1256,11 +1255,11 @@ class MainActivity : AppCompatActivity(), GameUi {
 
         val attachBtn = chipOf(this, pal, "＋ 附件", false).apply {
             setOnClickListener {
-                AlertDialog.Builder(themed())
+                HxDialog.Builder(themed(), pal)
                     .setTitle("添加附件")
                     .setItems(
                         arrayOf("素材（图 / 音频 / 视频，可多选）", "文档（txt / md / json / zip / docx…）", "当前游戏画面")
-                    ) { _, i ->
+                    ) { i ->
                         when (i) {
                             0 -> pickMedia("media")
                             1 -> pickMedia("doc")
@@ -1486,9 +1485,9 @@ class MainActivity : AppCompatActivity(), GameUi {
 
     /** 一段里有多个链接时，让用户挑一个复制 */
     private fun pickLink(links: List<String>) {
-        AlertDialog.Builder(themed())
+        HxDialog.Builder(themed(), pal)
             .setTitle("选择要复制的链接")
-            .setItems(links.map { if (it.length > 64) it.take(64) + "…" else it }.toTypedArray()) { _, i ->
+            .setItems(links.map { if (it.length > 64) it.take(64) + "…" else it }.toTypedArray()) { i ->
                 copyToClip(links[i])
             }
             .setNegativeButton("取消", null)
@@ -1536,14 +1535,14 @@ class MainActivity : AppCompatActivity(), GameUi {
             main.post {
                 when (st) {
                     "done" -> {
-                        authCardTv?.text = "✅ 授权成功，可以生成素材了"
+                        authCardTv?.text = "授权成功，可以生成素材了"
                         authCardTv = null
                         authBusy = false
-                        addSystemLine("✅ TapTap Maker 授权成功。现在直接说「生一张图」就行。")
+                        addSystemLine("TapTap Maker 授权成功。现在直接说「生一张图」就行。")
                         toast("Maker 授权成功")
                     }
                     "failed" -> {
-                        authCardTv?.text = "❌ 没成功：" + MakerAuth.lastError.replace("\n", " ").take(120)
+                        authCardTv?.text = "没成功：" + MakerAuth.lastError.replace("\n", " ").take(120)
                         authBusy = false
                     }
                 }
@@ -1668,17 +1667,24 @@ class MainActivity : AppCompatActivity(), GameUi {
                 setImageBitmap(decodeThumb(f, 900))
             }, LinearLayout.LayoutParams(-1, -2))
         } else {
-            card.addView(TextView(this).apply {
-                text = "🎵"
-                textSize = 30f
-                gravity = Gravity.CENTER
-            })
+            // 尺寸必须给死：LineIcon 没实现 intrinsic size，WRAP_CONTENT 会缩成 0
+            card.addView(iconView(this, pal, "music", 34, pal.accent),
+                LinearLayout.LayoutParams(dp(38), dp(38)).apply {
+                    gravity = Gravity.CENTER_HORIZONTAL
+                    topMargin = dp(8)
+                })
         }
-        card.addView(TextView(this).apply {
-            text = (if (isImg) "🖼 " else "🎵 ") + f.name + " · " + (f.length() / 1024) + " KB"
-            textSize = 11.5f
-            setTextColor(pal.sub)
+        card.addView(LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
             setPadding(0, dp(6), 0, 0)
+            addView(iconView(this@MainActivity, pal, if (isImg) "image" else "music", 12, pal.sub),
+                LinearLayout.LayoutParams(dp(13), dp(13)).apply { rightMargin = dp(5) })
+            addView(TextView(this@MainActivity).apply {
+                text = "${f.name} · ${f.length() / 1024} KB"
+                textSize = 11.5f
+                setTextColor(pal.sub)
+            })
         })
         card.addView(TextView(this).apply {
             text = if (isImg) "点一下看大图 · 长按保存到本地" else "点一下试听 · 长按保存到本地"
@@ -1831,11 +1837,10 @@ class MainActivity : AppCompatActivity(), GameUi {
         val spin = ImageView(this).apply {
             setImageDrawable(LineIcon("refresh", pal.accent, dp(11).toFloat()))
         }
-        val mark = TextView(this).apply {
-            text = "●"
-            textSize = 9f
-            setTextColor(pal.accent)
-            gravity = Gravity.CENTER
+        // 状态槽：转圈 → 线稿对勾 / 叉。用 ImageView 而不是文字，
+        // 这样「✓ / ✕」也是同一支笔画的线稿，跟全 App 的图标口径一致。
+        val mark = ImageView(this).apply {
+            setImageDrawable(LineIcon("check", TOOL_OK, 2.4f))
             visibility = View.GONE
         }
         // 固定尺寸的槽位：转圈和 ✓/✕ 互相切换时，行的宽度不会被撑得跳一下
@@ -1930,8 +1935,7 @@ class MainActivity : AppCompatActivity(), GameUi {
         mark?.let { if (it.visibility != View.VISIBLE) it.visibility = View.VISIBLE }
 
         st?.let {
-            setTextIf(it, if (ok) "✓" else "✕")
-            it.setTextColor(if (ok) TOOL_OK else TOOL_FAIL)
+            it.setImageDrawable(LineIcon(if (ok) "check" else "close", if (ok) TOOL_OK else TOOL_FAIL, 2.4f))
         }
         sm?.let {
             setTextIf(it, summary)
@@ -2030,11 +2034,8 @@ class MainActivity : AppCompatActivity(), GameUi {
             setPadding(0, dp(4), 0, dp(4))
             isClickable = true
         }
-        row.addView(TextView(this).apply {
-            setText("✎")
-            textSize = 11f
-            setTextColor(pal.accent)
-        }, LinearLayout.LayoutParams(-2, -2).apply { rightMargin = dp(7) })
+        row.addView(iconView(this, pal, "edit", 12, pal.accent),
+            LinearLayout.LayoutParams(dp(13), dp(13)).apply { rightMargin = dp(7) })
         row.addView(TextView(this).apply {
             setText(oneLine)
             textSize = 11.5f
@@ -2075,19 +2076,12 @@ class MainActivity : AppCompatActivity(), GameUi {
         }
         // 状态图标只在「工具结果」这种真被执行过的东西上出现
         if (withStatus) {
-            head.addView(TextView(this).apply {
-                setText(if (ok) "✓" else "✕")
-                textSize = 16f
-                setTextColor(if (ok) TOOL_OK else TOOL_FAIL)
-                typeface = Typeface.DEFAULT_BOLD
-            }, LinearLayout.LayoutParams(-2, -2).apply { rightMargin = dp(10) })
+            head.addView(iconView(this, pal, if (ok) "check" else "close", 17, if (ok) TOOL_OK else TOOL_FAIL),
+                LinearLayout.LayoutParams(dp(18), dp(18)).apply { rightMargin = dp(10) })
         } else {
             // 过程自述用一个中性标记，别让它看着像「某个工具的结果」
-            head.addView(TextView(this).apply {
-                setText("✎")
-                textSize = 15f
-                setTextColor(pal.accent)
-            }, LinearLayout.LayoutParams(-2, -2).apply { rightMargin = dp(10) })
+            head.addView(iconView(this, pal, "edit", 16, pal.accent),
+                LinearLayout.LayoutParams(dp(17), dp(17)).apply { rightMargin = dp(10) })
         }
         head.addView(TextView(this).apply {
             setText(
@@ -2119,7 +2113,7 @@ class MainActivity : AppCompatActivity(), GameUi {
         // 内容短就贴着内容收起来。以前固定 300dp，短内容底下留一大片空白，
         // 看着像「没加载出来」（用户截的图就是这样）。
         root.addView(sv, LinearLayout.LayoutParams(-1, if (content.length > 700) dp(320) else -2))
-        AlertDialog.Builder(themed())
+        HxDialog.Builder(themed(), pal)
             .setView(root)
             .setPositiveButton("关闭", null)
             .show()
@@ -2995,25 +2989,16 @@ class MainActivity : AppCompatActivity(), GameUi {
                 layoutParams = LinearLayout.LayoutParams(0, -2, 1f)
                 setOnClickListener { editQueued(idx) }
             })
-            r.addView(TextView(this).apply {
-                text = "▶"
-                textSize = 14f
-                setTextColor(pal.sub)
-                setPadding(dp(8), dp(4), dp(8), dp(4))
+            r.addView(iconView(this, pal, "play", 14, pal.sub).apply {
+                setPadding(dp(7), dp(4), dp(7), dp(4))
                 setOnClickListener { sendQueuedNow(idx) }
-            })
-            r.addView(TextView(this).apply {
-                text = "✎"
-                textSize = 14f
-                setTextColor(pal.sub)
-                setPadding(dp(8), dp(4), dp(8), dp(4))
+            }, LinearLayout.LayoutParams(dp(29), dp(24)))
+            r.addView(iconView(this, pal, "edit", 14, pal.sub).apply {
+                setPadding(dp(7), dp(4), dp(7), dp(4))
                 setOnClickListener { editQueued(idx) }
-            })
-            r.addView(TextView(this).apply {
-                text = "✕"
-                textSize = 14f
-                setTextColor(pal.errText)
-                setPadding(dp(8), dp(4), dp(2), dp(4))
+            }, LinearLayout.LayoutParams(dp(29), dp(24)))
+            r.addView(iconView(this, pal, "close", 14, pal.errText).apply {
+                setPadding(dp(7), dp(4), dp(2), dp(4))
                 setOnClickListener {
                     if (idx in msgQueue.indices) msgQueue.removeAt(idx)
                     renderQueue()
@@ -3026,22 +3011,19 @@ class MainActivity : AppCompatActivity(), GameUi {
     /** 编辑队列里的某一条（改完仍留在队列里，不会顺手发出去） */
     private fun editQueued(i: Int) {
         if (i !in msgQueue.indices) return
-        val et = EditText(this).apply {
-            setText(msgQueue[i])
+        val et = hxInput(this, pal, "消息内容", msgQueue[i], multiLine = true).apply {
             setSelection(text.length)
             minLines = 2
             maxLines = 6
-            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE
-            setPadding(dp(14), dp(10), dp(14), dp(10))
         }
         val wrap = FrameLayout(this).apply {
             setPadding(dp(14), dp(6), dp(14), 0)
             addView(et)
         }
-        AlertDialog.Builder(themed())
+        HxDialog.Builder(themed(), pal)
             .setTitle("编辑待发送消息")
             .setView(wrap)
-            .setPositiveButton("保存") { _, _ ->
+            .setPositiveButton("保存") { ->
                 val t = et.text.toString().trim()
                 if (t.isNotEmpty() && i in msgQueue.indices) {
                     msgQueue[i] = t
@@ -3297,19 +3279,18 @@ class MainActivity : AppCompatActivity(), GameUi {
         val labels = sessions.mapIndexed { i, s ->
             (if (i == activeSession) "当前 · " else "") + s.title + "（${s.msgs.size} 条）"
         }.toTypedArray()
-        AlertDialog.Builder(themed())
+        HxDialog.Builder(themed(), pal)
             .setTitle("会话（${sessions.size}）")
-            .setItems(labels) { _, i -> switchTo(i) }
-            .setPositiveButton("＋新对话") { _, _ -> newChat() }
-            .setNeutralButton("重命名") { _, _ ->
-                val et = EditText(this).apply {
-                    setText(sessions[activeSession].title)
+            .setItems(labels) { i -> switchTo(i) }
+            .setPositiveButton("＋新对话") { -> newChat() }
+            .setNeutralButton("重命名") { ->
+                val et = hxInput(this, pal, "会话名", sessions[activeSession].title).apply {
                     setSelection(text.length)
                 }
-                AlertDialog.Builder(themed())
+                HxDialog.Builder(themed(), pal)
                     .setTitle("重命名会话")
                     .setView(et)
-                    .setPositiveButton("好") { _, _ ->
+                    .setPositiveButton("好") { ->
                         sessions[activeSession].title = et.text.toString().take(24)
                         updateSessionBtn()
                         persistSessions()
@@ -3317,7 +3298,7 @@ class MainActivity : AppCompatActivity(), GameUi {
                     .setNegativeButton("取消", null)
                     .show()
             }
-            .setNegativeButton("删除当前") { _, _ -> deleteSession(activeSession) }
+            .setNegativeButton("删除当前") { -> deleteSession(activeSession) }
             .show()
     }
 
@@ -3634,7 +3615,7 @@ class MainActivity : AppCompatActivity(), GameUi {
                     )
                     col.addView(row, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(6) })
                 }
-                AlertDialog.Builder(themed())
+                HxDialog.Builder(themed(), pal)
                     .setTitle("$currentGame · 文件（${files.size}）")
                     .setView(ScrollView(this).apply { addView(col) })
                     .setNegativeButton("关闭", null)
@@ -3672,25 +3653,22 @@ class MainActivity : AppCompatActivity(), GameUi {
 
     private fun openFileEditor(f: File, base: File) {
         val body = runCatching { f.readText() }.getOrDefault("")
-        val et = EditText(this).apply {
-            setText(body)
+        val et = hxInput(this, pal, "文件内容", body, multiLine = true).apply {
             textSize = 12.5f
-            typeface = android.graphics.Typeface.MONOSPACE
-            setTextColor(pal.text)
+            typeface = MONOSPACE
             gravity = Gravity.TOP or Gravity.START
-            setPadding(dp(10), dp(10), dp(10), dp(10))
         }
-        AlertDialog.Builder(themed())
+        HxDialog.Builder(themed(), pal)
             .setTitle(f.relativeTo(base).path)
             .setView(ScrollView(this).apply { addView(et) })
-            .setPositiveButton("保存") { _, _ ->
+            .setPositiveButton("保存") { ->
                 runCatching {
                     f.writeText(et.text.toString())
                     reloadGame()
                     toast("已保存并热重载")
                 }.onFailure { toast("保存失败：${it.message}") }
             }
-            .setNeutralButton("复制全文") { _, _ -> copyToClipboard(et.text.toString()) }
+            .setNeutralButton("复制全文") { -> copyToClipboard(et.text.toString()) }
             .setNegativeButton("关闭", null)
             .show()
     }
@@ -3736,9 +3714,9 @@ class MainActivity : AppCompatActivity(), GameUi {
                 if (ids.isEmpty()) {
                     toast("没拉到（协议不支持或 Key/地址不对），先给预设清单")
                     val presets = p.models.map { it.name }.toTypedArray()
-                    AlertDialog.Builder(themed())
+                    HxDialog.Builder(themed(), pal)
                         .setTitle("${p.label} 预设模型")
-                        .setItems(presets) { _, i ->
+                        .setItems(presets) { i ->
                             cfgStore.setModel(p.id, presets[i])
                             onPicked?.invoke(presets[i])
                         }
@@ -3746,9 +3724,9 @@ class MainActivity : AppCompatActivity(), GameUi {
                         .show()
                     return@post
                 }
-                AlertDialog.Builder(themed())
+                HxDialog.Builder(themed(), pal)
                     .setTitle("${p.label} 可用模型（${ids.size}）")
-                    .setItems(ids.toTypedArray()) { _, i ->
+                    .setItems(ids.toTypedArray()) { i ->
                         cfgStore.setModel(p.id, ids[i])
                         onPicked?.invoke(ids[i])
                         refreshHeader()
@@ -3936,13 +3914,14 @@ class MainActivity : AppCompatActivity(), GameUi {
             toast("这是当前项目，先切到别的项目再删")
             return
         }
-        AlertDialog.Builder(themed())
+        HxDialog.Builder(themed(), pal)
             .setTitle("删除项目「${p.name}」？")
             .setMessage(
                 p.absolutePath + "\n\n" +
                     "整个目录会删掉：代码 / 素材 / 技能 / 存档都没了，不可恢复。"
             )
-            .setPositiveButton("删除") { _, _ ->
+            .setDanger(true)
+            .setPositiveButton("删除") { ->
                 val ok = runCatching { p.deleteRecursively() }.getOrDefault(false)
                 toast(if (ok) "已删除「${p.name}」" else "删除失败（可能被占用）")
                 projectDlg?.dismiss()
@@ -4022,7 +4001,7 @@ class MainActivity : AppCompatActivity(), GameUi {
             col.addView(line, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(8) })
         }
 
-        val dlg = AlertDialog.Builder(themed())
+        val dlg = HxDialog.Builder(themed(), pal)
             .setTitle("项目")
             .setView(ScrollView(this).apply { addView(col) })
             .setPositiveButton("新建项目", null)
@@ -4031,11 +4010,11 @@ class MainActivity : AppCompatActivity(), GameUi {
             .create()
         projectDlg = dlg
         dlg.setOnShowListener {
-            dlg.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+            dlg.btn(HxDialog.BUTTON_POSITIVE)?.setOnClickListener {
                 dlg.dismiss()
                 newProjectDialog()
             }
-            dlg.getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener {
+            dlg.btn(HxDialog.BUTTON_NEUTRAL)?.setOnClickListener {
                 dlg.dismiss()
                 exportZip()
             }
@@ -4052,19 +4031,12 @@ class MainActivity : AppCompatActivity(), GameUi {
     }
 
     private fun newProjectDialog() {
-        val et = EditText(this).apply {
-            hint = "项目名，例如 snake-01"
-            textSize = 14f
-            setTextColor(pal.text)
-            setHintTextColor(pal.faint)
-            setPadding(dp(12), dp(10), dp(12), dp(10))
-            background = roundCard(this@MainActivity, pal.cardAlt, pal.border, 12)
-        }
+        val et = hxInput(this, pal, "项目名，例如 snake-01")
         val wrap = LinearLayout(this).apply {
             setPadding(dp(16), dp(10), dp(16), dp(4))
             addView(et, LinearLayout.LayoutParams(-1, -2))
         }
-        val d = AlertDialog.Builder(themed())
+        val d = HxDialog.Builder(themed(), pal)
             .setTitle("新建项目")
             .setMessage("一个项目一个目录，互不干扰。创建后先给一个可运行的空白页，之后 AI 的所有改动都只写进这个目录。")
             .setView(wrap)
@@ -4072,7 +4044,7 @@ class MainActivity : AppCompatActivity(), GameUi {
             .setNegativeButton("取消", null)
             .create()
         d.setOnShowListener {
-            d.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+            d.btn(HxDialog.BUTTON_POSITIVE)?.setOnClickListener {
                 val name = et.text.toString().trim()
                     .map { if (it.isLetterOrDigit() || it == '-' || it == '_') it else '-' }
                     .joinToString("")
@@ -4850,9 +4822,9 @@ class MainActivity : AppCompatActivity(), GameUi {
         setPadding(dp(8), dp(8), dp(8), dp(8))
         setOnClickListener {
             val rel = f.relativeTo(gameRoot).path
-            AlertDialog.Builder(themed())
+            HxDialog.Builder(themed(), pal)
                 .setTitle(f.name)
-                .setItems(arrayOf("预览 / 播放", "加入对话", "保存到本地", "复制路径", "删除")) { _, i ->
+                .setItems(arrayOf("预览 / 播放", "加入对话", "保存到本地", "复制路径", "删除")) { i ->
                     when (i) {
                         0 -> previewFile(f, kind)
                         1 -> {
@@ -5075,14 +5047,9 @@ class MainActivity : AppCompatActivity(), GameUi {
 
     private fun renderCodeTab(body: LinearLayout) {
         val dir = File(gameRoot, currentGame)
-        val search = EditText(this).apply {
-            hint = "搜索文件名"
+        val search = hxInput(this, pal, "搜索文件名", wsSearch).apply {
             textSize = 13f
-            setText(wsSearch)
-            setTextColor(pal.text)
-            setHintTextColor(pal.faint)
             setPadding(dp(12), dp(9), dp(12), dp(9))
-            background = roundCard(this@MainActivity, pal.card, pal.border, 12)
             addTextChangedListener(object : TextWatcher {
                 override fun afterTextChanged(s: Editable?) {
                     val now = s?.toString().orEmpty()
@@ -5179,14 +5146,15 @@ class MainActivity : AppCompatActivity(), GameUi {
     private fun confirmDeleteSelected() {
         val rels = wsSel.toList()
         if (rels.isEmpty()) return
-        AlertDialog.Builder(themed())
+        HxDialog.Builder(themed(), pal)
             .setTitle("删除 ${rels.size} 个文件？")
             .setMessage(
                 rels.take(12).joinToString("\n") +
                     (if (rels.size > 12) "\n…共 ${rels.size} 个" else "") +
                     "\n\n从磁盘删除，不可恢复。"
             )
-            .setPositiveButton("删除") { _, _ ->
+            .setDanger(true)
+            .setPositiveButton("删除") { ->
                 Thread {
                     var n = 0
                     for (rel in rels) {
@@ -5432,10 +5400,11 @@ class MainActivity : AppCompatActivity(), GameUi {
     }
 
     private fun confirmDelete(f: File) {
-        AlertDialog.Builder(themed())
+        HxDialog.Builder(themed(), pal)
+            .setDanger(true)
             .setTitle("删除文件")
             .setMessage(f.name)
-            .setPositiveButton("删除") { _, _ ->
+            .setPositiveButton("删除") { ->
                 runCatching { f.delete() }.onSuccess {
                     toast("已删除")
                     renderWs()
@@ -5591,11 +5560,11 @@ class MainActivity : AppCompatActivity(), GameUi {
             }
         }
         val ctx = themed()
-        AlertDialog.Builder(ctx)
+        HxDialog.Builder(ctx, pal)
             .setTitle("导出完成")
             .setMessage(msg)
-            .setPositiveButton("分享") { _, _ -> shareZip(zip) }
-            .setNeutralButton("复制路径") { _, _ -> copyToClipboard(zip.absolutePath) }
+            .setPositiveButton("分享") { -> shareZip(zip) }
+            .setNeutralButton("复制路径") { -> copyToClipboard(zip.absolutePath) }
             .setNegativeButton("好", null)
             .show()
     }
@@ -5606,11 +5575,11 @@ class MainActivity : AppCompatActivity(), GameUi {
             toast("文件已被清理，请重新导出")
             return
         }
-        AlertDialog.Builder(themed())
+        HxDialog.Builder(themed(), pal)
             .setTitle("最近导出的工程包")
             .setMessage(zip.absolutePath)
-            .setPositiveButton("分享") { _, _ -> shareZip(zip) }
-            .setNeutralButton("复制路径") { _, _ -> copyToClipboard(zip.absolutePath) }
+            .setPositiveButton("分享") { -> shareZip(zip) }
+            .setNeutralButton("复制路径") { -> copyToClipboard(zip.absolutePath) }
             .setNegativeButton("好", null)
             .show()
     }
@@ -5691,20 +5660,14 @@ class MainActivity : AppCompatActivity(), GameUi {
             typeface = MEDIUM
             setTextColor(pal.text)
         }, LinearLayout.LayoutParams(0, -2, 1f))
-        titleRow.addView(TextView(this).apply {
-            text = "⚙"
-            textSize = 14f
-            setTextColor(pal.sub)
-            setPadding(dp(10), dp(4), dp(12), dp(4))
+        titleRow.addView(iconView(this, pal, "gear", 15, pal.sub).apply {
+            setPadding(dp(9), dp(3), dp(9), dp(3))
             setOnClickListener { dlg.dismiss(); showSettings() }
-        })
-        titleRow.addView(TextView(this).apply {
-            text = "✕"
-            textSize = 14f
-            setTextColor(pal.sub)
-            setPadding(dp(10), dp(4), dp(6), dp(4))
+        }, LinearLayout.LayoutParams(dp(33), dp(27)))
+        titleRow.addView(iconView(this, pal, "close", 15, pal.sub).apply {
+            setPadding(dp(9), dp(3), dp(6), dp(3))
             setOnClickListener { dlg.dismiss() }
-        })
+        }, LinearLayout.LayoutParams(dp(30), dp(27)))
         root.addView(titleRow)
         root.addView(View(this).apply { setBackgroundColor(pal.border) },
             LinearLayout.LayoutParams(-1, dp(1)))
@@ -5733,11 +5696,8 @@ class MainActivity : AppCompatActivity(), GameUi {
             val defProv = AiProviders.byId(defPid)
             val defRow = rowShell().apply {
                 setBackgroundColor(pal.accentSoft)
-                addView(TextView(this@MainActivity).apply {
-                    text = "★"
-                    textSize = 12f
-                    setTextColor(pal.accent)
-                }, LinearLayout.LayoutParams(-2, -2).apply { rightMargin = dp(9) })
+                addView(iconView(this@MainActivity, pal, "star", 12, pal.accent),
+                    LinearLayout.LayoutParams(dp(14), dp(14)).apply { rightMargin = dp(9) })
                 val col = LinearLayout(this@MainActivity).apply { orientation = LinearLayout.VERTICAL }
                 col.addView(TextView(this@MainActivity).apply {
                     text = "默认配置"
@@ -5861,7 +5821,7 @@ class MainActivity : AppCompatActivity(), GameUi {
                         }, LinearLayout.LayoutParams(-2, -2).apply { rightMargin = dp(9) })
                         val mcol = LinearLayout(this@MainActivity).apply { orientation = LinearLayout.VERTICAL }
                         mcol.addView(TextView(this@MainActivity).apply {
-                            text = if (isDef) "★ $mn" else mn
+                            text = if (isDef) "· $mn" else mn
                             textSize = 12f
                             typeface = MONO
                             setTextColor(if (picked) pal.accent else pal.text)
@@ -6075,7 +6035,7 @@ class MainActivity : AppCompatActivity(), GameUi {
             Thread {
                 val r = MakerCli.run(ctx, cmd, stdin)
                 main.post {
-                    makerOut.text = (if (r.ok) "✅ " else "❌ ") + tip + "\n" + r.output.takeLast(900)
+                    makerOut.text = (if (r.ok) "成功 · " else "失败 · ") + tip + "\n" + r.output.takeLast(900)
                 }
             }.start()
         }
@@ -6102,9 +6062,9 @@ makerRow1.addView(ghostBtnOf(ctx, pal, "扫码登录").apply {
                     val u = MakerAuth.start(this@MainActivity)
                     main.post {
                         if (u == null) {
-                            makerOut.text = "❌ 没拿到授权链接：" + MakerAuth.statusText(this@MainActivity)
+                            makerOut.text = "没拿到授权链接：" + MakerAuth.statusText(this@MainActivity)
                         } else {
-                            makerOut.text = "✅ 授权链接（已尝试打开浏览器；也可长按复制）\n$u\n\n" +
+                            makerOut.text = "授权链接（已尝试打开浏览器；也可长按复制）\n$u\n\n" +
                                 "登录后点「创建 token」，完成后这里会自动提示。"
                             makerOut.setTextIsSelectable(true)
                             openExternal(u)
@@ -6132,12 +6092,12 @@ makerRow1.addView(ghostBtnOf(ctx, pal, "扫码登录").apply {
                     val sb = StringBuilder()
                     runCatching {
                         if (McpRt.makerReady(proj)) {
-                            sb.append("✅ Maker 已在运行\n")
+                            sb.append("Maker 已在运行\n")
                         } else {
                             val err = McpRt.startMaker(this@MainActivity, {}, proj)
-                            sb.append(if (err == null) "✅ Maker 已启动\n" else "❌ Maker 启动失败：$err\n")
+                            sb.append(if (err == null) "Maker 已启动\n" else "Maker 启动失败：$err\n")
                         }
-                    }.onFailure { sb.append("❌ 启动异常：${it.message}\n") }
+                    }.onFailure { sb.append("启动异常：${it.message}\n") }
                     val enc = runCatching { java.net.URLEncoder.encode(proj, "UTF-8") }.getOrDefault(proj)
                     val body = runCatching {
                         val c = java.net.URL("http://127.0.0.1:${McpRt.MAKER_PORT}/ensure-project?dir=$enc")
@@ -6145,7 +6105,7 @@ makerRow1.addView(ghostBtnOf(ctx, pal, "扫码登录").apply {
                         c.connectTimeout = 8000
                         c.readTimeout = 90_000
                         c.inputStream.bufferedReader().use { it.readText() }
-                    }.getOrElse { "❌ 绑定接口调用失败：${it.message}" }
+                    }.getOrElse { "绑定接口调用失败：${it.message}" }
                     main.post {
                         makerOut.text = sb.toString() + body
                         makerOut.setTextIsSelectable(true)
@@ -6280,7 +6240,7 @@ makerRow1.addView(ghostBtnOf(ctx, pal, "扫码登录").apply {
 
         fun bindDef() {
             val isDef = cfgStore.isDefaultPair(curProvider.id, formModel())
-            defText.text = if (isDef) "★ 这就是默认配置（下次打开用它）"
+            defText.text = if (isDef) "这就是默认配置（下次打开用它）"
             else "设为默认配置（下次打开用它）"
             defText.setTextColor(if (isDef) pal.accent else pal.text)
         }
@@ -6608,10 +6568,10 @@ makerRow1.addView(ghostBtnOf(ctx, pal, "扫码登录").apply {
                 }
                 val nameEt = field("名称", "我的 MCP", into = box)
                 val urlEt2 = field("地址（Streamable HTTP，如 http://127.0.0.1:3000/）", "http://", into = box)
-                AlertDialog.Builder(themed())
+                HxDialog.Builder(themed(), pal)
                     .setTitle("添加 MCP 服务器")
                     .setView(box)
-                    .setPositiveButton("添加") { _, _ ->
+                    .setPositiveButton("添加") { ->
                         val list = McpStore.load(ctx)
                         list.add(
                             McpServer(
@@ -6667,15 +6627,15 @@ makerRow1.addView(ghostBtnOf(ctx, pal, "扫码登录").apply {
                 setTextColor(pal.faint)
                 setPadding(dp(2), dp(10), dp(2), 0)
             })
-            AlertDialog.Builder(themed())
+            HxDialog.Builder(themed(), pal)
                 .setTitle("抠图 API Key")
                 .setView(box)
-                .setPositiveButton("保存") { _, _ ->
+                .setPositiveButton("保存") { ->
                     val ok = McpRt.saveKoukoutuKey(ctx, kouEt.text.toString())
                     kouRender()
                     toast(if (ok) "已保存 —— AI 现在就能抠图了（无需重启）" else "保存失败（运行时目录不可写？）")
                 }
-                .setNeutralButton("去申请") { _, _ ->
+                .setNeutralButton("去申请") { ->
                     runCatching {
                         startActivity(
                             Intent(Intent.ACTION_VIEW, Uri.parse("https://www.koukoutu.com/user/dev"))
@@ -6699,7 +6659,7 @@ makerRow1.addView(ghostBtnOf(ctx, pal, "扫码登录").apply {
         kouRender()
 
 
-        val dlg = AlertDialog.Builder(themed())
+        val dlg = HxDialog.Builder(themed(), pal)
             .setTitle("设置")
             .setView(ScrollView(ctx).apply { addView(col) })
             .setPositiveButton("保存", null)
@@ -6708,9 +6668,9 @@ makerRow1.addView(ghostBtnOf(ctx, pal, "扫码登录").apply {
             .create()
 
         dlg.setOnShowListener {
-            val test = dlg.getButton(AlertDialog.BUTTON_POSITIVE)
+            val test = dlg.btn(HxDialog.BUTTON_POSITIVE)
             // 用「保存」按钮旁边的位置挂两个动作，这里改成自定义布局：保存写盘
-            test.setOnClickListener {
+            test?.setOnClickListener {
                 cfgStore.providerId = curProvider.id
                 cfgStore.setKey(curProvider.id, keyEt.text.toString())
                 cfgStore.setBaseUrl(curProvider.id, urlEt.text.toString())
@@ -6747,7 +6707,7 @@ makerRow1.addView(ghostBtnOf(ctx, pal, "扫码登录").apply {
                 }
             }
 
-            dlg.getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener {
+            dlg.btn(HxDialog.BUTTON_NEUTRAL)?.setOnClickListener {
                 cfgStore.clearKey(curProvider.id)
                 keyEt.setText("")
                 testResult.text = "已清空 ${curProvider.label} 的 Key"
@@ -6804,7 +6764,7 @@ makerRow1.addView(ghostBtnOf(ctx, pal, "扫码登录").apply {
 
         // 底部胶囊只放模型名 —— 厂商名塞进来会把胶囊撑爆，厂商在面板和状态栏里看得到。
         // ★ 表示「这一对就是默认配置」，让用户随时知道默认是哪一只。
-        val star = if (cfgStore.isDefaultPair(cfg.provider.id, cfg.model)) "★ " else ""
+        val star = if (cfgStore.isDefaultPair(cfg.provider.id, cfg.model)) "默认 · " else ""
         setTextIf(modelBtn, "$star${cfg.model} ▴")
         setTextIf(projBtn, currentGame)
         setTextIf(statusProj, "$currentGame · $kind")
@@ -6819,7 +6779,7 @@ makerRow1.addView(ghostBtnOf(ctx, pal, "扫码登录").apply {
     private fun toast(s: String) = Toast.makeText(this, s, Toast.LENGTH_SHORT).show()
 
     private fun alert(title: String, msg: String) {
-        AlertDialog.Builder(themed())
+        HxDialog.Builder(themed(), pal)
             .setTitle(title)
             .setMessage(msg.take(9000))
             .setPositiveButton("好", null)
@@ -6899,12 +6859,30 @@ makerRow1.addView(ghostBtnOf(ctx, pal, "扫码登录").apply {
             shotDir = File(gameRoot, "_shots"),
             projectDir = projDir()
         ) { ev ->
-            // 只挑有信息量的往主线转，避免把子任务的几百行噪音灌进主对话
+            // 只挑有信息量的往主线转，避免把子任务的几百行噪音灌进主对话。
+            //
+            // ⚠️ 失败信息**必须**转发。以前这里只认 TOOLRUN / AIFINAL，
+            // 于是子任务撞步数上限、请求失败、工具报错时，主对话只显示一句
+            // 「（子任务没有产出结论）」—— 用户根本看不到原因，只能反复重试。
             when {
                 ev.startsWith("TOOLRUN:") -> {
                     val nm = ev.removePrefix("TOOLRUN:").trim()
                         .removePrefix("[").substringBefore("]")
                     main.post { appendSubtaskLine(title, nm) }
+                }
+                ev.startsWith("TOOLFAIL:") -> {
+                    // 载荷形如 "TOOLFAIL:[名字] 摘要\u0000全文"，只取摘要那一段
+                    val nm = ev.removePrefix("TOOLFAIL:").trim().substringBefore('\u0000')
+                    main.post { appendSubtaskLine(title, nm.take(90), fail = true) }
+                }
+                ev.startsWith("[失败]") -> {
+                    val why = ev.removePrefix("[失败]").trim().replace('\n', ' ')
+                    buffer.append(ev).append('\n')
+                    main.post { appendSubtaskLine(title, why.take(90), fail = true) }
+                }
+                ev.startsWith("INFO: 到步数上限") || ev.startsWith("INFO: 已经用满") -> {
+                    buffer.append(ev).append('\n')
+                    main.post { appendSubtaskLine(title, "用满轮数上限", fail = true) }
                 }
                 ev.startsWith("AIFINAL: ") -> buffer.append(ev.removePrefix("AIFINAL: "))
                 ev.startsWith("INFO: 完成") -> {}
@@ -6920,11 +6898,18 @@ makerRow1.addView(ghostBtnOf(ctx, pal, "扫码登录").apply {
                 resume = false,
                 startStep = 0
             )
-            // 结论优先用最终回复；没有就退到 buffer / 最后一条 assistant
+            // 结论优先用最终回复；没有就退到 buffer / 最后一条 assistant。
+            // 仍然没有的话，把**最后一条失败原因**带上 —— 只回一句「没有产出结论」
+            // 等于把「为什么没成」藏起来了，用户只能反复重试。
             val finalText = subHistory.lastOrNull { it.role == "assistant" && !it.text.isNullOrBlank() }
                 ?.text?.takeIf { it.isNotBlank() }
                 ?: buffer.toString().takeIf { it.isNotBlank() }
-                ?: "（子任务没有产出结论）"
+                ?: run {
+                    val why = buffer.lineSequence()
+                        .lastOrNull { it.startsWith("[失败]") || it.startsWith("INFO: 到步数上限") }
+                    if (why.isNullOrBlank()) "（子任务没有产出结论）"
+                    else "（子任务没有产出结论）\n最后一条错误：${why.take(300)}"
+                }
             finalText.take(6000)
         } catch (t: Throwable) {
             "子任务出错：${t.javaClass.simpleName}: ${t.message}"
@@ -6950,11 +6935,17 @@ makerRow1.addView(ghostBtnOf(ctx, pal, "扫码登录").apply {
             setPadding(dp(12), dp(10), dp(12), dp(10))
             background = roundCard(this@MainActivity, pal.cardAlt, pal.border, 12)
         }
-        card.addView(TextView(this).apply {
-            text = "🧩 子任务 · $title"
-            textSize = 13.5f
-            typeface = MEDIUM
-            setTextColor(pal.accent)
+        card.addView(LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            addView(iconView(this@MainActivity, pal, "puzzle", 14, pal.accent),
+                LinearLayout.LayoutParams(dp(15), dp(15)).apply { rightMargin = dp(6) })
+            addView(TextView(this@MainActivity).apply {
+                text = "子任务 · $title"
+                textSize = 13.5f
+                typeface = MEDIUM
+                setTextColor(pal.accent)
+            })
         })
         val lines = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -6967,7 +6958,7 @@ makerRow1.addView(ghostBtnOf(ctx, pal, "扫码登录").apply {
         scrollChatToBottom()
     }
 
-    private fun appendSubtaskLine(title: String, tool: String) {
+    private fun appendSubtaskLine(title: String, tool: String, fail: Boolean = false) {
         val card = subtaskCards[title] ?: return
         val lines = card.tag as? LinearLayout ?: return
         // 最多显示 6 行，再多就折成一行「…」
@@ -6978,7 +6969,7 @@ makerRow1.addView(ghostBtnOf(ctx, pal, "扫码登录").apply {
         lines.addView(TextView(this).apply {
             text = "  · $tool"
             textSize = 11.5f
-            setTextColor(pal.sub)
+            setTextColor(if (fail) TOOL_FAIL else pal.sub)
         })
         scrollChatToBottom()
     }
@@ -6986,10 +6977,21 @@ makerRow1.addView(ghostBtnOf(ctx, pal, "扫码登录").apply {
     private fun finishSubtaskCard(title: String, result: String) {
         val card = subtaskCards.remove(title) ?: return
         val lines = card.tag as? LinearLayout
-        lines?.addView(TextView(this).apply {
-            text = "  ✓ 完成"
-            textSize = 11.5f
-            setTextColor(pal.accent)
+        // 子任务失败时**不能**还打「完成」—— 用户看到「✓ 完成 + 没有产出结论」
+        // 只会以为是自己哪里点错了。这里按结论内容判定真实状态。
+        val failed = result.startsWith("子任务出错") || result.contains("没有产出结论") ||
+            result.contains("到步数上限") || result.contains("请求失败")
+        lines?.addView(LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            addView(iconView(this@MainActivity, pal, if (failed) "close" else "check", 12,
+                if (failed) TOOL_FAIL else pal.accent),
+                LinearLayout.LayoutParams(dp(13), dp(13)).apply { rightMargin = dp(5) })
+            addView(TextView(this@MainActivity).apply {
+                text = if (failed) "未完成" else "完成"
+                textSize = 11.5f
+                setTextColor(if (failed) TOOL_FAIL else pal.accent)
+            })
         })
         // 结论折在卡片里，点一下展开 —— 不占对话正文
         val head = result.lineSequence().firstOrNull()?.take(60).orEmpty()
@@ -7000,7 +7002,7 @@ makerRow1.addView(ghostBtnOf(ctx, pal, "扫码登录").apply {
             setPadding(0, dp(6), 0, 0)
             isClickable = true
             setOnClickListener {
-                AlertDialog.Builder(themed())
+                HxDialog.Builder(themed(), pal)
                     .setTitle("子任务「$title」的结论")
                     .setMessage(result.take(20_000))
                     .setPositiveButton("好", null)
@@ -7026,24 +7028,86 @@ makerRow1.addView(ghostBtnOf(ctx, pal, "扫码登录").apply {
             "查看提交历史",
             "提交全部改动",
             "设置 / 查看远端",
+            "测试连接",
             "推送到远端",
             "从远端拉取"
         )
-        AlertDialog.Builder(themed())
+        HxDialog.Builder(themed(), pal)
             .setTitle("git · ${currentGame}")
-            .setItems(items) { _, i ->
+            .setItems(items) { i ->
                 when (i) {
                     0 -> gitDo(dir) { if (GitTools.isRepo(this, dir)) GitTools.status(this, dir) else GitTools.init(this, dir) }
                     1 -> gitDo(dir) { GitTools.diffStat(this, dir) }
                     2 -> gitDo(dir) { GitTools.log(this, dir, 30) }
                     3 -> gitCommit(dir)
                     4 -> gitRemote(dir)
-                    5 -> gitConfirmPush(dir)
-                    6 -> gitDo(dir) { GitTools.pull(this, dir) }
+                    5 -> gitTestConnection(dir)
+                    6 -> gitConfirmPush(dir)
+                    7 -> gitDo(dir) { GitTools.pull(this, dir) }
                 }
             }
             .setNegativeButton("取消", null)
             .show()
+    }
+
+    /**
+     * 测试连接：填地址 + token，点一下验证「能不能访问 / 能不能推」。
+     *
+     * 结果用一张**带状态色的卡**回显（成功绿、失败红），而不是弹一串 git 原文 ——
+     * 手机上看 git 的报错基本等于没看。真正的判断在 GitTools.testConnection 里做。
+     */
+    private fun gitTestConnection(dir: File) {
+        val curUrl = GitTools.remoteUrl(this, dir)
+        val urlBox = hxField(this, pal, "仓库地址", curUrl, hint = "https://github.com/用户名/仓库.git")
+        val tokBox = hxField(this, pal, "Token（可留空测公开仓库）", "", password = true,
+            hint = "ghp_… 或 用户名:token")
+        val out = TextView(this).apply {
+            textSize = 12.5f
+            setLineSpacing(dp(4).toFloat(), 1f)
+            setPadding(dp(12), dp(11), dp(12), dp(11))
+            visibility = View.GONE
+        }
+        val box = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            addView(urlBox, LinearLayout.LayoutParams(-1, -2))
+            addView(tokBox, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(12) })
+            addView(out, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(12) })
+            addView(hxNote(this@MainActivity, pal,
+                "地址与 token 会用于本次测试；点「保存并测试」会同时写入远端配置。"))
+        }
+        val dlg = HxDialog.Builder(themed(), pal)
+            .setTitle("测试连接")
+            .setMessage("验证这个远端能不能访问、当前 token 有没有推送权限。")
+            .setView(box)
+            .setPositiveButton("保存并测试", null)
+            .setNegativeButton("取消", null)
+            .create()
+        dlg.setOnShowListener { d ->
+            d.btn(HxDialog.BUTTON_POSITIVE)?.setOnClickListener {
+                val u = (urlBox.tag as? EditText)?.text?.toString()?.trim().orEmpty()
+                val t = (tokBox.tag as? EditText)?.text?.toString()?.trim().orEmpty()
+                if (u.isBlank()) {
+                    out.visibility = View.VISIBLE
+                    out.text = "先填仓库地址。"
+                    out.setTextColor(pal.errText)
+                    return@setOnClickListener
+                }
+                out.visibility = View.VISIBLE
+                out.setTextColor(pal.sub)
+                out.text = "正在测试…"
+                Thread {
+                    // 顺手把地址存成远端（省一步），再用「带 token 的地址」测
+                    GitTools.setRemote(this, dir, u)
+                    val r = GitTools.testConnection(this, dir, u, t)
+                    main.post {
+                        out.setTextColor(if (r.ok) pal.accent else pal.errText)
+                        out.text = (if (r.ok) "✓ " else "✗ ") + r.title + "\n\n" + r.detail
+                        toast(if (r.ok) "连接正常" else "连接失败：${r.title}")
+                    }
+                }.start()
+            }
+        }
+        dlg.show()
     }
 
     /** 跑一条 git 命令并把输出摊给用户看 */
@@ -7069,12 +7133,12 @@ makerRow1.addView(ghostBtnOf(ctx, pal, "扫码登录").apply {
                     toast("没有改动可提交")
                     return@post
                 }
-                val et = EditText(this).apply { hint = "提交说明" }
-                AlertDialog.Builder(themed())
+                val et = hxInput(this, pal, "提交说明")
+                HxDialog.Builder(themed(), pal)
                     .setTitle("要提交这些改动")
                     .setMessage(GitTools.maskToken(st.brief(60)) + "\n\n填一句提交说明：")
                     .setView(et)
-                    .setPositiveButton("提交") { _, _ ->
+                    .setPositiveButton("提交") { ->
                         val m = et.text.toString().trim().ifBlank { "更新" }
                         gitDo(dir) { GitTools.commit(this, dir, m) }
                     }
@@ -7086,15 +7150,17 @@ makerRow1.addView(ghostBtnOf(ctx, pal, "扫码登录").apply {
 
     private fun gitRemote(dir: File) {
         val cur = GitTools.remoteUrl(this, dir)
-        val et = EditText(this).apply {
-            setText(GitTools.maskToken(cur))
-            hint = "https://github.com/用户名/仓库.git"
+        val et = hxInput(this, pal, "https://github.com/用户名/仓库.git").apply {
+            // ⚠️ 绝不把 maskToken 的结果回填进输入框：那是 https://***@github.com/…
+            // 用户不重输直接保存，就会把真 token 覆盖成字面量 ***，之后推送全失败。
+            // 真实地址带 token 时，给一句提示就够了。
+            if (cur.isNotBlank()) setText(cur)
         }
-        AlertDialog.Builder(themed())
+        HxDialog.Builder(themed(), pal)
             .setTitle("远端地址")
             .setMessage("私有仓库可以在地址里带上 token，或用「用户名:token@」的形式。")
             .setView(et)
-            .setPositiveButton("保存") { _, _ ->
+            .setPositiveButton("保存") { ->
                 val u = et.text.toString().trim()
                 if (u.isNotBlank()) gitDo(dir) { GitTools.setRemote(this, dir, u) }
             }
@@ -7109,10 +7175,10 @@ makerRow1.addView(ghostBtnOf(ctx, pal, "扫码登录").apply {
             return
         }
         // 推送是对外可见的操作 —— 必须用户明确确认
-        AlertDialog.Builder(themed())
+        HxDialog.Builder(themed(), pal)
             .setTitle("推送到远端？")
             .setMessage("远端：${GitTools.maskToken(url)}\n\n这会把当前分支推上去，别人能看到。")
-            .setPositiveButton("推送") { _, _ -> gitDo(dir) { GitTools.push(this, dir) } }
+            .setPositiveButton("推送") { -> gitDo(dir) { GitTools.push(this, dir) } }
             .setNegativeButton("取消", null)
             .show()
     }
@@ -7192,9 +7258,9 @@ makerRow1.addView(ghostBtnOf(ctx, pal, "扫码登录").apply {
             toast("还没有游戏，让 AI 先建一个")
             return
         }
-        AlertDialog.Builder(themed())
+        HxDialog.Builder(themed(), pal)
             .setTitle("选择游戏")
-            .setItems(dirs.toTypedArray()) { _, i ->
+            .setItems(dirs.toTypedArray()) { i ->
                 openGame(dirs[i])
                 refreshHeader()
                 addSystemLine("已切换到 ${dirs[i]}")

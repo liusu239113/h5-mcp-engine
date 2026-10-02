@@ -159,4 +159,134 @@ object GitTools {
     /** 把 URL 里的 token 抹掉，免得它出现在界面 / 日志 / 模型上下文里 */
     fun maskToken(s: String): String =
         s.replace(Regex("https://[^@/\\s]+@"), "https://***@")
+
+    // ==================== 测试连接 ====================
+
+    /** 测试结果：ok = 能不能用；title = 一行结论；detail = 细节（原因 / 权限） */
+    data class TestResult(val ok: Boolean, val title: String, val detail: String)
+
+    /**
+     * 测试「这个远端 + 这个 token」到底能不能用。
+     *
+     * ## 为什么单独做这个
+     *
+     * 以前只能「设置远端 → 推送 → 看报错」，而 git 的报错在手机上看不懂
+     * （`fatal: Authentication failed` 之后没有下文，用户不知道是 token 过期、
+     * 还是仓库名写错、还是网络不通）。这里把三类失败分开说清楚：
+     *
+     *   1. **仓库能不能访问** —— 走 GitHub API，顺便把「有没有推送权限」也问出来
+     *      （GitHub 会在 permissions 里明确给 push=true/false）；
+     *   2. **git 本身通不通** —— 跑一次 `ls-remote`，这才是推送真正走的链路；
+     *   3. **失败归类** —— 401 token 无效 / 403 无权限 / 404 仓库名错或没权限 / 网络不通。
+     *
+     * 非 GitHub 的远端（Gitee / 自建）跳过第 1 步，只做 ls-remote —— 照样能验证凭据。
+     */
+    fun testConnection(ctx: Context, dir: File, url: String, token: String): TestResult {
+        val u = url.trim()
+        if (u.isBlank()) return TestResult(false, "没有填仓库地址", "形如 https://github.com/用户名/仓库.git")
+        if (!u.startsWith("https://") && !u.startsWith("git@")) {
+            return TestResult(false, "地址格式不对", "只支持 https:// 或 git@ 开头的地址，当前是：${u.take(40)}")
+        }
+
+        // ---- 1) GitHub：问 API 要仓库信息和权限 ----
+        val gh = parseGitHub(u)
+        if (gh != null) {
+            val (owner, repo) = gh
+            val api = "https://api.github.com/repos/$owner/$repo"
+            val r = httpGet(api, token.ifBlank { tokenInUrl(u) })
+            when (r.code) {
+                200 -> {
+                    val push = r.body.contains("\"push\":true") || r.body.contains("\"push\": true")
+                    val admin = r.body.contains("\"admin\":true") || r.body.contains("\"admin\": true")
+                    return if (push) {
+                        TestResult(
+                            true,
+                            "连接正常，有推送权限",
+                            "$owner/$repo 可读写（admin=$admin）。可以直接「推送到远端」。"
+                        )
+                    } else {
+                        TestResult(
+                            false,
+                            "能连上，但没有推送权限",
+                            "$owner/$repo 能读、不能写。token 需要勾选 repo 权限，" +
+                                "或你的账号在这个仓库里不是协作者。"
+                        )
+                    }
+                }
+                401 -> return TestResult(
+                    false, "token 无效或已过期（401）",
+                    "去 GitHub → Settings → Developer settings → Personal access tokens 重新生成一个，" +
+                        "勾选 repo（私有仓库还要 workflow）。"
+                )
+                403 -> return TestResult(
+                    false, "被 GitHub 拒绝（403）",
+                    "多半是 token 权限不足，或触发了速率限制。确认 token 勾了 repo 权限。"
+                )
+                404 -> return TestResult(
+                    false, "仓库不存在或无权访问（404）",
+                    "核对两件事：① 仓库名是不是写对了（$owner/$repo）；" +
+                        "② 私有仓库必须带有效 token —— 不带 token 时 GitHub 一律回 404，不区分「不存在」和「没权限」。"
+                )
+                -1 -> return TestResult(false, "连不上 GitHub", r.body)
+                else -> return TestResult(false, "GitHub 返回 ${r.code}", r.body.take(300))
+            }
+        }
+
+        // ---- 2) 其它远端 / GitHub 兜底：直接跑 git ls-remote ----
+        val withTok = withToken(u, token)
+        val r = run(ctx, dir, listOf("ls-remote", "--heads", withTok), timeoutMs = 60_000)
+        return if (r.ok) {
+            val n = r.out.trim().lines().count { it.isNotBlank() }
+            TestResult(true, "连接正常", "远端可达，读到 $n 个分支。可以直接推送。")
+        } else {
+            val out = maskToken(r.out)
+            val why = when {
+                out.contains("Authentication failed") || out.contains("could not read Username") ->
+                    "认证失败：token 不对、或没勾 repo 权限。"
+                out.contains("not found") || out.contains("Repository not found") ->
+                    "仓库不存在，或 token 没有访问它的权限。"
+                out.contains("Could not resolve host") || out.contains("unable to access") ->
+                    "网络不通：检查手机网络 / 代理。"
+                out.contains("超时") -> "超时：网络太慢或地址不可达。"
+                else -> "git 报错如下。"
+            }
+            TestResult(false, "连不上", "$why\n\n$out".take(600))
+        }
+    }
+
+    /** 从 https://github.com/owner/repo(.git) 里抠出 owner / repo；不是 GitHub 返回 null */
+    private fun parseGitHub(url: String): Pair<String, String>? {
+        val m = Regex("github\\.com[/:]([^/]+)/([^/\\s]+?)(?:\\.git)?$").find(url.trim())
+            ?: return null
+        val owner = m.groupValues[1]
+        val repo = m.groupValues[2].removeSuffix(".git")
+        if (owner.isBlank() || repo.isBlank()) return null
+        return owner to repo
+    }
+
+    /** URL 里如果已经带了 token（https://<token>@github.com/…），取出来复用 */
+    private fun tokenInUrl(url: String): String {
+        val m = Regex("https://([^@/\\s]+)@").find(url) ?: return ""
+        val v = m.groupValues[1]
+        return if (v.contains(':')) v.substringAfter(':') else v
+    }
+
+    private data class Http(val code: Int, val body: String)
+
+    /** 极简 GET（不引依赖）：只用来问 GitHub API 的仓库权限 */
+    private fun httpGet(url: String, token: String): Http = runCatching {
+        val c = java.net.URL(url).openConnection() as java.net.HttpURLConnection
+        c.requestMethod = "GET"
+        c.connectTimeout = 12_000
+        c.readTimeout = 20_000
+        c.setRequestProperty("Accept", "application/vnd.github+json")
+        c.setRequestProperty("User-Agent", "Hexora")
+        if (token.isNotBlank()) c.setRequestProperty("Authorization", "Bearer $token")
+        val code = c.responseCode
+        val stream = if (code in 200..299) c.inputStream else c.errorStream
+        val body = stream?.bufferedReader()?.use { it.readText() } ?: ""
+        Http(code, body)
+    }.getOrElse { e ->
+        Http(-1, "网络请求失败：${e.javaClass.simpleName}: ${e.message}")
+    }
 }

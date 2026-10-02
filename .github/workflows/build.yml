@@ -89,3 +89,28 @@ jobs:
           path: app/build/outputs/apk/release/*.apk
           if-no-files-found: error
           retention-days: 30
+
+      # 自动发 Release：以前每次都要手工建 tag / 传 APK，导致「GitHub 上没有可下载的
+      # 测试链接」。artifact 虽然也在，但下载要登录 GitHub，手机上点不开 ——
+      # Release 的资产是公开直链，扫一下就能下。
+      - name: Publish release
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          VER=$(grep -oP 'versionName\s*=\s*"\K[^"]+' app/build.gradle.kts | head -1)
+          CODE=$(grep -oP 'versionCode\s*=\s*\K[0-9]+' app/build.gradle.kts | head -1)
+          TAG="v$VER"
+          APK=$(ls app/build/outputs/apk/release/*.apk | head -1)
+          echo "版本 $VER (vc$CODE) → tag $TAG，APK=$APK"
+          # 同名 tag / release 已存在时直接覆盖资产，不报错（重跑同版本很常见）
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "$APK" --clobber
+          else
+            gh release create "$TAG" "$APK" \
+              --title "Hexora $TAG" \
+              --notes "自动构建 · 提交 ${GITHUB_SHA:0:7}" \
+              --latest
+          fi
+          echo "下载直链：https://github.com/${GITHUB_REPOSITORY}/releases/download/$TAG/$(basename "$APK")"

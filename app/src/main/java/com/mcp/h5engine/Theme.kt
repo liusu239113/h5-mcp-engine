@@ -212,8 +212,8 @@ fun ghostBtnOf(ctx: Context, p: Palette, t: String): TextView =
         background = pressable(roundCard(ctx, p.card, p.border, 12), 0x14000000)
     }
 
-/** 一行列表项：标题 + 说明 + 右侧箭头，整行可点且有反馈 */
-fun listRowOf(ctx: Context, p: Palette, title: String, sub: String, arrow: String = "❯"): LinearLayout {
+/** 一行列表项：标题 + 说明 + 右侧箭头（线稿），整行可点且有反馈 */
+fun listRowOf(ctx: Context, p: Palette, title: String, sub: String): LinearLayout {
     val row = LinearLayout(ctx).apply {
         orientation = LinearLayout.HORIZONTAL
         gravity = Gravity.CENTER_VERTICAL
@@ -231,12 +231,8 @@ fun listRowOf(ctx: Context, p: Palette, title: String, sub: String, arrow: Strin
         })
     }
     row.addView(col, LinearLayout.LayoutParams(0, -2, 1f))
-    row.addView(TextView(ctx).apply {
-        text = arrow
-        textSize = 13f
-        setTextColor(p.faint)
-        setPadding(ctx.dp(8), 0, ctx.dp(4), 0)
-    })
+    row.addView(iconView(ctx, p, "chevron", 13, p.faint),
+        LinearLayout.LayoutParams(ctx.dp(15), ctx.dp(15)).apply { leftMargin = ctx.dp(8) })
     return row
 }
 
