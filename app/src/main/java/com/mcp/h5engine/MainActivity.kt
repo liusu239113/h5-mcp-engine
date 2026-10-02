@@ -1059,7 +1059,14 @@ class MainActivity : AppCompatActivity(), GameUi {
         // 补一刀：游戏可能在「切页瞬间」刚起了一段音（定时器 / 场景切换），
         // 单次静音会漏掉这一声，350ms 后再对一次表。
         if (tab != 1) main.postDelayed({ if (activeTab != 1) applyPreviewMute(true) }, 350)
-        if (tab == 1) ensurePreviewFresh(true)
+        if (tab == 1) {
+            ensurePreviewFresh(true)
+            // 切到预览页 → **自动进全屏**（用户要的：切过来就是铺满整屏、
+            // 右上角留一个「退出全屏」图标；点它才回到普通状态）。
+            // post 一下：等这一帧的可见性切换落定再弹，否则全屏对话框里的
+            // 预览容器尺寸会按旧状态算。
+            main.post { if (activeTab == 1) showFullPreview() }
+        }
         if (tab == 2) refreshExportRow()
     }
 
@@ -4547,10 +4554,20 @@ class MainActivity : AppCompatActivity(), GameUi {
         val box = FrameLayout(this).apply { setBackgroundColor(pal.bg) }
         box.addView(previewWrapHolder, FrameLayout.LayoutParams(-1, -1))
         // 真全屏：没有标题栏，预览容器直接铺满整屏；屏内只留一个悬浮「缩小」按钮
-        box.addView(chipOf(this, pal, "缩小", false).apply {
-            alpha = 0.82f
+        // 退出全屏：**线稿图标**（四角向内），不是「缩小」两个字 ——
+        // 全 App 的按钮口径都是手绘线稿，这里飘一个文字块是最扎眼的不一致。
+        // 给个半透明底 + 水波纹，压在画面上也能看清、能点。
+        box.addView(ImageView(this).apply {
+            setImageDrawable(LineIcon("exit_fullscreen", pal.text, 1.8f))
+            setPadding(dp(9), dp(9), dp(9), dp(9))
+            alpha = 0.92f
+            background = pressable(
+                roundCard(this@MainActivity, pal.card, pal.border, 10).apply { alpha = 220 },
+                0x2A000000
+            )
+            contentDescription = "退出全屏"
             setOnClickListener { fullDlg?.dismiss() }
-        }, FrameLayout.LayoutParams(-2, -2).apply {
+        }, FrameLayout.LayoutParams(dp(38), dp(38)).apply {
             gravity = Gravity.TOP or Gravity.END
             topMargin = dp(16)
             rightMargin = dp(14)

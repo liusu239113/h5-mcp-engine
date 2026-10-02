@@ -518,6 +518,21 @@ class LineIcon(
                 path.addCircle(9.4f, 14.1f, 1.1f, Path.Direction.CW)
                 path.addCircle(14.6f, 14.1f, 1.1f, Path.Direction.CW)
             }
+            // 退出全屏：四角向**内**收（与 fullscreen 的四角向外正好相反）
+            "exit_fullscreen" -> {
+                path.moveTo(9.5f, 4.5f)
+                path.lineTo(9.5f, 9.5f)
+                path.lineTo(4.5f, 9.5f)
+                path.moveTo(14.5f, 4.5f)
+                path.lineTo(14.5f, 9.5f)
+                path.lineTo(19.5f, 9.5f)
+                path.moveTo(19.5f, 14.5f)
+                path.lineTo(14.5f, 14.5f)
+                path.lineTo(14.5f, 19.5f)
+                path.moveTo(4.5f, 14.5f)
+                path.lineTo(9.5f, 14.5f)
+                path.lineTo(9.5f, 19.5f)
+            }
             // 右尖角：列表项尾部箭头（替代 ❯ 文本）
             "chevron" -> {
                 path.moveTo(9.6f, 5.6f)
