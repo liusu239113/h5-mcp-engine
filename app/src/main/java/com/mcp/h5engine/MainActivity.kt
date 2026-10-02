@@ -7938,6 +7938,37 @@ makerRow1.addView(ghostBtnOf(ctx, pal, "扫码登录").apply {
                 bytes = capture(7, beyond = true)
             }
 
+            // ── 兜底 3：抓到了图，但**页面其实是空的**（预览壳掉了页面）──
+            //
+            // 真实反馈：预览的 WebView 有时会「掉页面」—— `bodyLen: 0`、`scripts: 0`、
+            // `canvasCount: 0`，整个页面根本没加载（不是游戏代码抛错）。
+            // 这时抓到的是一张空画布，AI 会据此断言「游戏白屏了」，然后去瞎改代码。
+            //
+            // 页面是空的 → 截出来的图必然也是空的（纯色）。用 looksBlank 认出来，
+            // **顺手自动重载一次**（等于用户手动「切项目再切回来」），再截一张。
+            // 这样「白屏」这个假象就不会再被当成游戏 bug 报上去。
+            if (bytes != null && bytes.size > 128) {
+                val bmp = runCatching {
+                    android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+                }.getOrNull()
+                val blank = bmp != null && looksBlank(bmp)
+                bmp?.recycle()
+                if (blank) {
+                    main.post { runCatching { web.reload() } }
+                    runCatching { Thread.sleep(1200) }   // 给它时间重新加载 + 画第一帧
+                    val retry = capture(8, beyond = false)
+                    if (retry != null && retry.size > 128) {
+                        val rb = runCatching {
+                            android.graphics.BitmapFactory.decodeByteArray(retry, 0, retry.size)
+                        }.getOrNull()
+                        val stillBlank = rb != null && looksBlank(rb)
+                        rb?.recycle()
+                        // 重载后**不空**了 → 用新图（页面救回来了）
+                        if (!stillBlank) bytes = retry
+                    }
+                }
+            }
+
             bytes ?: return null
         } catch (t: Throwable) {
             null
