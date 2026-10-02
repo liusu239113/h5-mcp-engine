@@ -7825,11 +7825,23 @@ makerRow1.addView(ghostBtnOf(ctx, pal, "扫码登录").apply {
                 ) != null
             } else false
 
-            //   · captureBeyondViewport=true：页面比视口长时也完整截下来
+            // ⚠️ 设完视口**必须等页面重排完**再截。
+            //
+            // 游戏都在 `window.resize` 里重算 canvas 尺寸（`canvas.width = clientWidth * DPR`）。
+            // 视口刚改完的那一瞬间，页面还没跑 resize 回调 —— 这时候截，
+            // 拿到的还是**旧尺寸的 canvas**，于是图里只有上半部分有内容、
+            // 下面一大片空白（用户反馈的第二张图就是这个）。
+            // 真实用户的显示器 DPR 通常是 2~3，重排更慢，所以要等得比直觉久一点。
+            if (overrode) runCatching { Thread.sleep(400) }
+
+            //   · captureBeyondViewport：**关掉**。
+            //     开着的话 CDP 会按「文档总高度」出图，而文档往往比视口高
+            //     （body 有最小高度、或页面自己撑高），结果就是图里多出一大截空白。
+            //     用户要的是「他全屏看到的那一屏」，所以严格按视口尺寸截。
             val shot = cdpCall(
                 out, ins, 4, "Page.captureScreenshot",
                 JSONObject().put("format", "jpeg").put("quality", 80)
-                    .put("captureBeyondViewport", true)
+                    .put("captureBeyondViewport", false)
                     .put("optimizeForSpeed", false),
                 sid
             )
