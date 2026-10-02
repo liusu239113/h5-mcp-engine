@@ -460,8 +460,14 @@ class EngineTools(private val ui: GameUi, private val root: File) {
                 listOf("code")),
 
             fn("shell_run",
-                "【执行系统命令】在当前设备上跑一条命令并拿回输出（经 sh -c 解释；不会自动拿到 root）。" +
-                    "用于查设备状态 / 文件 / 进程。危险命令先告诉用户你想干什么。",
+                "【执行系统命令】在当前设备上跑一条命令并拿回输出（经 sh -c 解释）。" +
+                    "用于查设备状态 / 文件 / 进程。危险命令先告诉用户你想干什么。\n" +
+                    "⚠️ 权限分两档：没开 Shizuku 时是 App 自身权限（untrusted_app），" +
+                    "**看不到 /sdcard 下的普通文件**（scoped storage 会过滤，目录名看得见、" +
+                    "文件看不见，cat 一律 Permission denied）；开了 Shizuku 后是 ADB 级（shell），" +
+                    "能正常读。所以：**如果 ls 只列出目录、列不出文件，或 cat 报 Permission denied，" +
+                    "不要下「目录是空的」结论** —— 那是权限被挡，告诉用户去「发布页 → Shizuku 提权」" +
+                    "开启后再扫，别拿过滤后的结果当事实。",
                 """{"cmd":{"type":"string","description":"要执行的命令"},
                    "timeoutMs":{"type":"integer","description":"可选，超时毫秒，默认 15000"}}""",
                 listOf("cmd")),

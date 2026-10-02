@@ -478,6 +478,11 @@ class MainActivity : AppCompatActivity(), GameUi {
         // 它只在 App 运行期间存在，App 一退出就没了。
         runCatching { WebView.setWebContentsDebuggingEnabled(true) }
 
+        // Shizuku：注册 binder / 权限监听（**必须只注册一次**，重复注册 Shizuku 会抛）。
+        // 没装 Shizuku 是常态，init 内部已经 runCatching 兜住，不会影响启动。
+        Shizuku2.init(this)
+        Shizuku2.onStateChanged = { runOnUiThread { runCatching { refreshShizukuRow() } } }
+
         gameRoot = pickProjectRoot().apply { mkdirs() }
         migrateProjectsIfNeeded()
         seedBundledGames()
@@ -5381,6 +5386,7 @@ class MainActivity : AppCompatActivity(), GameUi {
         val rows = listOf(
             Triple("导出工程包", "打包成 zip，并自动另存到「下载/H5Games」", { exportZip() }),
             Triple("查看当前游戏文件", "列出文件与体积", { showTree() }),
+            Triple("Shizuku 提权", shizukuSubtitle(), { askShizuku() }),
             Triple("查看 console 输出", "游戏里的 log / warn / error", { showConsole() }),
             Triple("切换 / 新建项目", "一个项目一个目录，互不干扰", { showProjects() }),
             Triple("后台保活设置", "切后台 / 锁屏 AI 继续跑（需要关掉电池优化）", { askKeepAlive() }),
@@ -5391,6 +5397,13 @@ class MainActivity : AppCompatActivity(), GameUi {
         for ((title, sub, action) in rows) {
             val row = listRowOf(this, pal, title, sub)
             row.setOnClickListener { action() }
+            // 记住 Shizuku 那行，好在授权状态变化时改它的副标题
+            // （listRowOf 的结构：row[0] = 竖排容器，容器[0] = 标题，容器[1] = 副标题）
+            if (title == "Shizuku 提权") {
+                val col = row.getChildAt(0) as? LinearLayout
+                val subTv = col?.getChildAt(1) as? TextView
+                if (subTv != null) shizukuRowView = row to subTv
+            }
             pubScroll.addView(row, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(10) })
         }
 
@@ -6722,6 +6735,72 @@ makerRow1.addView(ghostBtnOf(ctx, pal, "扫码登录").apply {
 
     private fun showConsole() {
         alert("console 输出", logs.tail(120).joinToString("\n").ifBlank { "(暂无输出)" })
+    }
+
+    // ==================== Shizuku（ADB 级提权） ====================
+
+    /** 那行入口的副标题：把当前状态直接写出来，用户一眼看到「能不能用」 */
+    private fun shizukuSubtitle(): String {
+        val s = Shizuku2.describe()
+        return if (Shizuku2.isReady())
+            "已就绪：可读受保护目录 / 以 shell 身份跑命令"
+        else "未启用（$s）—— 开启后可读 /sdcard 下被 scoped storage 挡住的文件"
+    }
+
+    /** 状态变了就刷新那行副标题（Shizuku 的 binder 回调里触发） */
+    private fun refreshShizukuRow() {
+        shizukuRowView?.let { (row, sub) ->
+            sub.text = shizukuSubtitle()
+            row.visibility = View.VISIBLE
+        }
+    }
+
+    /** 存一下那行的引用，好在状态变化时改文案（存的是行容器和副标题两个 view） */
+    private var shizukuRowView: Pair<LinearLayout, TextView>? = null
+
+    /**
+     * Shizuku 入口：按「装没装 / 跑没跑 / 授没授权」给不同引导。
+     *
+     * 这三步**只能用户自己做**（装 Shizuku、无线调试启动服务、点授权），
+     * 所以这里把话说清楚，而不是甩一个「失败」。
+     */
+    private fun askShizuku() {
+        when {
+            !Shizuku2.isInstalled(this) -> alert(
+                "先装 Shizuku",
+                "Shizuku 是个开源工具，让普通 App 能借用 ADB 级权限（不用 root）。\n\n" +
+                    "① 去应用商店搜「Shizuku」装上（或 GitHub 下 rikka 的 Shizuku）\n" +
+                    "② 打开它，按引导用「无线调试」启动服务\n" +
+                    "③ 回到本 App，再点一次这个入口\n\n" +
+                    "装好之后，就能读 /sdcard 下被系统挡住的文件了。"
+            )
+
+            !Shizuku2.isServiceRunning() -> alert(
+                "Shizuku 没在运行",
+                "Shizuku 装好了，但服务没启动。\n\n" +
+                    "打开 Shizuku App，按它的提示：\n" +
+                    "  设置 → 开发者选项 → 无线调试 → 配对\n" +
+                    "配对成功后，用 Shizuku 的快捷开关启动服务。\n\n" +
+                    "启动后回到这里，再点一次这个入口。"
+            )
+
+            !Shizuku2.hasPermission() -> Shizuku2.request { ok ->
+                if (ok) {
+                    toast("Shizuku 已授权")
+                    refreshShizukuRow()
+                } else {
+                    toast("没有授权 —— 可以再点一次试试")
+                }
+            }
+
+            else -> alert(
+                "Shizuku 已就绪",
+                "当前权限：ADB 级（shell）。\n\n" +
+                    "现在 AI 可以直接读 /sdcard 下的文件了（包括之前被 scoped storage " +
+                    "挡住的那些），也能以 shell 身份跑命令。\n\n" +
+                    "试试对 AI 说：「用 shell 看看 /sdcard 下有什么」或者「把某个文件夹扫一遍」。"
+            )
+        }
     }
 
     private fun pickGame() {

@@ -19,8 +19,8 @@ android {
         applicationId = "com.mcp.h5engine"
         minSdk = 26
         targetSdk = 34
-        versionCode = 62
-        versionName = "1.61"
+        versionCode = 63
+        versionName = "1.62"
         // GeckoView 只提供 arm64-v8a 变体：显式过滤 ABI，避免打出别的架构一进预览就崩
         ndk {
             abiFilters += listOf("arm64-v8a")
@@ -96,6 +96,18 @@ dependencies {
     implementation("org.mozilla:rhino:1.7.15")
     // D2 web-chat / a2a-server：内嵌轻量 HTTP 服务（NanoHTTPD，纯 Java，无 native）
     implementation("org.nanohttpd:nanohttpd:2.3.1")
+
+    // Shizuku —— 借 ADB 级权限突破 scoped storage。
+    //
+    // 为什么需要它：App 自己的进程是 untrusted_app，Android 10+ 的 scoped storage
+    // 会把 /sdcard 下的**普通文件**整个过滤掉 —— 能看见目录名，但读不到里面的东西
+    // （实测：`ls /storage/emulated/0` 返回 103 个目录 / 0 个文件，
+    //  连 DCIM/Camera 里的照片都看不见，cat 任何文件都是 Permission denied）。
+    // 有了 Shizuku，就能以 shell(uid 2000) 身份读文件、跑命令，跟 Operit 一个路子。
+    //
+    // 版本对齐 Operit（13.1.5）：它跑通过，不自己挑新版本。
+    implementation("dev.rikka.shizuku:api:13.1.5")
+    implementation("dev.rikka.shizuku:provider:13.1.5")
 }
 
 // ---------------------------------------------------------------------------

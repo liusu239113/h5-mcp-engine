@@ -70,15 +70,59 @@ class SuShellBackend(private val suPath: String = "su") : ShellBackend {
     }
 }
 
-/** 全局入口：默认 direct；将来可在设置里切换后端（切换逻辑后续接）。 */
+/**
+ * Shizuku 后端：借 ADB 级权限执行。
+ *
+ * 为什么需要：App 自身是 `untrusted_app`，scoped storage 会把 `/sdcard` 下
+ * 的文件级访问整个过滤掉（目录名看得见、文件看不见，cat 一律 Permission denied）。
+ * 走 Shizuku 就是以 shell（uid 2000）身份跑，绕开这层过滤。
+ *
+ * 命令拼接与 [SuShellBackend] 一致：`sh -c "cd <cwd> && <cmd...>"`。
+ */
+class ShizukuShellBackend : ShellBackend {
+    override val id = "shizuku"
+
+    override fun run(cmd: List<String>, cwd: File?, env: Map<String, String>, timeoutMs: Long): ShellBackend.Res {
+        val line = buildString {
+            if (cwd != null) append("cd ").append(Shizuku2.shellQuote(cwd.absolutePath)).append(" && ")
+            // 环境变量前缀（Shizuku 的 newProcess 不吃 env 参数，只能自己拼）
+            env.forEach { (k, v) -> append(k).append('=').append(Shizuku2.shellQuote(v)).append(' ') }
+            append(cmd.joinToString(" ") { Shizuku2.shellQuote(it) })
+        }
+        val (code, text) = Shizuku2.sh(line, timeoutMs)
+        return if (code == null) {
+            ShellBackend.Res(-1, "", text)
+        } else {
+            ShellBackend.Res(code, text, "")
+        }
+    }
+}
+
+/**
+ * 全局入口。
+ *
+ * **自动选后端**：能用 Shizuku 就用 Shizuku（权限更高，能读受保护目录），
+ * 否则退回进程内直接 exec。这样调用方（`shell_run` 工具等）完全不用关心
+ * 用户有没有装 Shizuku —— 装了能力自动变强，没装就还是原来的样子。
+ */
 object Shell {
     @Volatile
     var backend: ShellBackend = DirectShellBackend()
+
+    /** 强制指定后端（调试 / 测试用） */
+    fun useBackend(b: ShellBackend) { backend = b }
+
+    /** 当前该用哪个后端 */
+    fun pick(): ShellBackend =
+        if (Shizuku2.isReady()) ShizukuShellBackend() else backend
+
+    /** 当前是否跑在提权模式下（UI 显示用） */
+    fun isElevated(): Boolean = Shizuku2.isReady()
 
     fun run(
         cmd: List<String>,
         cwd: File? = null,
         env: Map<String, String> = emptyMap(),
         timeoutMs: Long = 60_000
-    ): ShellBackend.Res = backend.run(cmd, cwd, env, timeoutMs)
+    ): ShellBackend.Res = pick().run(cmd, cwd, env, timeoutMs)
 }

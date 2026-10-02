@@ -11,6 +11,9 @@
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+    <!-- Shizuku：借 ADB 级权限读文件 / 跑命令（突破 scoped storage）。
+         需要用户自己装 Shizuku 并授权，App 不申请 root。 -->
+    <uses-permission android:name="moe.shizuku.manager.permission.API_V23" />
 
     <application
         android:allowBackup="true"
@@ -45,6 +48,16 @@
             android:exported="false"
             android:process=":mcp"
             android:foregroundServiceType="dataSync" />
+        <!-- Shizuku 的 provider：没有它，Shizuku 服务起不来（拿不到 binder）。
+             声明方式对齐 Operit（跑通过的写法）。 -->
+        <provider
+            android:name="rikka.shizuku.ShizukuProvider"
+            android:authorities="${applicationId}.shizuku"
+            android:enabled="true"
+            android:exported="true"
+            android:multiprocess="false"
+            android:permission="android.permission.INTERACT_ACROSS_USERS_FULL" />
+
         <provider
             android:name="androidx.core.content.FileProvider"
             android:authorities="${applicationId}.files"
