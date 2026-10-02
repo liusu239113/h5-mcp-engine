@@ -106,6 +106,27 @@ object Shizuku2 {
         append("权限等级: ").append(describe())
     }
 
+    /**
+     * **实跑一次** shell 命令，把真实结果和真实报错都摊出来。
+     *
+     * ⚠️ 会阻塞（最多 [timeoutMs]），**必须在子线程调**。
+     *
+     * 为什么不能只靠 [diagnose]：光看状态判断不出「binder 活着、权限也有，
+     * 但 AIDL 调用失败」这种情况 —— 服务端 API 版本不匹配时就是这个症状，
+     * 而 `describe()` 只会自信地说「已授权（ADB 级权限）」，用户看到的就是
+     * 「明明开了却用不了」。真跑一条 `id` 才能把真话说出来。
+     */
+    fun probe(timeoutMs: Long = 8000): String = buildString {
+        append("--- 实跑一次 id ---\n")
+        val (code, out) = exec(listOf("id"), timeoutMs)
+        if (code == null) {
+            append("执行失败：").append(out.take(400))
+        } else {
+            append("退出码 ").append(code).append("：").append(out.trim().take(300))
+        }
+        lastError?.let { append("\n最近一次错误原文：").append(it.take(400)) }
+    }
+
     /** App 上下文，由 MainActivity 在 onCreate 时注入（Shizuku 回调里也要用） */
     @Volatile
     private var appCtx: Context? = null
@@ -209,9 +230,22 @@ object Shizuku2 {
         val binder = Shizuku.getBinder() ?: return null
         IShizukuService.Stub.asInterface(binder)
     }.getOrElse {
-        Log.w(TAG, "拿 Shizuku 服务失败: ${it.javaClass.simpleName}: ${it.message}")
+        lastError = "拿 Shizuku 服务失败：${it.javaClass.simpleName}: ${it.message}"
+        Log.w(TAG, lastError!!)
         null
     }
+
+    /**
+     * 最近一次失败的真实原因（排障用）。
+     *
+     * 为什么要有它：以前 `exec()` 失败只回一句「拿不到 Shizuku 服务（binder 或
+     * AIDL 调用失败）」—— 这句话等于没说，用户报「Shizuku 明明开了却用不了」时
+     * 我根本不知道卡在哪一步（binder 拿不到？AIDL 版本不匹配？权限？）。
+     * 现在把真实异常原文留下来，`diagnose()` 里能看到。
+     */
+    @Volatile
+    var lastError: String? = null
+        private set
 
     /**
      * 起一个远程进程（以 shell 身份）。
@@ -226,7 +260,8 @@ object Shizuku2 {
         // 直接 new 编译不过（见 HexoraProcessFactory 的说明）
         HexoraProcessFactory.create(remote)
     }.getOrElse {
-        Log.w(TAG, "newProcess 失败: ${it.javaClass.simpleName}: ${it.message}")
+        lastError = "newProcess 失败：${it.javaClass.simpleName}: ${it.message}"
+        Log.w(TAG, lastError!!)
         null
     }
 

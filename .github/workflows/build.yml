@@ -5,8 +5,11 @@ on:
     branches: [ main ]
   workflow_dispatch:
 
+# 必须给 contents: write —— 下面的 Publish release 要建 tag / 发 Release。
+# 只给 read 的话 gh release create 会直接退出码 1（而且它默认不打印原因，
+# 只留一句「Process completed with exit code 1」，极难排查）。
 permissions:
-  contents: read
+  contents: write
 # 同分支连续推送时，取消上一次还在跑的构建：省额度、也不用等队列里那个过期的
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -93,24 +96,34 @@ jobs:
       # 自动发 Release：以前每次都要手工建 tag / 传 APK，导致「GitHub 上没有可下载的
       # 测试链接」。artifact 虽然也在，但下载要登录 GitHub，手机上点不开 ——
       # Release 的资产是公开直链，扫一下就能下。
+      # 发 Release 是「锦上添花」，不该把整个构建判失败。
+      # 真出问题（权限 / 网络）时打一行 ::error:: 到日志里，一眼能看见。
       - name: Publish release
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        continue-on-error: true
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          set -e
           VER=$(grep -oP 'versionName\s*=\s*"\K[^"]+' app/build.gradle.kts | head -1)
           CODE=$(grep -oP 'versionCode\s*=\s*\K[0-9]+' app/build.gradle.kts | head -1)
           TAG="v$VER"
-          APK=$(ls app/build/outputs/apk/release/*.apk | head -1)
-          echo "版本 $VER (vc$CODE) → tag $TAG，APK=$APK"
-          # 同名 tag / release 已存在时直接覆盖资产，不报错（重跑同版本很常见）
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release upload "$TAG" "$APK" --clobber
-          else
-            gh release create "$TAG" "$APK" \
-              --title "Hexora $TAG" \
-              --notes "自动构建 · 提交 ${GITHUB_SHA:0:7}" \
-              --latest
+          APK=$(ls app/build/outputs/apk/release/*.apk 2>/dev/null | head -1)
+          if [ -z "$APK" ]; then
+            echo "::error::没找到 release APK，跳过发版"
+            exit 0
           fi
-          echo "下载直链：https://github.com/${GITHUB_REPOSITORY}/releases/download/$TAG/$(basename "$APK")"
+          # 重命名成带版本号的名字：Release 资产用 app-release.apk 太含糊
+          NAME="Hexora-$TAG.apk"
+          cp "$APK" "/tmp/$NAME"
+          echo "版本 $VER (vc$CODE) → tag $TAG，资产 $NAME"
+          OUT=$(gh release create "$TAG" "/tmp/$NAME" \
+                  --title "Hexora $TAG" \
+                  --notes "自动构建 · 提交 ${GITHUB_SHA:0:7}" \
+                  --latest 2>&1) && {
+            echo "已创建 release $TAG"
+          } || {
+            # 已存在同名 tag / release：覆盖资产（重跑同版本很常见）
+            echo "创建失败（多半已存在），改为覆盖资产。原因：$OUT"
+            gh release upload "$TAG" "/tmp/$NAME" --clobber || echo "::error::覆盖资产也失败：$?"
+          }
+          echo "下载直链：https://github.com/${GITHUB_REPOSITORY}/releases/download/$TAG/$NAME"

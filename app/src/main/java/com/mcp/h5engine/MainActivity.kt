@@ -452,6 +452,39 @@ class MainActivity : AppCompatActivity(), GameUi {
      */
     @Volatile private var subtaskAbandoned = false
 
+    /**
+     * 派这个子任务的**那一轮**的序号（runSeq）。
+     *
+     * 不变式：**子任务不能活得比派它的那一轮久。**
+     *
+     * 子任务是在主线线程里同步跑的（`subtask` 是阻塞调用），所以正常情况下
+     * 主线根本没法在子任务跑完之前收尾。唯一能「主线已经结束了、子任务还在跑」
+     * 的路是：用户又发了条消息 / 这一轮被顶掉 → `runSeq++` →
+     * 主线收尾的 `finishRun()` 被 `mySeq == runSeq` 守卫挡掉
+     * （那个守卫是**故意**的，防旧轮次乱写界面）—— 于是**没人去管子任务**，
+     * 它继续跑几十轮、继续写文件、继续热重载。
+     *
+     * 所以判据不能只看 `running`，要看「我还是不是当前那一轮」。
+     */
+    @Volatile private var subtaskOwnerSeq = -1
+
+    /**
+     * 子任务看门狗：每秒查一次「派我的那一轮还在不在」。
+     *
+     * 为什么不能只靠 onEvent 里的检查：子任务可能正卡在一次很长的 HTTP 请求里，
+     * 几十秒都不产生事件 —— 那种时候只有看门狗能把它捞出来。
+     */
+    private val subtaskWatchdog = object : Runnable {
+        override fun run() {
+            if (subtaskRunnerRef == null) return          // 没有子任务了
+            if (runSeq != subtaskOwnerSeq) {
+                abandonSubtask()
+                return
+            }
+            main.postDelayed(this, 1000)
+        }
+    }
+
     private var activeTab = 0
     /** 预览里现在该不该出声：默认静音，只有停在「预览」页时才放开 */
     @Volatile private var previewMuted = true
@@ -5483,6 +5516,7 @@ class MainActivity : AppCompatActivity(), GameUi {
             Triple("工作区目录（免 Shizuku）", safSubtitle(), { askWorkspace() }),
             Triple("Shizuku 提权", shizukuSubtitle(), { askShizuku() }),
             Triple("git 操作", "给项目建版本管理、提交、推到 GitHub", { showGitMenu() }),
+            Triple("下载最新版 APK", "从 GitHub Releases 拿 Hexora 最新一版的下载直链", { showLatestApk() }),
             Triple("查看 console 输出", "游戏里的 log / warn / error", { showConsole() }),
             Triple("切换 / 新建项目", "一个项目一个目录，互不干扰", { showProjects() }),
             Triple("后台保活设置", "切后台 / 锁屏 AI 继续跑（需要关掉电池优化）", { askKeepAlive() }),
@@ -6896,6 +6930,13 @@ makerRow1.addView(ghostBtnOf(ctx, pal, "扫码登录").apply {
             requireVisualCheck = projKind(currentGame) != "maker",
             projectDir = projDir()
         ) { ev ->
+            // 【最内层的刹车】每来一条事件就检查一次「派我的那一轮还在不在」。
+            // 不等看门狗（它最多要 1 秒）—— 子任务只要还想再动一下文件，
+            // 就会先经过这里，直接把它掐掉，少写一个文件是一个。
+            if (runSeq != subtaskOwnerSeq) {
+                runner.cancel()
+                return@AgentRunner
+            }
             // 只挑有信息量的往主线转，避免把子任务的几百行噪音灌进主对话。
             //
             // ⚠️ 失败信息**必须**转发。以前这里只认 TOOLRUN / AIFINAL，
@@ -6930,9 +6971,14 @@ makerRow1.addView(ghostBtnOf(ctx, pal, "扫码登录").apply {
         // 打上「当前是子任务在执行」的标记：子任务写文件也会触发热重载，
         // 主线看到预览被冲掉时，靠 file_journal 里这个标记才知道是自己派的子任务干的。
         EngineTools.subtaskMode = true
-        // 登记到字段上：这样「停止」按钮 / 主线收尾能真的掐掉它
+        // 登记到字段上：这样「停止」按钮 / 主线收尾 / 看门狗能真的掐掉它。
+        // 同时记下「派我的那一轮」—— 那一轮一旦被顶掉（runSeq 变了），
+        // 这个子任务就该立刻停：它没有理由活得比派它的那一轮久。
         subtaskRunnerRef = runner
         subtaskAbandoned = false
+        subtaskOwnerSeq = runSeq
+        main.removeCallbacks(subtaskWatchdog)
+        main.postDelayed(subtaskWatchdog, 1000)
         val result = try {
             runner.run(
                 subHistory,
@@ -6960,6 +7006,8 @@ makerRow1.addView(ghostBtnOf(ctx, pal, "扫码登录").apply {
             EngineTools.subtaskMode = false
             subtaskDepth = depth
             subtaskRunnerRef = null
+            subtaskOwnerSeq = -1
+            main.removeCallbacks(subtaskWatchdog)
         }
 
         // 已经被放弃（用户按了停止 / 主线这一轮已经收尾）：
@@ -6989,6 +7037,12 @@ makerRow1.addView(ghostBtnOf(ctx, pal, "扫码登录").apply {
      */
     private fun abandonSubtask() {
         val r = subtaskRunnerRef ?: return
+        main.removeCallbacks(subtaskWatchdog)
+        // 幂等：看门狗和 onEvent 里的刹车可能同时打到，只提示一次
+        if (subtaskAbandoned) {
+            runCatching { r.cancel() }
+            return
+        }
         subtaskAbandoned = true
         runCatching { r.cancel() }
         main.post { addSystemLine("已中止还在后台跑的子任务（主线这一轮已经结束，不再继续改文件）") }
@@ -7179,6 +7233,44 @@ makerRow1.addView(ghostBtnOf(ctx, pal, "扫码登录").apply {
         dlg.show()
     }
 
+    /**
+     * 「下载最新版 APK」：问 GitHub 要 latest release，把**公开直链**给用户。
+     *
+     * 为什么做这个：CI 每次构建都会自动发 Release，但让用户自己去 GitHub 翻
+     * Releases 页、挑版本、下载，在手机上很烦；Actions 的 artifact 还要登录才能下。
+     * 这里一次点击就拿到直链，点一下直接用系统浏览器下载。
+     */
+    private fun showLatestApk() {
+        toast("正在查最新版本…")
+        Thread {
+            val rel = GitTools.latestRelease()
+            main.post {
+                if (rel == null) {
+                    alert(
+                        "查不到最新版本",
+                        "可能的原因：\n" +
+                            "  · 手机当前网络连不上 GitHub（国内常见，挂个代理再试）；\n" +
+                            "  · 仓库还没有发布过 Release。\n\n" +
+                            "也可以手动打开：\n" +
+                            "https://github.com/liusu239113/h5-mcp-engine/releases"
+                    )
+                    return@post
+                }
+                val mb = if (rel.sizeBytes > 0) "（${rel.sizeBytes / 1024 / 1024} MB）" else ""
+                HxDialog.Builder(themed(), pal)
+                    .setTitle("最新版 ${rel.tag} $mb")
+                    .setMessage(
+                        "点「下载」会用系统浏览器打开公开直链 —— **不需要登录 GitHub**。\n\n" +
+                            rel.apkUrl
+                    )
+                    .setPositiveButton("下载") { -> openExternal(rel.apkUrl) }
+                    .setNeutralButton("复制链接") { -> copyToClipboard(rel.apkUrl) }
+                    .setNegativeButton("关闭", null)
+                    .show()
+            }
+        }.start()
+    }
+
     /** 跑一条 git 命令并把输出摊给用户看 */
     private fun gitDo(dir: File, op: () -> GitTools.Res) {
         toast("执行中…")
@@ -7308,14 +7400,26 @@ makerRow1.addView(ghostBtnOf(ctx, pal, "扫码登录").apply {
                 }
             }
 
-            else -> alert(
-                "Shizuku 已就绪",
-                "当前权限：ADB 级（shell）。\n\n" +
-                    "现在 AI 可以直接读 /sdcard 下的文件了（包括之前被 scoped storage " +
-                    "挡住的那些），也能以 shell 身份跑命令。\n\n" +
-                    "试试对 AI 说：「用 shell 看看 /sdcard 下有什么」或者「把某个文件夹扫一遍」。\n\n" +
-                    "—— 诊断 ——\n" + Shizuku2.diagnose()
-            )
+            else -> {
+                // 「已授权」不等于「真能用」：服务端 API 版本不匹配时 binder 活着、
+                // 权限也有，但 AIDL 调用会失败 —— 只报状态的话用户会看到
+                // 「明明开了却用不了」。所以这里**真跑一条命令**验一下。
+                toast("正在实测 Shizuku 权限…")
+                Thread {
+                    val report = Shizuku2.diagnose() + "\n" + Shizuku2.probe()
+                    main.post {
+                        alert(
+                            "Shizuku 已就绪",
+                            "当前权限：ADB 级（shell）。\n\n" +
+                                "现在 AI 可以直接读 /sdcard 下的文件了（包括之前被 scoped storage " +
+                                "挡住的那些），也能以 shell 身份跑命令。\n\n" +
+                                "试试对 AI 说：「用 shell 看看 /sdcard 下有什么」" +
+                                "或者「把某个文件夹扫一遍」。\n\n" +
+                                "—— 诊断 ——\n" + report
+                        )
+                    }
+                }.start()
+            }
         }
     }
 

@@ -271,6 +271,45 @@ object GitTools {
         return if (v.contains(':')) v.substringAfter(':') else v
     }
 
+    /**
+     * 本 App 自己的发布仓库 —— 用来拿「最新一版 APK 的下载直链」。
+     *
+     * 为什么要内置：CI 每次构建都会自动发 Release，但用户要拿到那个 APK，
+     * 以前得自己开浏览器 → 进 GitHub → 找 Releases → 挑版本 → 下载。
+     * 手机上这一步很烦，而且 Actions 的 artifact 还必须登录才能下。
+     * 这里直接问 GitHub API 要 latest release 的资产直链，一次点击就能下。
+     */
+    private const val SELF_REPO = "liusu239113/h5-mcp-engine"
+
+    /** 最新版信息：tag = 版本号，apkUrl = 公开直链（不用登录） */
+    data class LatestRelease(val tag: String, val apkUrl: String, val sizeBytes: Long)
+
+    /**
+     * 问 GitHub 要本 App 的最新 Release。
+     *
+     * 失败一律返回 null（网络不通 / 还没发过 release），调用方给一句人话即可 ——
+     * 「查不到新版本」不该变成一个错误弹窗。
+     */
+    fun latestRelease(): LatestRelease? = runCatching {
+        val r = httpGet("https://api.github.com/repos/$SELF_REPO/releases/latest", "")
+        if (r.code != 200) return@runCatching null
+        val o = org.json.JSONObject(r.body)
+        val tag = o.optString("tag_name", "")
+        val assets = o.optJSONArray("assets") ?: return@runCatching null
+        for (i in 0 until assets.length()) {
+            val a = assets.optJSONObject(i) ?: continue
+            val name = a.optString("name", "")
+            if (name.endsWith(".apk", ignoreCase = true)) {
+                return@runCatching LatestRelease(
+                    tag,
+                    a.optString("browser_download_url", ""),
+                    a.optLong("size", 0)
+                )
+            }
+        }
+        null
+    }.getOrNull()
+
     private data class Http(val code: Int, val body: String)
 
     /** 极简 GET（不引依赖）：只用来问 GitHub API 的仓库权限 */
