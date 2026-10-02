@@ -611,6 +611,14 @@ class EngineTools(private val ui: GameUi, private val root: File) {
     // ==================== 执行 ====================
 
     fun call(name: String, argsJson: String): ToolResult {
+        // 【缓存失效】不是「可缓存的只读工具」→ 一律先把缓存清掉。
+        //
+        // 为什么放在最前面（连 MCP 分支一起管）：MCP 的写操作（maker_* 生成素材、
+        // 写工程文件）同样会让本地缓存的读结果过期，而它们在上面那个 early-return
+        // 里就返回了，走不到下面。宁可保守清一次，也不要让模型读到过期内容。
+        // （只读工具不受影响 —— 它们本来就不该清。）
+        if (!ToolCache.cacheable(name)) ToolCache.invalidateAll()
+
         // MCP 工具（TapTap / Maker）转给对应服务器。
         // 只读类常驻；写 / 发布类要用户放行 —— 模型可能凭记忆猜工具名，猜中就等于绕过闸门，
         // 所以这里也要拦，并且把「为什么不能调」直说给它，免得它转头跟用户说「我没有这个能力」。
@@ -638,11 +646,22 @@ class EngineTools(private val ui: GameUi, private val root: File) {
                 return ToolResult(hub.call(name, argsJson))
             }
         }
-        return try {
+        // 【缓存】只读工具 + 相同参数 → 直接命中，不再重跑。
+        // 弱模型很爱反复读同一个文件，这一层能省掉大量重复 IO。
+        // 写操作绝不会走到这里（ToolCache.cacheable 只放只读工具）。
+        ToolCache.get(name, argsJson)?.let { return it }
+
+        val result = try {
             exec(name, runCatching { JSONObject(argsJson) }.getOrDefault(JSONObject()))
         } catch (t: Throwable) {
             ToolResult("工具执行失败 ${t.javaClass.simpleName}: ${t.message}")
         }
+
+        // 只读 → 存起来，供本轮后续重复读命中。
+        // （写操作的失效已经在函数开头做过了。）
+        if (ToolCache.cacheable(name)) ToolCache.put(name, argsJson, result)
+
+        return result
     }
 
     /** 广告硬纪律：即使文档读不到，也要把正确做法塞给模型 */

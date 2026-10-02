@@ -253,6 +253,14 @@ class AgentRunner(
         // 轮次又会从 1 重新数 —— 用户看到的就是「点了重试，前面全白干」。
         if (!resume) history += ChatMsg("user", userText, userImages)
 
+        // 缓存作用域 = 一轮：清掉上一轮留下的（跨轮缓存风险大，用户在别处改了文件我们不知道）
+        ToolCache.beginTurn()
+
+        // 【上下文压缩】历史太长就先把老轮次压成摘要，再开始跑。
+        // 放在这里（而不是循环里）是因为：一开始就压，后面每一轮的请求体都小，
+        // 而不是等撑爆了才补救。
+        compressHistory(history)
+
         val limit = cfg.maxSteps.coerceAtMost(skill.maxSteps)
         var step = if (resume) startStep.coerceAtLeast(0) else 0
         var wrote = false
@@ -315,7 +323,26 @@ class AgentRunner(
                 return
             }
 
+            // 【并发】同一轮里的**只读**调用可以并行跑 —— 模型一次吐好几个读操作时
+            // （读三个文件、又搜一次代码），串行就是白等。写操作一律保持串行，
+            // 而且写操作会清缓存，更不能和读并发。
+            //
+            // 分组规则：连续的一段只读调用并成一批；遇到写操作就切断，
+            // 保证「读→写→读」的顺序语义不被破坏（写之后的读必须看到新内容）。
+            val batches = mutableListOf<MutableList<ToolCall>>()
             for (tc in reply.toolCalls) {
+                val canBatch = ToolCache.parallelSafe(tc.name) && isJsonObject(tc.argsJson)
+                if (canBatch && batches.isNotEmpty() && ToolCache.parallelSafe(batches.last().first().name)) {
+                    batches.last() += tc
+                } else {
+                    batches += mutableListOf(tc)
+                }
+            }
+
+            for (batch in batches) {
+            // 先把这一批里「该跑的」挑出来（取消的 / 参数残缺的当场给结果，不进并发）
+            val parallel = mutableListOf<ToolCall>()
+            for (tc in batch) {
                 if (cancelled) {
                     // 用户中途按了停止：**必须**给这个还没执行的调用补一条占位响应。
                     // 否则历史里会留下「assistant 带 tool_calls 却没有对应 tool 消息」的残缺记录，
@@ -325,23 +352,36 @@ class AgentRunner(
                     history += ChatMsg("tool", "（已取消，未执行）", emptyList(), toolCallId = tc.id)
                     continue
                 }
-
-                // 工具自己抛异常（参数不合法 / 文件不存在之类）同样要补响应，道理同上
                 // 把「动的是哪个文件」一起报给界面：对话里那行就能显示成「修改 main.js」，
                 // 而不是光秃秃一个 game_write —— 用户要看得见 AI 正在改哪份文件。
                 onEvent("TOOLRUN:[${tc.name}]" + toolTarget(tc.name, tc.argsJson))
-                // 参数是半截 JSON（上一次流被掐断留下的）：**别拿去执行**。
-                // 直接执行的话工具会报「缺少参数」，模型很容易以为是它自己写错了、
-                // 转头去改代码；如实说「参数没接收完整，重调一次」它才会走对路。
-                val res = if (!isJsonObject(tc.argsJson)) {
-                    EngineTools.ToolResult(
-                        "这次调用的参数没有接收完整（上一次可能被中断了）。" +
-                            "请重新调用一次 ${tc.name}，并确保参数是完整的 JSON。"
-                    )
-                } else {
-                    runCatching { tools.call(tc.name, tc.argsJson) }
-                        .getOrElse { t -> EngineTools.ToolResult("工具执行出错：${t.javaClass.simpleName}: ${t.message}") }
+                if (ToolCache.parallelSafe(tc.name) && isJsonObject(tc.argsJson)) parallel += tc
+            }
+
+            // 并发跑这一批只读调用（>1 才值得开线程）
+            val precomputed = java.util.concurrent.ConcurrentHashMap<String, EngineTools.ToolResult>()
+            if (parallel.size > 1) {
+                val pool = java.util.concurrent.Executors.newFixedThreadPool(
+                    parallel.size.coerceAtMost(4)
+                )
+                try {
+                    val futures = parallel.map { tc ->
+                        pool.submit { precomputed[tc.id] = safeCall(tc) }
+                    }
+                    futures.forEach { runCatching { it.get(120, java.util.concurrent.TimeUnit.SECONDS) } }
+                } finally {
+                    pool.shutdownNow()
                 }
+            }
+
+            for (tc in batch) {
+                if (cancelled && !precomputed.containsKey(tc.id)) {
+                    history += ChatMsg("tool", "（已取消，未执行）", emptyList(), toolCallId = tc.id)
+                    continue
+                }
+                // 工具自己抛异常（参数不合法 / 文件不存在之类）同样要补响应，道理同上。
+                // 并发跑过就直接取结果；否则现跑（写操作、单个调用都走这里）。
+                val res = precomputed[tc.id] ?: safeCall(tc)
                 // 工具产出的图（主要是 game_shot 的截图）分两路走：
                 //   ① 给模型看（走多模态）—— 前提是当前模型能看图；
                 //   ② **落到工程工作区**，并往历史里塞一张缩略图，
@@ -401,6 +441,7 @@ class AgentRunner(
                     wrote = true
                 }
             }
+            }  // ← 关闭「批次」循环
 
             // 写完就通知刷新预览，不用等整轮结束
             if (wrote) onEvent("RELOAD")
@@ -412,6 +453,100 @@ class AgentRunner(
             onEvent("INFO: 到步数上限（$limit），可再发一条让它继续，或在设置里调大上限。")
         }
     }
+
+    // ==================== 上下文压缩 ====================
+
+    /**
+     * 历史超过预算时，把**老轮次**压成一段摘要，只保留最近几轮全量。
+     *
+     * ## 为什么需要
+     *
+     * 工具结果动辄几千字符（读文件、看日志），轮次一多历史就是几十万字符，
+     * 每轮请求都要把它们整个发一遍 —— 又慢又贵，最后还会因为超限直接失败。
+     *
+     * ## 怎么压（刻意保守）
+     *
+     * 不调模型做「智能摘要」（那要额外一次请求，还可能把关键信息编没）。
+     * 这里做的是**结构化压缩**：老轮次里的工具结果只留**首行 + 末尾几行**
+     * （首行通常是「成功 / 失败」结论，末尾通常是路径 / 提示），
+     * 中间的长正文丢掉。用户消息和模型的最终回复**完整保留**（那才是任务主线）。
+     *
+     * ## 边界（不能碰的东西）
+     *
+     * · `system` 消息：技能提示、人格、纪律，**永远不压**；
+     * · 带 `reasoning` 的 assistant 消息：DeepSeek 思考模式要求原样回传，
+     *   压了会直接 400 —— 所以这类消息也跳过；
+     * · 带 `tool_calls` 的 assistant 消息：它和后面的 tool 响应是一对，
+     *   只压 tool 响应、不动 assistant，配对关系不破。
+     *
+     * @param keepRecent 最近的多少条消息保持全量（默认 12 —— 差不多是最近 2~3 轮）
+     */
+    private fun compressHistory(history: MutableList<ChatMsg>, keepRecent: Int = 12) {
+        if (history.size <= keepRecent + 2) return
+
+        val budget = 60_000                       // 整段历史的字符预算
+        val total = history.sumOf { it.text?.length ?: 0 }
+        if (total <= budget) return               // 没超就不动，压缩本身也有代价
+
+        val cut = (history.size - keepRecent).coerceAtLeast(1)
+        var saved = 0
+        for (i in 1 until cut) {                  // 从 1 开始：history[0] 是 system，跳过
+            val m = history[i]
+            if (m.role == "system") continue
+            // 带 reasoning 的不能动（DeepSeek 要求原样回传，改了直接 400）
+            if (m.role == "assistant" && !m.reasoning.isNullOrBlank()) continue
+            val t = m.text ?: continue
+            if (t.length <= 400) continue          // 本来就不长，压了没意义
+
+            val compact = compactToolText(t)
+            saved += t.length - compact.length
+            history[i] = m.copy(text = compact)
+        }
+        if (saved > 0) {
+            onEvent("INFO: 上下文压缩 —— 老轮次的工具结果已折叠，省下约 ${saved / 1000}k 字符")
+        }
+    }
+
+    /**
+     * 把一段长工具结果折成「首行 + …（略 N 字符）+ 末几行」。
+     *
+     * 保留首行是因为工具习惯把结论写在第一行（「已写入 xxx」「失败：xxx」）；
+     * 保留末尾是因为路径、下一步提示常在尾部。
+     */
+    private fun compactToolText(t: String): String {
+        val lines = t.lineSequence().toList()
+        if (lines.size <= 6) return t.take(600)
+
+        val head = lines.take(2).joinToString("\n")
+        val tail = lines.takeLast(3).joinToString("\n")
+        val omitted = lines.size - 5
+        return buildString {
+            append(head)
+            append("\n…（已折叠 ").append(omitted).append(" 行历史内容，需要时重新读一次）…\n")
+            append(tail)
+        }
+    }
+
+    /**
+     * 跑一个工具调用，**绝不抛异常**（并发跑的时候异常会吞掉整个批次，
+     * 而且历史里会缺一条 tool 响应，之后每条请求都会被服务商拒收）。
+     *
+     * 参数是半截 JSON（上一次流被掐断留下的）也在这里拦下：
+     * **别拿去执行** —— 直接执行会报「缺少参数」，模型容易以为是它自己写错了、
+     * 转头去改代码；如实说「参数没接收完整，重调一次」它才会走对路。
+     */
+    private fun safeCall(tc: ToolCall): EngineTools.ToolResult =
+        if (!isJsonObject(tc.argsJson)) {
+            EngineTools.ToolResult(
+                "这次调用的参数没有接收完整（上一次可能被中断了）。" +
+                    "请重新调用一次 ${tc.name}，并确保参数是完整的 JSON。"
+            )
+        } else {
+            runCatching { tools.call(tc.name, tc.argsJson) }
+                .getOrElse { t ->
+                    EngineTools.ToolResult("工具执行出错：${t.javaClass.simpleName}: ${t.message}")
+                }
+        }
 
     /**
      * MCP 返回这种味道的文本 = 云能力还没授权。
