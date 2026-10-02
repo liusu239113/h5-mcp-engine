@@ -26,7 +26,12 @@ import android.provider.MediaStore
 import android.provider.Settings
 import android.text.Editable
 import android.text.InputType
+import android.text.Spannable
+import android.text.SpannableStringBuilder
 import android.text.TextWatcher
+import android.text.style.ForegroundColorSpan
+import android.text.style.RelativeSizeSpan
+import android.text.style.StyleSpan
 import android.view.Gravity
 import android.view.PixelCopy
 import android.view.View
@@ -263,6 +268,38 @@ private val CANVAS_SHOT_JS = """
 })()
 """.trimIndent()
 
+/**
+ * 页面**当前**视口高度（CSS 像素）。
+ *
+ * 截图必须按这个高度取，而不是按 WebView 控件的物理尺寸 ——
+ * 预览槽位里 WebView 就是那么矮，页面也按那个矮高度排的版；
+ * 只有按页面自己报的高度截，图才等于用户全屏看到的那一屏（不少下半截）。
+ */
+private val VIEWPORT_H_JS = """
+(function(){
+  try {
+    return String(Math.max(
+      window.innerHeight || 0,
+      (document.documentElement && document.documentElement.clientHeight) || 0,
+      (document.body && document.body.clientHeight) || 0
+    ));
+  } catch(e){ return '0'; }
+})()
+""".trimIndent()
+
+/** 页面当前视口宽度（CSS 像素），同上 */
+private val VIEWPORT_W_JS = """
+(function(){
+  try {
+    return String(Math.max(
+      window.innerWidth || 0,
+      (document.documentElement && document.documentElement.clientWidth) || 0,
+      (document.body && document.body.clientWidth) || 0
+    ));
+  } catch(e){ return '0'; }
+})()
+""".trimIndent()
+
 class MainActivity : AppCompatActivity(), GameUi {
 
     // ---------- 视图 ----------
@@ -395,6 +432,16 @@ class MainActivity : AppCompatActivity(), GameUi {
     private var runCardView: LinearLayout? = null
     private var runSeq = 0
     private var runWrote = false
+    /** 本轮最后一次交付文字（AIFINAL）—— 收尾总结卡要从它里面抠「做了什么 / 怎么验的 / 还剩什么」 */
+    private var lastFinalText: String? = null
+
+    /**
+     * 本轮有没有可核验的动作（抓图 / 跑断言 / 构建 / 真机点击）。
+     * 总结卡用它决定「怎么验的」那一栏是照实说还是如实说「没验」——
+     * **绝不在没有验证的时候编一句「验证通过」**（那是撒谎，比不写更糟）。
+     */
+    private var lastRunVerified = false
+
     /** 本轮是否摸过 maker_ 工具（保证「第一次做 Maker」也能自动构建） */
     private var makerTouched = false
     /**
@@ -1417,22 +1464,55 @@ class MainActivity : AppCompatActivity(), GameUi {
         }
         // 用户发的图：直接把缩略图放进气泡里（以前只在下面挂一行「[附件] xx.jpg」文字，等于看不到图）
         if (thumbs.isNotEmpty()) bubbleThumbRow(card, thumbs)
-        val paras = text.split(Regex("\n{2,}")).map { it.trim() }.filter { it.isNotEmpty() }
-            .ifEmpty { listOf(text) }
-        for ((i, seg) in paras.withIndex()) {
-            if (i > 0) card.addView(View(this), LinearLayout.LayoutParams(-1, dp(7)))
-            card.addView(TextView(this).apply {
-                // 链接染成蓝色、点一下直接跳外部浏览器；没有链接的段落才保持可长按选中
-                textSize = if (fromUser) 14f else 13.5f
-                setTextColor(if (fromUser) pal.userText else pal.aiText)
-                linkifySeg(this, seg)
-            })
-            val links = LINK_REGEX.findAll(seg).map { it.value }.toList()
+        // 正文按 **块** 排：代码块 / 表格 / 列表 / 标题 / 普通段落。
+        // 以前是「按空行切段、每段一个 TextView」，于是模型吐 markdown 时
+        // 用户看到的是一堆 `##`、`**`、`|---|` 原文 —— 这就是「乱鸡巴搞，各种标点符号」。
+        val baseColor = if (fromUser) pal.userText else pal.aiText
+        val blocks = splitMdBlocks(text)
+        for ((i, blk) in blocks.withIndex()) {
+            if (i > 0) card.addView(View(this), LinearLayout.LayoutParams(-1, dp(8)))
+            when (blk.kind) {
+                MdKind.CODE -> card.addView(codeBlockView(blk.text))
+                MdKind.TABLE -> card.addView(tableBlockView(blk.text, baseColor))
+                else -> card.addView(TextView(this).apply {
+                    textSize = if (fromUser) 14f else 13.5f
+                    setTextColor(baseColor)
+                    setLineSpacing(dp(3).toFloat(), 1.0f)
+                    val links = LINK_REGEX.findAll(blk.text).map { it.value }.toList()
+                    if (links.isEmpty()) {
+                        // 用 setText 而不是 `text =`：本函数的参数就叫 text，
+                        // `apply` 里的简单名会先命中参数（val，不可赋值），编译不过。
+                        setText(mdInline(blk.text, baseColor))
+                        setTextIsSelectable(true)
+                    } else {
+                        // 有链接就按**原文**排（不做 markdown 转换）——
+                        // 转换会删掉 `**` / 反引号，span 的下标就对不上了，链接会点错位置。
+                        val sp = android.text.SpannableString(blk.text)
+                        for (u in links) {
+                            val at = blk.text.indexOf(u)
+                            if (at < 0) continue
+                            sp.setSpan(object : android.text.style.ClickableSpan() {
+                                override fun onClick(w: View) { openExternal(u) }
+
+                                override fun updateDrawState(ds: android.text.TextPaint) {
+                                    ds.color = LINK_BLUE
+                                    ds.isUnderlineText = false
+                                }
+                            }, at, at + u.length, Spannable.SPAN_EXCLUSIVE_EXCLUSIVE)
+                        }
+                        setText(sp)
+                        movementMethod = android.text.method.LinkMovementMethod.getInstance()
+                        highlightColor = 0x00000000
+                        setTextIsSelectable(false)
+                    }
+                })
+            }
+            val links = LINK_REGEX.findAll(blk.text).map { it.value }.toList()
             val ops = LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.END
             }
-            ops.addView(iconOp("copy", "复制本段") { copyToClip(seg, "本段") })
+            ops.addView(iconOp("copy", "复制本段") { copyToClip(blk.text, "本段") })
             if (links.size == 1) {
                 ops.addView(iconOp("open", "用浏览器打开链接") { openExternal(links[0]) })
                 ops.addView(iconOp("link", "复制链接地址") { copyToClip(links[0], "链接") })
@@ -1442,7 +1522,7 @@ class MainActivity : AppCompatActivity(), GameUi {
             card.addView(ops, LinearLayout.LayoutParams(-1, -2))
         }
         // 分段多的时候一段段点太烦，末尾再给一个整条复制
-        if (paras.size > 1) {
+        if (blocks.size > 1) {
             card.addView(LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.END
@@ -1676,6 +1756,365 @@ class MainActivity : AppCompatActivity(), GameUi {
         })
         authCardTv = st
         scrollChatToBottom()
+    }
+
+    // ==================== 正文排版（markdown → 原生视图） ====================
+    //
+    // 用户的原话：「又是各种星星符号，又是怎么样，都没有输出一个让人很容易看得懂的东西，
+    // 都没有总结的，各种标点符号怎么乱排，甚至连个框框都没有」。
+    //
+    // 根因：模型（DeepSeek 之类）默认就吐 markdown（`##` / `**粗**` / `| a | b |` /
+    // ```代码块```），而这里以前是**原样**把整段塞进 TextView —— 星号、竖线、井号全露出来。
+    // 所以这里做一层**轻量**渲染：标题 / 粗体 / 行内代码 / 列表 / 引用 / 表格 / 代码块。
+    // 只做这几种（游戏交付报告里实际会出现的），不引第三方库、不追求完整 CommonMark。
+
+    /** 正文块的类型 */
+    private enum class MdKind { TEXT, CODE, TABLE }
+
+    /** 一个排版块：表格 / 代码块是整块处理，其余按行内规则排 */
+    private class MdBlock(val kind: MdKind, val text: String)
+
+    /** 把 markdown 正文切成「块」。围栏代码块和表格必须整块拿，否则管道符会被当成正文 */
+    private fun splitMdBlocks(src: String): List<MdBlock> {
+        val out = mutableListOf<MdBlock>()
+        val buf = StringBuilder()
+        val lines = src.replace("\r\n", "\n").split('\n')
+        var i = 0
+        fun flush() {
+            val t = buf.toString().trim('\n')
+            if (t.isNotBlank()) out += MdBlock(MdKind.TEXT, t)
+            buf.setLength(0)
+        }
+        while (i < lines.size) {
+            val line = lines[i]
+            // 围栏代码块：```lang ... ```
+            if (line.trimStart().startsWith("```")) {
+                flush()
+                i++
+                val code = StringBuilder()
+                while (i < lines.size && !lines[i].trimStart().startsWith("```")) {
+                    code.append(lines[i]).append('\n')
+                    i++
+                }
+                if (i < lines.size) i++   // 吃掉收尾的 ```
+                out += MdBlock(MdKind.CODE, code.toString().trimEnd('\n'))
+                continue
+            }
+            // 表格：两种情况都要认。
+            //   ① 标准写法：`| 表头 |` + `| --- | --- |` + 数据行
+            //   ② **模型实际常写的**：直接 `| --- | --- |` + 数据行（没有表头行）——
+            //      用户的截图里就是这种，只认 ① 的话表格会原样露出来，等于没修。
+            val isSep = isTableSep(line)
+            val nextIsRow = i + 1 < lines.size && lines[i + 1].trim().startsWith("|")
+            val isTableStart = (line.trim().startsWith("|") && nextIsRow && isTableSep(lines[i + 1])) ||
+                (isSep && nextIsRow)
+            if (isTableStart) {
+                flush()
+                val t = StringBuilder()
+                t.append(line).append('\n')
+                i++
+                if (!isSep) {
+                    // 标准写法：第二行是分隔行，也要吃掉
+                    t.append(lines[i]).append('\n')
+                    i++
+                }
+                while (i < lines.size && lines[i].trim().startsWith("|")) {
+                    t.append(lines[i]).append('\n')
+                    i++
+                }
+                out += MdBlock(MdKind.TABLE, t.toString().trimEnd('\n'))
+                continue
+            }
+            buf.append(line).append('\n')
+            i++
+        }
+        flush()
+        return out.ifEmpty { listOf(MdBlock(MdKind.TEXT, src)) }
+    }
+
+    /** 表格的分隔行：`| --- | :--: |` 这种，只由 | - : 空格组成，且含至少一个 - */
+    private fun isTableSep(line: String): Boolean {
+        val s = line.trim()
+        if (!s.startsWith("|")) return false
+        if (!s.contains('-')) return false
+        return s.all { it == '|' || it == '-' || it == ':' || it == ' ' || it == '\t' }
+    }
+
+    /**
+     * 行内 markdown → Spannable。
+     *
+     * 顺序很关键：先摘出行内代码（`x`）并**原样保留**，再处理粗体 / 斜体，
+     * 最后才去掉标题井号。反过来的话 `**` 会被代码里的星号带跑。
+     * 代码里的内容一律不参与后续替换 —— 用占位符换出去、最后再换回来。
+     */
+    private fun mdInline(raw: String, baseColor: Int): CharSequence {
+        // ① 行内代码：换成 \u0001N\u0001 占位，避免里面的 * _ # 被当格式
+        val codes = mutableListOf<String>()
+        var s = Regex("`([^`]+)`").replace(raw) { m ->
+            codes += m.groupValues[1]
+            "\u0001${codes.size - 1}\u0001"
+        }
+        // ② 标题：整行包上 \u0004，稍后放大 + 加粗（井号本身要去掉）
+        s = Regex("(?m)^[ \\t]{0,3}#{1,6}[ \\t]+(.+)$").replace(s) { "\u0004" + it.groupValues[1] + "\u0004" }
+        // ③ 粗体 / 斜体：包上成对标记，最后换成 span（不能直接删符号，那样就不知道哪段该粗了）
+        s = Regex("\\*\\*([^*]+)\\*\\*").replace(s) { "\u0002" + it.groupValues[1] + "\u0002" }
+        s = Regex("__([^_]+)__").replace(s) { "\u0002" + it.groupValues[1] + "\u0002" }
+        s = Regex("(?<![\\w*])\\*([^*\\n]+)\\*(?![\\w*])").replace(s) { "\u0003" + it.groupValues[1] + "\u0003" }
+        // ④ 引用：行首 > 换成一条竖线
+        s = s.replace(Regex("(?m)^[ \\t]{0,3}>[ \\t]?"), "│ ")
+        // ⑤ 无序列表：行首 - / * / + → ·；有序列表保持 1. 2. 不动
+        s = s.replace(Regex("(?m)^[ \\t]{0,3}[-*+][ \\t]+"), "· ")
+
+        val sp = SpannableStringBuilder(s)
+        // 行内代码：等宽 + 主色（占位符还回去了才画得上）
+        for ((idx, code) in codes.withIndex()) {
+            val key = "\u0001$idx\u0001"
+            val at = sp.indexOf(key)
+            if (at < 0) continue
+            sp.replace(at, at + key.length, code)
+            sp.setSpan(ForegroundColorSpan(pal.accent), at, at + code.length, Spannable.SPAN_EXCLUSIVE_EXCLUSIVE)
+            sp.setSpan(
+                android.text.style.TypefaceSpan("monospace"), at, at + code.length,
+                Spannable.SPAN_EXCLUSIVE_EXCLUSIVE
+            )
+        }
+        // 标题 / 粗体 / 斜体：成对标记 → span，标记本身删掉
+        applyPair(sp, '\u0004', StyleSpan(Typeface.BOLD), RelativeSizeSpan(1.18f))
+        applyPair(sp, '\u0002', StyleSpan(Typeface.BOLD))
+        applyPair(sp, '\u0003', StyleSpan(Typeface.ITALIC))
+        // 行首「· 」用主色点一下，读起来像列表
+        var idx = 0
+        while (true) {
+            idx = sp.indexOf("· ", idx)
+            if (idx < 0) break
+            sp.setSpan(ForegroundColorSpan(pal.accent), idx, idx + 1, Spannable.SPAN_EXCLUSIVE_EXCLUSIVE)
+            idx += 2
+        }
+        return sp
+    }
+
+    /**
+     * 把成对出现的标记字符换成 span，并把标记本身删掉。
+     *
+     * 从**后往前**删：这样还没处理的（更靠前的）下标不会因为删除而失效。
+     * 单双不成对时最后那个落单的标记也会被清掉，不会把 \u0002 这种怪字符漏到屏幕上。
+     */
+    private fun applyPair(sp: SpannableStringBuilder, mark: Char, vararg styles: Any) {
+        val pos = ArrayList<Int>()
+        for (i in 0 until sp.length) if (sp[i] == mark) pos += i
+        if (pos.isEmpty()) return
+        var k = pos.size - 2
+        while (k >= 0) {
+            val a = pos[k]
+            val b = pos[k + 1]
+            if (b > a + 1) for (st in styles) {
+                sp.setSpan(st, a + 1, b, Spannable.SPAN_EXCLUSIVE_EXCLUSIVE)
+            }
+            sp.delete(b, b + 1)
+            sp.delete(a, a + 1)
+            k -= 2
+        }
+        // 落单的（奇数个）标记：清掉，别让它显示出来
+        var i = 0
+        while (i < sp.length) {
+            if (sp[i] == mark) sp.delete(i, i + 1) else i++
+        }
+    }
+
+    /**
+     * 收尾总结卡 —— 一轮跑完之后钉在对话末尾的那张「结果卡」。
+     *
+     * 用户的原话：「每次完成任务之后……都没有输出一个让人很容易看得懂的东西，
+     * 都没有总结的」。所以这张卡固定三段：做了什么 / 怎么验的 / 还剩什么，
+     * 并且带上耗时 · 轮数 · token。模型在正文里写没写这三段都无所谓 ——
+     * 这张卡由 App 生成，是**兜底**，保证用户永远有一份收口。
+     */
+    private fun addRunSummaryCard(ms: Long, steps: Int) {
+        if (!::chatList.isInitialized) return
+        val lastFinal = lastFinalText
+        val card = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(13), dp(11), dp(13), dp(11))
+            background = roundCard(this@MainActivity, pal.card, pal.border, 12)
+        }
+        // 卡片标题行：图标 + 「本轮结果」 + 时间
+        val head = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        head.addView(iconView(this, pal, "check", 14, pal.accent),
+            LinearLayout.LayoutParams(dp(15), dp(15)).apply { rightMargin = dp(7) })
+        head.addView(TextView(this).apply {
+            setText("本轮结果")
+            textSize = 13.5f
+            typeface = MEDIUM
+            setTextColor(pal.text)
+        }, LinearLayout.LayoutParams(0, -2, 1f))
+        head.addView(TextView(this).apply {
+            setText("${fmtDur(ms)} · $steps 轮")
+            textSize = 11f
+            typeface = MONO
+            setTextColor(pal.faint)
+        })
+        card.addView(head)
+        card.addView(View(this).apply { setBackgroundColor(pal.border) },
+            LinearLayout.LayoutParams(-1, dp(1)).apply { topMargin = dp(9); bottomMargin = dp(9) })
+
+        // 三段：做了什么 / 怎么验的 / 还剩什么
+        val secs = summarySections(lastFinal)
+        for (s in secs) {
+            val row = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                setPadding(0, dp(3), 0, dp(3))
+            }
+            row.addView(TextView(this).apply {
+                setText(s.first)
+                textSize = 11.5f
+                setTextColor(pal.accent)
+                typeface = MEDIUM
+            }, LinearLayout.LayoutParams(dp(58), -2))
+            row.addView(TextView(this).apply {
+                text = mdInline(s.second, pal.sub)
+                textSize = 12f
+                setTextColor(pal.sub)
+                setLineSpacing(dp(2).toFloat(), 1.0f)
+            }, LinearLayout.LayoutParams(0, -2, 1f))
+            card.addView(row, LinearLayout.LayoutParams(-1, -2))
+        }
+        // 底部：完整结论可展开（模型写的那段原文，一个字没删）
+        if (!lastFinal.isNullOrBlank()) {
+            card.addView(TextView(this).apply {
+                setText("查看本轮完整结论")
+                textSize = 11.5f
+                setTextColor(pal.accent)
+                setPadding(0, dp(9), 0, 0)
+                isClickable = true
+                setOnClickListener { showTextDetail("本轮结论", lastFinal, withStatus = false) }
+            }, LinearLayout.LayoutParams(-1, -2))
+        }
+        chatList.addView(card, LinearLayout.LayoutParams(-1, -2).apply {
+            topMargin = dp(6)
+            bottomMargin = dp(6)
+        })
+        scrollChatToBottom()
+    }
+
+    /**
+     * 从模型这一轮的最终回复里抠出三段。
+     *
+     * 提示词已经要求它按「改了什么 / 怎么验的 / 还剩什么」写，但弱模型不总照做 ——
+     * 所以这里做**尽力而为**的解析：认不出来就退回「做了什么 = 首行」+ 一句诚实说明，
+     * 绝不硬编造「验证通过」这种话（那是撒谎，比没有总结更糟）。
+     */
+    private fun summarySections(finalText: String?): List<Pair<String, String>> {
+        val out = mutableListOf<Pair<String, String>>()
+        if (finalText.isNullOrBlank()) {
+            out += "做了什么" to "本轮没有产出文字结论（只跑了工具），可展开上方「已工作」看具体改动。"
+            out += "怎么验的" to if (lastRunVerified) "已按流程做了验证（见上方工作记录）。" else "本轮没有可核验的记录。"
+            out += "还剩什么" to "见上方工作记录。"
+            return out
+        }
+        val lines = finalText.replace("\r\n", "\n").split('\n')
+            .map { it.trim().trimStart('#', '*', ' ', '-').trim() }
+            .filter { it.isNotEmpty() }
+        fun pick(vararg keys: String): String? = lines.firstOrNull { ln ->
+            keys.any { ln.contains(it) } && ln.length <= 40
+        }
+        val done = pick("改了什么", "做了什么", "已完成", "完成情况", "改动")
+        val verified = pick("怎么验的", "验证", "怎么测", "测试")
+        val left = pick("还剩什么", "还剩", "遗留", "待办", "下一步", "未完成")
+        out += "做了什么" to (done ?: lines.firstOrNull() ?: "（见上方工作记录）").removePrefix("：").trimStart('：', ':').ifBlank { "（见上方工作记录）" }
+        out += "怎么验的" to (
+            verified?.removePrefix("：")?.trimStart('：', ':')
+                ?: if (lastRunVerified) "本轮做了自动验证（抓图 / 构建 / 断言）。" else "模型没有写验证过程 —— 按流程这一步不该省。"
+            )
+        out += "还剩什么" to (left?.removePrefix("：")?.trimStart('：', ':') ?: "模型没有明确说，若无异常即为已完成。")
+        return out
+    }
+
+    /** 代码块：等宽 + 底色的圆角框（用户要的「框框」），点一下可复制 */
+    private fun codeBlockView(code: String): View {
+        val col = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = roundCard(this@MainActivity, pal.codeBg, pal.border, 10)
+            setPadding(dp(11), dp(9), dp(11), dp(9))
+            isClickable = true
+            setOnClickListener { copyToClip(code, "代码") }
+        }
+        val head = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        head.addView(iconView(this, pal, "doc", 12, pal.faint),
+            LinearLayout.LayoutParams(dp(13), dp(13)).apply { rightMargin = dp(6) })
+        head.addView(TextView(this).apply {
+            setText("代码")
+            textSize = 10.5f
+            setTextColor(pal.faint)
+        }, LinearLayout.LayoutParams(0, -2, 1f))
+        head.addView(iconView(this, pal, "copy", 12, pal.faint),
+            LinearLayout.LayoutParams(dp(13), dp(13)))
+        col.addView(head)
+        col.addView(TextView(this).apply {
+            setText(code)
+            textSize = 12f
+            typeface = MONO
+            setTextColor(pal.codeText)
+            setPadding(0, dp(6), 0, 0)
+            setTextIsSelectable(true)
+        })
+        return col
+    }
+
+    /**
+     * 表格 → 真表格（等宽 + 每列等分 + 表头加粗 + 行间细线）。
+     * 这就是用户说的「连个框框都没有」—— 以前 `| a | b |` 是原样显示的。
+     */
+    private fun tableBlockView(raw: String, baseColor: Int): View {
+        val rows = raw.split('\n').map { it.trim() }.filter { it.isNotEmpty() }
+        if (rows.isEmpty()) return codeBlockView(raw)
+        fun cells(line: String): List<String> =
+            line.trim().trim('|').split('|').map { it.trim() }
+        // 首行就是分隔行（`| --- | --- |`）→ 模型没写表头，**不要**把它当表头显示。
+        // 否则用户会看到一行全是 `---` 的「表头」，比不渲染还难看。
+        val headerLess = isTableSep(rows[0])
+        val header = if (headerLess) emptyList() else cells(rows[0])
+        // 无表头时第一行是分隔行，必须**丢掉**（drop(1)）——否则用户会看到一行 "---" / "----"
+        val body = (if (headerLess) rows.drop(1) else rows.drop(2)).map { cells(it) }
+        val cols = maxOf(header.size, body.maxOfOrNull { it.size } ?: 0).coerceAtLeast(1)
+
+        val wrap = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = roundCard(this@MainActivity, pal.cardAlt, pal.border, 10)
+            setPadding(dp(2), dp(2), dp(2), dp(2))
+        }
+        fun addRow(cs: List<String>, isHead: Boolean, last: Boolean) {
+            val row = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(dp(8), dp(7), dp(8), dp(7))
+            }
+            for (c in 0 until cols) {
+                val txt = cs.getOrNull(c).orEmpty()
+                row.addView(TextView(this).apply {
+                    text = mdInline(txt, baseColor)
+                    textSize = 12f
+                    setTextColor(if (isHead) pal.text else baseColor)
+                    if (isHead) typeface = MEDIUM
+                    setLineSpacing(dp(2).toFloat(), 1.0f)
+                }, LinearLayout.LayoutParams(0, -2, 1f).apply {
+                    if (c < cols - 1) rightMargin = dp(8)
+                })
+            }
+            wrap.addView(row, LinearLayout.LayoutParams(-1, -2))
+            if (!last) {
+                wrap.addView(View(this).apply { setBackgroundColor(pal.border) },
+                    LinearLayout.LayoutParams(-1, dp(1)))
+            }
+        }
+        if (header.isNotEmpty()) addRow(header, isHead = true, last = body.isEmpty())
+        for ((i, r) in body.withIndex()) addRow(r, isHead = false, last = i == body.size - 1)
+        return wrap
     }
 
     /** 段落里的链接：染蓝 + 可点（跳外部浏览器）；没链接才保持可长按选中 */
@@ -2204,7 +2643,9 @@ class MainActivity : AppCompatActivity(), GameUi {
         root.addView(android.view.View(this).apply { setBackgroundColor(pal.border) },
             LinearLayout.LayoutParams(-1, dp(1)).apply { topMargin = dp(12); bottomMargin = dp(12) })
         val tv = TextView(this).apply {
-            setText(content)
+            // 详情弹窗里的正文同样过一遍排版 —— 否则用户展开看到的又是满屏 `**` 和 `|`。
+            // 但**原文仍要能选中复制**：这里只换显示，复制走的还是 content 本身。
+            text = mdInline(content, pal.text)
             textSize = 12.5f
             setTextColor(pal.text)
             setTextIsSelectable(true)
@@ -2599,6 +3040,8 @@ class MainActivity : AppCompatActivity(), GameUi {
             runWrote = false
             makerTouched = false
             builtThisRun = false
+            lastFinalText = null
+            lastRunVerified = false
         }
         stopBtn.visibleIf(true)
         startRunCard()
@@ -2642,7 +3085,9 @@ class MainActivity : AppCompatActivity(), GameUi {
                 ev.startsWith("AIFINAL: ") -> {
                     // 这一轮的最终交付：当正文排（普通文字，不套卡片）
                     flushNow()
-                    addBubble(ev.removePrefix("AIFINAL: "), false)
+                    val final = ev.removePrefix("AIFINAL: ")
+                    lastFinalText = final
+                    addBubble(final, false)
                 }
                 ev.startsWith("AI: ") -> {
                     // 干活途中的过程自述：缩进折进「已工作」组里当一行，不单独占一张卡
@@ -2670,7 +3115,18 @@ class MainActivity : AppCompatActivity(), GameUi {
                     addToolCardRunning(nm, target)
                     // 记录「这轮碰过 Maker」：哪怕判型还没转成 maker，也说明这是 Maker 工程
                     if (nm.startsWith("maker_")) makerTouched = true
-                    if (nm == "maker_build_current_directory") builtThisRun = true
+                    if (nm == "maker_build_current_directory") {
+                        builtThisRun = true
+                        lastRunVerified = true
+                    }
+                    // 有可核验动作才算「验过」：抓图 / 断言 / 真机点击 / 构建。
+                    // 总结卡的「怎么验的」据此照实写 —— 没验就直说没验。
+                    if (nm == "game_shot" || nm == "game_shot_motion" || nm == "screenshot" ||
+                        nm == "js_eval" || nm == "js_sandbox" || nm == "game_validate" ||
+                        nm == "tap" || nm == "swipe" || nm == "game_playtest"
+                    ) {
+                        lastRunVerified = true
+                    }
                 }
                 ev.startsWith("TOOLFAIL:") -> {
                     val l = ev.removePrefix("TOOLFAIL:").trim()
@@ -3193,6 +3649,11 @@ class MainActivity : AppCompatActivity(), GameUi {
                 " · " + TokenStats.summary()
         )
         setTextIf(statusRun, "待命")
+        // 收尾总结卡：用户要的「一次能看懂的结果」——
+        // 以前跑完只剩底部一行「已完成 · 3 分 16 秒 · 30 轮 · 647 万 tok」，
+        // 正文里没有任何「做了什么 / 怎么验的 / 还剩什么」的收口，用户只能自己往上翻几十屏。
+        // 这里把这一轮的结论收成一张卡，钉在对话末尾。
+        runCatching { addRunSummaryCard(ms, runSteps) }
         latestActivity = ""
         lastTail = ""
         // 收尾把攒了一整轮的思考全文一次性补上（运行期间故意不画，见 paintThink）
@@ -7092,7 +7553,15 @@ makerRow1.addView(ghostBtnOf(ctx, pal, "扫码登录").apply {
                     if (why.isNullOrBlank()) "（子任务没有产出结论）"
                     else "（子任务没有产出结论）\n最后一条错误：${why.take(300)}"
                 }
-            finalText.take(6000)
+            // ⚠️ 这里**不再截断**。
+            //
+            // 原来写的是 finalText.take(6000) —— 而子任务的结论常常比 6000 字长
+            // （一份设计文档、一段详细的改动说明）。截断之后：
+            //   · 主线模型拿到的是**半截话**，看不出子任务到底做完了没有；
+            //   · 用户点开结论弹窗，看到的也是被砍掉的文本。
+            // 用户的原话是「他输出的内容老是会被中途截断，跑了半天其实什么事都没干」。
+            // 结论是这条链路唯一的产出，不能砍 —— 上限放到 20000（与结论弹窗一致）。
+            finalText.take(20_000)
         } catch (t: Throwable) {
             "子任务出错：${t.javaClass.simpleName}: ${t.message}"
         } finally {
@@ -7107,7 +7576,14 @@ makerRow1.addView(ghostBtnOf(ctx, pal, "扫码登录").apply {
         // **不要再动界面、不要刷预览** —— 用户要的是「停下来」。
         // 之前这里无条件刷新预览，等于被中止的子任务还要去重载一次用户的页面。
         if (subtaskAbandoned) {
-            main.post { subtaskCards.remove(title)?.let { /* 卡片留个痕迹即可，不刷预览 */ } }
+            main.post {
+                subtaskCards.remove(title)
+                // 被中止也要停掉转圈 / 计时器，否则卡片会永远转下去
+                subtaskLive.remove(title)?.let { live ->
+                    runCatching { live.spin.cancel() }
+                    main.removeCallbacks(live.ticker)
+                }
+            }
             return "（子任务已中止：主线这一轮已经结束，不再继续改文件）"
         }
 
@@ -7144,6 +7620,18 @@ makerRow1.addView(ghostBtnOf(ctx, pal, "扫码登录").apply {
     /** 对话里那张「子任务」卡：标题 + 状态 + 过程行 */
     private val subtaskCards = mutableMapOf<String, LinearLayout>()
 
+    /** 子任务卡上那些「活的」部件：转圈动画 + 计时器 + 状态文字 */
+    private class SubtaskLive(
+        val spin: ObjectAnimator,
+        val ticker: Runnable,
+        val stat: TextView,
+        val mark: ImageView,
+        val startedAt: Long
+    )
+
+    /** 标题 → 卡片上的活动部件（跑完 / 被中止时用来停掉动画和计时器） */
+    private val subtaskLive = mutableMapOf<String, SubtaskLive>()
+
     private fun addSubtaskCard(title: String, state: String) {
         if (!::chatList.isInitialized) return
         val card = LinearLayout(this).apply {
@@ -7151,17 +7639,38 @@ makerRow1.addView(ghostBtnOf(ctx, pal, "扫码登录").apply {
             setPadding(dp(12), dp(10), dp(12), dp(10))
             background = roundCard(this@MainActivity, pal.cardAlt, pal.border, 12)
         }
+        // 转圈：子任务要跑几十轮，**必须**让用户看到它活着 ——
+        // 以前这里只有一个静态标题，用户完全不知道它是在跑还是卡死了
+        // （真实反馈：「首先他没有转圈」）。
+        val spin = ImageView(this).apply {
+            setImageDrawable(LineIcon("refresh", pal.accent, 1.8f))
+        }
+        val mark = ImageView(this).apply {
+            setImageDrawable(LineIcon("check", TOOL_OK, 2.4f))
+            visibility = View.GONE
+        }
+        val slot = FrameLayout(this).apply {
+            addView(spin, FrameLayout.LayoutParams(-1, -1))
+            addView(mark, FrameLayout.LayoutParams(-1, -1))
+        }
+        val stat = TextView(this).apply {
+            textSize = 11f
+            typeface = MONO
+            setTextColor(pal.faint)
+            maxLines = 1
+            setPadding(dp(8), 0, 0, 0)
+        }
         card.addView(LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            addView(iconView(this@MainActivity, pal, "puzzle", 14, pal.accent),
-                LinearLayout.LayoutParams(dp(15), dp(15)).apply { rightMargin = dp(6) })
+            addView(slot, LinearLayout.LayoutParams(dp(13), dp(13)).apply { rightMargin = dp(7) })
             addView(TextView(this@MainActivity).apply {
                 text = "子任务 · $title"
                 textSize = 13.5f
                 typeface = MEDIUM
                 setTextColor(pal.accent)
             })
+            addView(stat, LinearLayout.LayoutParams(0, -2, 1f))
         })
         val lines = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -7171,6 +7680,26 @@ makerRow1.addView(ghostBtnOf(ctx, pal, "扫码登录").apply {
         card.tag = lines          // 过程行挂这儿，后面往里追加
         subtaskCards[title] = card
         chatList.addView(card, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(8) })
+
+        // 转起来 + 每秒报一次「跑了多久 / 做了几步」
+        val anim = ObjectAnimator.ofFloat(spin, View.ROTATION, 0f, 360f).apply {
+            duration = 900
+            repeatCount = ValueAnimator.INFINITE
+            interpolator = LinearInterpolator()
+            start()
+        }
+        val startedAt = SystemClock.elapsedRealtime()
+        val ticker = object : Runnable {
+            override fun run() {
+                val live = subtaskLive[title] ?: return
+                val sec = ((SystemClock.elapsedRealtime() - live.startedAt) / 1000).toInt()
+                val steps = (subtaskCards[title]?.tag as? LinearLayout)?.childCount ?: 0
+                setTextIf(live.stat, "运行中 · ${steps} 步 · ${sec}s")
+                main.postDelayed(this, 1000)
+            }
+        }
+        subtaskLive[title] = SubtaskLive(anim, ticker, stat, mark, startedAt)
+        main.post(ticker)
         scrollChatToBottom()
     }
 
@@ -7192,6 +7721,13 @@ makerRow1.addView(ghostBtnOf(ctx, pal, "扫码登录").apply {
 
     private fun finishSubtaskCard(title: String, result: String) {
         val card = subtaskCards.remove(title) ?: return
+        // 停掉转圈和计时器，槽位换成结果图标 —— 不停的话子任务跑完了还在那儿转
+        subtaskLive.remove(title)?.let { live ->
+            runCatching { live.spin.cancel() }
+            main.removeCallbacks(live.ticker)
+            live.stat.visibleIf(false)
+            live.mark.visibleIf(true)
+        }
         val lines = card.tag as? LinearLayout
         // 子任务失败时**不能**还打「完成」—— 用户看到「✓ 完成 + 没有产出结论」
         // 只会以为是自己哪里点错了。这里按结论内容判定真实状态。
@@ -7878,59 +8414,91 @@ makerRow1.addView(ghostBtnOf(ctx, pal, "扫码登录").apply {
             // 不管用户当前在哪个 tab、有没有手动缩小 —— 因为预览本来默认就是全屏，
             // 截图必须始终按全屏来（详见下面那段说明）。
             val explicit = viewportW > 0 && viewportH > 0
-            /** 发一条 captureScreenshot 并把 base64 解成字节；拿不到返回 null */
-            fun capture(id: Int, beyond: Boolean): ByteArray? {
-                val r = cdpCall(
-                    out, ins, id, "Page.captureScreenshot",
-                    JSONObject().put("format", "jpeg").put("quality", 80)
-                        .put("captureBeyondViewport", beyond)
-                        .put("optimizeForSpeed", false),
-                    sid
-                ) ?: return null
+            /**
+             * 发一条 captureScreenshot 并把 base64 解成字节；拿不到返回 null。
+             *
+             * clipW / clipH > 0 时带上 `clip`：**只按这个尺寸取图，不改页面视口**。
+             * 这是「下面少一半」的解法 —— 布局不动，但取图范围可以覆盖整页。
+             */
+            fun capture(id: Int, beyond: Boolean, clipW: Int = 0, clipH: Int = 0): ByteArray? {
+                val p = JSONObject().put("format", "jpeg").put("quality", 80)
+                    .put("captureBeyondViewport", beyond)
+                    .put("optimizeForSpeed", false)
+                if (clipW > 0 && clipH > 0) {
+                    p.put(
+                        "clip",
+                        JSONObject().put("x", 0).put("y", 0)
+                            .put("width", clipW).put("height", clipH)
+                            .put("scale", 1)
+                    )
+                }
+                val r = cdpCall(out, ins, id, "Page.captureScreenshot", p, sid) ?: return null
                 val d = r.optJSONObject("result")?.optString("data", "").orEmpty()
                 if (d.isEmpty()) return null
                 return runCatching { android.util.Base64.decode(d, android.util.Base64.DEFAULT) }.getOrNull()
             }
 
-            // ── 主路径：**不改视口**，按 WebView 当前的视口原样截 ──
+            // ── 主路径：**先问页面自己多高，再按那个高度取图** ──
             //
-            // 为什么不能去改视口（这是我反复踩的坑，记下来别再犯）：
-            // 预览默认就是全屏（切到预览页会自动进全屏），所以 **WebView 本身
-            // 已经是全屏尺寸、游戏也已经按这个尺寸排好版了** —— 根本不需要再动视口。
+            // 为什么必须这么干（这是「下面少一半」的真正根因，前面两版都没抓到）：
+            // 预览槽位只占屏幕的一部分（底栏 + 输入区之下那一块）。WebView 在这个槽位里
+            // 就**真的只有那么高** —— 页面里 `window.innerHeight` 是槽位高度，
+            // 游戏也按这个矮高度排的版。截出来的图自然也只有那么高。
+            // 而用户按「全屏」玩时，同一个页面被放到整屏，画面是完整的一屏。
+            // 于是 AI 看到的图比用户看到的**少了下半截** —— 用户连着反馈好几轮的就是这个。
             //
-            // 而 `Emulation.setDeviceMetricsOverride` 改的只是「渲染视口」：
-            // 游戏几乎都是**只在加载时读一次 innerHeight** 来定 canvas 尺寸、
-            // 并不监听 resize。我把视口改大之后，游戏内容还是旧尺寸，
-            // 于是截图下半部分一片空白（用户连着反馈了两轮的就是这个）。
+            // 以前试过 `Emulation.setDeviceMetricsOverride` 把渲染视口撑大，但那是
+            // **只改渲染、不改页面自己算出来的尺寸**：游戏只在加载时读一次 innerHeight
+            // 定 canvas 大小、之后不监听 resize，所以图里下半部分反而是空的。
             //
-            // 所以：**直接截当前视口**。WebView 多大，图就多大，游戏也是按这个尺寸画的 ——
-            // 三者一致，不会再有空白、也不会跟用户看到的不一样。
-            //
-            // 唯一例外：调用方**明确**传了 width/height（想在某个标准手机尺寸下验证），
-            // 那时才做覆盖，并且截完立刻还原。
-            var bytes = capture(4, beyond = false)
-
-            // ── 兜底 1：当前视口太小 / 还没排版（比如从没进过预览页）→ 覆盖成全屏再来 ──
-            if (bytes == null || bytes.size < 1024) {
-                val dm = resources.displayMetrics
-                val dpr = dm.density.takeIf { it > 0f } ?: 1f
-                val cssW = if (explicit) viewportW else (dm.widthPixels / dpr).toInt().coerceAtLeast(320)
-                val cssH = if (explicit) viewportH else (dm.heightPixels / dpr).toInt().coerceAtLeast(480)
+            // 现在换一条不会失败的路：**不动视口**，改用 CDP 的
+            // `Page.captureScreenshot(clip = 整页)` —— 页面有多高就截多高，
+            // 布局一个字都不会变，因此既不会有空白、也不会跟用户看到的对不上。
+            // 高度先由页面自己报（innerHeight / documentElement.scrollHeight），
+            // 报不出来再退回 WebView 的物理尺寸。
+            val pageH = runCatching { jsNumber(runJsSync(VIEWPORT_H_JS, 1500)) }.getOrNull()?.toInt() ?: 0
+            val pageW = runCatching { jsNumber(runJsSync(VIEWPORT_W_JS, 1500)) }.getOrNull()?.toInt() ?: 0
+            val dm = resources.displayMetrics
+            val dpr = dm.density.takeIf { it > 0f } ?: 1f
+            val cssH = when {
+                explicit && viewportH > 0 -> viewportH
+                pageH in 200..4000 -> pageH
+                else -> (dm.heightPixels / dpr).toInt().coerceIn(320, 4000)
+            }
+            val cssW = when {
+                explicit && viewportW > 0 -> viewportW
+                pageW in 200..4000 -> pageW
+                else -> (dm.widthPixels / dpr).toInt().coerceIn(240, 4000)
+            }
+            var bytes: ByteArray?
+            if (explicit) {
+                // ── 明确要求「按某个真机尺寸验证」时才覆盖视口 ──
+                // 这条路会**真的改渲染视口**，游戏若只在启动时读一次 innerHeight、
+                // 之后不监听 resize，图里下半部分就会是空的。
+                // 所以：覆盖 → 等重排 → 抓 → **立刻还原**。
+                val dpr0 = resources.displayMetrics.density.takeIf { it > 0f } ?: 1f
                 val resp = cdpCall(
                     out, ins, 3, "Emulation.setDeviceMetricsOverride",
                     JSONObject().put("width", cssW).put("height", cssH)
-                        .put("deviceScaleFactor", dpr.toDouble())
+                        .put("deviceScaleFactor", dpr0.toDouble())
                         .put("mobile", true),
                     sid
                 )
-                // 明确检查有没有 error —— 只看「非 null」会把失败响应当成成功
                 val overrode = resp != null && resp.optJSONObject("error") == null
+                bytes = null
                 if (overrode) {
-                    // 等页面重排：游戏在 window.resize 里重算 canvas 尺寸时要用上这段
-                    runCatching { Thread.sleep(350) }
-                    bytes = capture(5, beyond = false)
+                    runCatching { Thread.sleep(400) }
+                    bytes = capture(4, beyond = false)
                     runCatching { cdpCall(out, ins, 6, "Emulation.clearDeviceMetricsOverride", null, sid) }
                 }
+            } else {
+                // 先按「页面自报的高度」取图。这就是用户全屏看到的那一屏，一像素都不少。
+                bytes = capture(4, beyond = false, clipW = cssW, clipH = cssH)
+            }
+
+            // ── 兜底 1：上面那条没拿到图 → 退回不带 clip 的整屏抓取 ──
+            if (bytes == null || bytes.size < 1024) {
+                bytes = capture(5, beyond = false)
             }
 
             // ── 兜底 2：还是没图就换 beyond 参数再试（老版本能抓到的就是这套）──
@@ -8049,6 +8617,12 @@ makerRow1.addView(ghostBtnOf(ctx, pal, "扫码登录").apply {
     private fun jsString(raw: String?): String? {
         if (raw.isNullOrBlank() || raw == "null") return null
         return runCatching { org.json.JSONTokener(raw).nextValue() as? String }.getOrNull()
+    }
+
+    /** 同上，但解成数字（页面自报的视口宽高就是走这条） */
+    private fun jsNumber(raw: String?): Double? {
+        val s = jsString(raw) ?: raw
+        return s?.trim()?.toDoubleOrNull()
     }
 
     /** 把已有 JPEG 缩到 maxWidth 以内（本来就够小就原样返回），省 token 也省上传 */

@@ -106,6 +106,22 @@
 
 **几个必须照做的点：**
 
+- **⚠️ 必须监听 `resize` 并重算画布 —— 否则游戏只会占上半屏。**
+  预览**会变尺寸**：切到预览页时 App 会自动进全屏，WebView 从「预览槽位那一条」
+  变成「整屏」。如果只在加载时读一次 `innerWidth/innerHeight` 定 canvas 尺寸、
+  之后再也不管，那么进全屏后**游戏内容还是旧的矮尺寸** ——
+  用户看到的和 AI 截到的都是「上面一半有画面、下面一大片空白」。
+  ```js
+  // 已有的 resize() 里本来就会重算 canvas 尺寸 + 重画布局；
+  // 关键是**把它挂到 resize 事件上**，别只在启动时调一次：
+  window.addEventListener('resize', resize);
+  window.addEventListener('orientationchange', resize);   // 转屏
+  resize();
+  // 若用离屏缓存（背景图 / 静态 UI），resize 里必须一并重建，
+  // 否则缓存还是旧尺寸，画面会错位。
+  ```
+  同理：任何「一次性算好就存起来」的尺寸（格子上限、每行个数、布局常量）
+  都要在 resize 里重算。
 - **`dt` 要夹住**：切后台再回来 `now - last` 可能是几十秒，
   不夹的话角色会瞬移、物理会炸。
 - **用 pointer 事件**，不要只写 `touchstart` —— pointer 一套同时覆盖触摸和鼠标，
