@@ -831,6 +831,21 @@ class EngineTools(private val ui: GameUi, private val root: File) {
         "game_create" -> {
             val id = a.getString("id").trim()
             require(id.matches(Regex("[A-Za-z0-9_\\-]{1,40}"))) { "id 只能是字母数字下划线短横线" }
+            // ★ 禁止建「下划线开头」的项目。
+            //
+            // 引擎把下划线开头的目录当成**内部保留目录**（_shared / _uploads / _skills …），
+            // 它们不该出现在「切换项目」列表里、也不该被当成游戏跑。
+            // 真实事故：AI 读不到用户手机文件，就自建了 `_import_tool` 项目、
+            // 写了个「导入闸门」页面塞进预览，还把用户当前项目切成了它 ——
+            // 用户一打开预览看到的是个点不动的怪页面，自己的游戏不见了。
+            //
+            // 提示词里已经写了禁止这么做，但**提示词挡不住所有情况**，这里再拦一道。
+            require(!id.startsWith("_")) {
+                "不能用下划线开头的名字建项目（那是引擎的内部保留目录）。" +
+                    "如果你想给用户做一个「工具页 / 导入页 / 说明页」，**不要**做成游戏项目 —— " +
+                    "直接告诉用户该去哪里操作即可（读不到文件就说读不到，并指出" +
+                    "「发布页 → 工作区目录」这个设置入口）。预览页只放用户自己的游戏。"
+            }
             val d = File(root, id).apply { mkdirs() }
             val created = mutableListOf<String>()
             val html = File(d, "index.html")
@@ -1448,7 +1463,16 @@ class EngineTools(private val ui: GameUi, private val root: File) {
 
         "game_launch" -> {
             val id = a.getString("game")
-            if (!File(File(root, id), "index.html").exists()) {
+            // ★ 不许切到内部保留目录（下划线开头）。
+            // 那些是引擎自己用的（_shared / _uploads / _skills），不是游戏；
+            // 而且历史上 AI 自建 `_import_tool` 当预览页塞给用户，就是从这里进去的。
+            if (id.startsWith("_")) {
+                ToolResult(
+                    "「$id」是引擎的内部保留目录，不是游戏，不能切过去。" +
+                        "预览页只放用户自己的游戏。如果你是想让用户做点什么，" +
+                        "直接说明该去哪里操作，不要拿一个页面顶替他的游戏。"
+                )
+            } else if (!File(File(root, id), "index.html").exists()) {
                 ToolResult("没有 $id/index.html，先用 game_create 创建")
             } else {
                 ui.openGame(id)
