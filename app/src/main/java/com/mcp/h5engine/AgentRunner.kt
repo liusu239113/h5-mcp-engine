@@ -302,6 +302,8 @@ class AgentRunner(
         var ranAssertion = false
         /** 被「先去截图验证」顶回去过几次（上限 2，防止把轮数烧光） */
         var verifyNudges = 0
+        /** App 自己跑过几次收尾自动验证（上限 2，防止无限循环） */
+        var autoVerified = 0
 
         // 续跑但步数预算已经用满：明说一句。否则用户点了「再试一次」之后毫无反应，
         // 只会以为按钮坏了。
@@ -372,12 +374,30 @@ class AgentRunner(
                     continue
                 }
 
-                // 跑过但没截到（比如纯 DOM 页面没有 canvas）：如实说明，别假装验过了
-                if (requireVisualCheck && wrote && !shotAfterWrite) {
+                // 【收尾自动验证】模型想收尾时，**App 自己**跑一次画面验证。
+                //
+                // 为什么不让模型自己调：验证本该是**每次交付的固定动作**，
+                // 而不是靠模型记得、更不是靠 App 事后催它一次（用户的原话：
+                // 「还要 AI 去主动提醒他吗？每一次催他一次才行？这不应该是每个模型
+                // 必须做的事情吗？」）。所以这里由 App 直接做：
+                //   · 不管模型有没有截过图，都再抓一张**当前**画面塞进历史（附在结论后面），
+                //     让模型下一次开口时手里就有一张刚拍的图；
+                //   · 跑一次 game_validate 拿运行时错误，有错就退回给模型让它继续修。
+                // 只在这一轮**真的改过代码**时做（改的是代码才需要看画面）。
+                if (requireVisualCheck && wrote && autoVerified < 2) {
+                    autoVerified++
+                    val report = runAutoVerify(history, shotAfterWrite)
+                    if (report != null) {
+                        onEvent("INFO: 交付前自动验证 —— $report")
+                        continue
+                    }
+                    onEvent("INFO: 交付前自动验证 —— 已抓图确认画面（模型未主动截图）")
+                } else if (requireVisualCheck && wrote && !shotAfterWrite) {
+                    // 自动验证也没拿到图：如实说明，别假装验过了
                     onEvent("INFO: 注意：这一轮没有成功截到画面，画面是否正常**未经确认**")
                 } else if (requireVisualCheck && wrote && !playedManually) {
-                    // 看过画面但没实际玩过 —— 不拦，但提醒用户「交互没被真正验证」
-                    onEvent("INFO: 提示：只看过截图、没有实际点击试玩，交互逻辑未经验证")
+                    // 看过画面但没实际点击玩过 —— 提醒用户「交互没被真正验证」
+                    onEvent("INFO: 提示：只看过截图、没有实际点击试玩，交互逻辑未经点击验证")
                 }
                 if (wrote) onEvent("RELOAD")
                 onEvent("INFO: 完成 · 共跑了 $step 轮 · " + TokenStats.summary())
@@ -658,6 +678,75 @@ class AgentRunner(
             // 只留文件名：路径整串太长，对话里那一行放不下（完整路径点开详情能看到）
             if (p.isBlank()) "" else p.substringAfterLast('/')
         }.getOrDefault("")
+    }
+
+    /**
+     * 收尾自动验证：**App 自己**抓图 + 跑运行时检查，不指望模型记得调。
+     *
+     * ## 为什么由 App 做，而不是提示模型去做
+     *
+     * 用户的原话：「还要 AI 去主动提醒他吗？每一次催他一次才行？
+     * 这不应该是每个模型必须做的事情吗？每次交付任务前。」
+     *
+     * 对 —— 验证是**交付流程的一部分**，不该靠模型自觉，更不该靠 App 事后催一次。
+     * 所以这里直接由 App 执行：模型想收尾时，先替它把该做的验证做完。
+     *
+     * ## 做了什么
+     *
+     * · **抓一张当前画面**（`game_shot` 的同一套实现：CDP 离屏抓、按整屏视口），
+     *   塞进历史附在结论后面 —— 模型下一次开口时手里就有一张刚拍的图。
+     * · **跑 game_validate** 拿运行时错误 / 断言结果。
+     *
+     * ## 返回值
+     *
+     * · 返回一段文本 = **验证发现问题，把模型退回去继续修**（调用方会 continue）；
+     * · 返回 null = 验证通过，可以正常收尾。
+     *
+     * @param alreadyShot 模型自己已经截过图了 —— 那就不再重复抓，只跑运行时检查。
+     */
+    private fun runAutoVerify(history: MutableList<ChatMsg>, alreadyShot: Boolean): String? {
+        // ① 抓一张**当前**画面（模型没截过才抓，避免重复）
+        var shot: ByteArray? = null
+        var shotNote = ""
+        if (!alreadyShot) {
+            val img = runCatching { tools.call("game_shot", "{}") }.getOrNull()
+            val bytes = img?.images?.firstOrNull()
+            if (bytes != null && bytes.size > 128) {
+                shot = bytes
+                val saved = saveShotToWorkspace(bytes)
+                shotNote = "App 在你收尾前**自动抓了当前画面**（整屏视口）—— 这是你这一轮改完之后的" +
+                    "真实样子，请对着它核对：白屏吗？元素出屏 / 被遮挡吗？文字重叠吗？按钮太小吗？" +
+                    "布局和你想要的一致吗？" +
+                    (if (saved != null) "\n图已存工作区：${saved.name}" else "")
+            }
+        }
+
+        // ② 跑运行时检查：重载 + 等一会儿 + 收报错
+        val vr = runCatching { tools.call("game_validate", "{}") }.getOrNull()
+        val text = vr?.text.orEmpty()
+
+        // 只在**真有运行时错误**时才把模型退回去。
+        // 没有报错就别打扰它 —— 图已经给它了，画面问题它自己能看见。
+        val hasError = text.isNotBlank() && (
+            text.contains("❌") ||
+                Regex("有\\s*[1-9]\\d*\\s*条报错").containsMatchIn(text) ||
+                text.contains("Uncaught") || text.contains("is not defined")
+            )
+
+        // 一条消息里把「图 + 结论」一起给它（连发两条 user 消息容易被服务商挑刺）
+        val parts = mutableListOf<String>()
+        if (shotNote.isNotBlank()) parts += shotNote
+        if (hasError) {
+            parts += "App 自动跑了 `game_validate`，**有运行时错误** —— 必须先修掉再交付：\n\n" +
+                text.take(2000)
+        }
+        if (parts.isEmpty()) return null
+
+        history += ChatMsg("user", "（" + parts.joinToString("\n\n") + "）",
+            if (shot != null) listOf(shot) else emptyList())
+
+        return if (hasError) "发现运行时错误，已退回让它继续修"
+        else "已抓图确认画面（模型未主动截图）"
     }
 
     /** 这个字符串是不是一个合法的 JSON 对象串（用来挡住被掐断的半截参数） */
