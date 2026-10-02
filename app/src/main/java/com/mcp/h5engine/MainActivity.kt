@@ -382,6 +382,17 @@ class MainActivity : AppCompatActivity(), GameUi {
     /** 运行中用户又发的消息：排队，等这轮结束自动发出去（而不是粗暴掐断上一轮） */
     private val msgQueue = ArrayDeque<String>()
     private var runToggle: TextView? = null
+    /**
+     * 本轮那张「已工作」卡的容器。
+     *
+     * 用途只有一个：**保证工作行永远加在对话末尾**。
+     *
+     * 踩过的坑（用户反馈）：模型先交付了结论（气泡 + 那句「已工作」卡都在上面），
+     * 然后验证闸门把它顶回去继续干活 —— 后面的工具行全加进了**上面那张旧卡**里。
+     * 结果就是「对话区看不到后续工作流程，只有底部状态行在动」：
+     * 工作行被塞到了结论文字的**上方**，用户根本翻不到。
+     */
+    private var runCardView: LinearLayout? = null
     private var runSeq = 0
     private var runWrote = false
     /** 本轮是否摸过 maker_ 工具（保证「第一次做 Maker」也能自动构建） */
@@ -1884,9 +1895,37 @@ class MainActivity : AppCompatActivity(), GameUi {
      * 所以这一行加进去不会改变对话区任何**可见**高度，也不会牵动滚动位置。
      * 老版本是直接往 chatList 里插行，插一行滚一次，一轮几十次工具调用就是几十次抖动。
      */
+    /**
+     * 让「已工作」卡回到对话**最末尾**。
+     *
+     * 为什么需要：模型交付结论之后，闸门可能把它顶回去继续干活（截图验证 / 修报错）。
+     * 那时结论气泡已经挂在卡**下面**了，而新工作行还往那张旧卡里塞 ——
+     * 于是工作流程出现在结论**上方**，用户往下翻根本看不到，
+     * 只能看到底部状态行在动（用户反馈的原话：「后面的工作流程就看不到了，
+     * 只有底部运行那里看得见」）。
+     *
+     * 做法：发现卡不是最后一个子视图，就把它移到末尾 —— 卡会跑到最新气泡下方，
+     * 工作行继续跟在后面。代价是卡上方的空白被重新撑开，但那正是「实时工作日志」该在的位置。
+     */
+    private fun ensureWorkCardAtBottom() {
+        if (!::chatList.isInitialized) return
+        val card = runCardView ?: return
+        if (chatList.childCount == 0) return
+        if (chatList.getChildAt(chatList.childCount - 1) === card) return
+        runCatching {
+            chatList.removeView(card)
+            chatList.addView(card, LinearLayout.LayoutParams(-1, -2).apply {
+                topMargin = dp(4)
+                bottomMargin = dp(6)
+            })
+        }
+    }
+
     private fun addToolCardRunning(name: String, target: String = "") {
         val nm = if (name.isBlank()) "工具" else name
         val rows = toolWrap ?: return
+        // 工作行必须加在对话末尾的卡里 —— 卡被顶到上面去了就把它挪回来
+        ensureWorkCardAtBottom()
 
         // 运行中：转圈。用旋转的 ImageView 而不是逐帧换字符 ——
         // 旋转是渲染层的变换，不触发 requestLayout，转得再快也不会把对话布局带着一起动。
@@ -2084,6 +2123,8 @@ class MainActivity : AppCompatActivity(), GameUi {
             addBubble(full, false)
             return
         }
+        // 同上：过程自述也是工作流的一部分，必须加在末尾的卡里
+        ensureWorkCardAtBottom()
         val oneLine = full.replace('\n', ' ')
         val row = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -2813,6 +2854,7 @@ class MainActivity : AppCompatActivity(), GameUi {
         runHead = stat
         runBody = think
         runToggle = toggle
+        runCardView = card
 
         // 思考默认收起（用户明确要的）；工作流那部分不受它影响，照样显示。
         bodyExpanded = false
