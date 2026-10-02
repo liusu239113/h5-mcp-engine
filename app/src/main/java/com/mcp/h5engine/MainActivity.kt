@@ -269,32 +269,38 @@ private val CANVAS_SHOT_JS = """
 """.trimIndent()
 
 /**
- * 页面**当前**视口高度（CSS 像素）。
+ * 页面**真实渲染出来的高度**（CSS 像素）—— 截图就按它取。
  *
- * 截图必须按这个高度取，而不是按 WebView 控件的物理尺寸 ——
- * 预览槽位里 WebView 就是那么矮，页面也按那个矮高度排的版；
- * 只有按页面自己报的高度截，图才等于用户全屏看到的那一屏（不少下半截）。
+ * 为什么不是简单的 `innerHeight`：那个只是「视口」高度。有些页面内容比视口高
+ * （内容铺开了、或者布局按更高的尺寸排的），只按视口截就会**把下面截掉** ——
+ * 这正是用户反复反馈的「截图下面少一半」。
+ * 所以取三者最大：
+ *   · `documentElement.scrollHeight` —— 内容真正铺开的范围（最权威）
+ *   · `body.scrollHeight`            —— 有些页面把内容挂在 body 上
+ *   · `innerHeight`                  —— 内容不足一屏时的下限
  */
-private val VIEWPORT_H_JS = """
+private val PAGE_EXTENT_H_JS = """
 (function(){
   try {
+    var de = document.documentElement || {}, b = document.body || {};
     return String(Math.max(
       window.innerHeight || 0,
-      (document.documentElement && document.documentElement.clientHeight) || 0,
-      (document.body && document.body.clientHeight) || 0
+      de.scrollHeight || 0, de.offsetHeight || 0, de.clientHeight || 0,
+      b.scrollHeight || 0, b.offsetHeight || 0
     ));
   } catch(e){ return '0'; }
 })()
 """.trimIndent()
 
-/** 页面当前视口宽度（CSS 像素），同上 */
-private val VIEWPORT_W_JS = """
+/** 页面真实渲染出来的宽度（CSS 像素），同上（scrollWidth / innerWidth 取最大） */
+private val PAGE_EXTENT_W_JS = """
 (function(){
   try {
+    var de = document.documentElement || {}, b = document.body || {};
     return String(Math.max(
       window.innerWidth || 0,
-      (document.documentElement && document.documentElement.clientWidth) || 0,
-      (document.body && document.body.clientWidth) || 0
+      de.scrollWidth || 0, de.offsetWidth || 0, de.clientWidth || 0,
+      b.scrollWidth || 0, b.offsetWidth || 0
     ));
   } catch(e){ return '0'; }
 })()
@@ -8438,31 +8444,40 @@ makerRow1.addView(ghostBtnOf(ctx, pal, "扫码登录").apply {
                 return runCatching { android.util.Base64.decode(d, android.util.Base64.DEFAULT) }.getOrNull()
             }
 
-            // ── 主路径：**先问页面自己多高，再按那个高度取图** ──
+            // ── 主路径：**按页面真实渲染出来的尺寸取图**，而不是按控件的尺寸 ──
             //
-            // 为什么必须这么干（这是「下面少一半」的真正根因，前面两版都没抓到）：
-            // 预览槽位只占屏幕的一部分（底栏 + 输入区之下那一块）。WebView 在这个槽位里
-            // 就**真的只有那么高** —— 页面里 `window.innerHeight` 是槽位高度，
-            // 游戏也按这个矮高度排的版。截出来的图自然也只有那么高。
-            // 而用户按「全屏」玩时，同一个页面被放到整屏，画面是完整的一屏。
-            // 于是 AI 看到的图比用户看到的**少了下半截** —— 用户连着反馈好几轮的就是这个。
+            // 「截图下面少一半」的根因是**两套尺寸对不上**：
+            //   · 游戏布局用的尺寸：它在启动 / resize 时从 `window.innerHeight` 读到的高度；
+            //   · 我们取图用的尺寸：CDP 当时那个视口的高度。
+            // 预览槽位只占屏幕一部分，切到预览页又会弹全屏 Dialog —— WebView 的尺寸
+            // 会变，而页面里那套布局不一定跟着变完。两者只要不一致，图里就会
+            // **缺一块**（页面按更高的尺寸排的版，图只截到矮的那一截）或
+            // **多一块空白**（页面按矮的排，图按高的截）。
             //
-            // 以前试过 `Emulation.setDeviceMetricsOverride` 把渲染视口撑大，但那是
-            // **只改渲染、不改页面自己算出来的尺寸**：游戏只在加载时读一次 innerHeight
-            // 定 canvas 大小、之后不监听 resize，所以图里下半部分反而是空的。
+            // 所以这里不再猜视口，直接问页面自己：
+            //   · `documentElement.scrollHeight` = **内容真正铺开的范围**（页面排多高就是多高）
+            //   · `window.innerHeight`           = 当前视口高度（内容不足一屏时的下限）
+            // 取两者的**较大值**，再用它当 clip 高度。这样页面排到多高就截到多高，
+            // 不会截断、也不会多出空白。宽度同理（scrollWidth / innerWidth）。
             //
-            // 现在换一条不会失败的路：**不动视口**，改用 CDP 的
-            // `Page.captureScreenshot(clip = 整页)` —— 页面有多高就截多高，
-            // 布局一个字都不会变，因此既不会有空白、也不会跟用户看到的对不上。
-            // 高度先由页面自己报（innerHeight / documentElement.scrollHeight），
-            // 报不出来再退回 WebView 的物理尺寸。
-            val pageH = runCatching { jsNumber(runJsSync(VIEWPORT_H_JS, 1500)) }.getOrNull()?.toInt() ?: 0
-            val pageW = runCatching { jsNumber(runJsSync(VIEWPORT_W_JS, 1500)) }.getOrNull()?.toInt() ?: 0
+            // ⚠️ 同时要**等它稳定**：切到预览页会弹全屏 Dialog，WebView 的重排是异步的，
+            // 刚切过去那一瞬间 innerHeight 还是旧值。直接截就会拿到过渡中的一帧。
+            // 这里轮询到「连续两次读数一样」为止（最多约 1.2 秒）。
+            var pageH = 0
+            var pageW = 0
+            var prevH = -1
+            for (round in 0 until 6) {
+                pageH = runCatching { jsNumber(runJsSync(PAGE_EXTENT_H_JS, 1200)) }.getOrNull()?.toInt() ?: 0
+                if (pageH == prevH && pageH > 0) break      // 稳住了
+                prevH = pageH
+                runCatching { Thread.sleep(200) }
+            }
+            pageW = runCatching { jsNumber(runJsSync(PAGE_EXTENT_W_JS, 1200)) }.getOrNull()?.toInt() ?: 0
             val dm = resources.displayMetrics
             val dpr = dm.density.takeIf { it > 0f } ?: 1f
             val cssH = when {
                 explicit && viewportH > 0 -> viewportH
-                pageH in 200..4000 -> pageH
+                pageH in 200..8000 -> pageH
                 else -> (dm.heightPixels / dpr).toInt().coerceIn(320, 4000)
             }
             val cssW = when {
