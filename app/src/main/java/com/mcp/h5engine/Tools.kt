@@ -147,7 +147,7 @@ interface GameUi {
      * 这是 AI 自己的调试眼 —— 用户明确要求"截图验证必须有"，但"不许动我的屏幕"。
      * 返回 null = 拿不到（游戏页没加载过 / 该机型不允许离屏画 WebView / 图是纯色空白）。
      */
-    fun snapshotGameOffscreen(maxWidth: Int = 720): ByteArray? = null
+    fun snapshotGameOffscreen(maxWidth: Int = 1080): ByteArray? = null
 
     /** 把「截图里的像素坐标」换算成网页 CSS 坐标；没截过图返回 null */
     fun shotToCss(x: Float, y: Float): FloatArray? = null
@@ -413,7 +413,7 @@ class EngineTools(private val ui: GameUi, private val root: File) {
             fn("game_shot", "**离屏抓一张「游戏画面」**（不切页、不动用户屏幕、不点击）。" +
                 "这是你自己的调试眼：确认游戏画面有没有白屏/错位/被遮挡、素材有没有渲染出来。" +
                 "拿不到图会说明原因，**不要**据此断言「游戏坏了」",
-                "{\"maxWidth\":{\"type\":\"integer\",\"description\":\"图片最长边，默认 720\"}}",
+                "{\"maxWidth\":{\"type\":\"integer\",\"description\":\"图片最长边，默认 1080（够看清小字；要更细可调到 1440）\"}}",
                 emptyList()),
             fn("screenshot", "截取**整屏**画面（跟手机自带截图一样，含 App 顶栏/底栏/游戏画面，返回图片）。" +
                 "用它检查 UI 有没有白屏/错位/遮挡。返回文本里带「图内坐标 → 点击坐标」的换算，" +
@@ -1797,7 +1797,7 @@ class EngineTools(private val ui: GameUi, private val root: File) {
                     }
                 }
                 runCatching { Thread.sleep(gap.toLong()) }
-                val img = ui.snapshotGameOffscreen(360) ?: continue
+                val img = ui.snapshotGameOffscreen(480) ?: continue
                 if (img.size > 128) shots.add(img)
             }
 
@@ -1826,7 +1826,7 @@ class EngineTools(private val ui: GameUi, private val root: File) {
         }
 
         "game_shot" -> {
-            val img = ui.snapshotGameOffscreen(a.optInt("maxWidth", 720))
+            val img = ui.snapshotGameOffscreen(a.optInt("maxWidth", 1080))
             if (img == null || img.size < 128) {
                 ToolResult(
                     "没抓到画面（${img?.size ?: 0} 字节）。抓图走的是「**从页面内部取 canvas**」，" +

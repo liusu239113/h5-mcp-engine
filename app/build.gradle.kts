@@ -19,8 +19,8 @@ android {
         applicationId = "com.mcp.h5engine"
         minSdk = 26
         targetSdk = 34
-        versionCode = 77
-        versionName = "1.76"
+        versionCode = 78
+        versionName = "1.77"
         // GeckoView 只提供 arm64-v8a 变体：显式过滤 ABI，避免打出别的架构一进预览就崩
         ndk {
             abiFilters += listOf("arm64-v8a")

@@ -7767,14 +7767,43 @@ makerRow1.addView(ghostBtnOf(ctx, pal, "扫码登录").apply {
             // 而且渲染管线略有差别 —— 出来的图会跟用户看到的不完全一致。
             // 现在不传它（用默认 true），并且显式打开 captureBeyondViewport 之外的两个开关：
             //   · optimizeForSpeed=false：优先保真，不做有损加速
+            // 【关键】截图前把视口临时撑到**整屏**。
+            //
+            // 为什么必须这么做：预览槽位只占屏幕的一部分，CDP 默认按那个**小视口**
+            // 渲染 —— 截出来的图和用户按「全屏」玩的时候根本不是一回事：
+            // 字更小、布局更挤、细节糊在一起。用户的原话是
+            // 「截图验证没走全屏，看不清楚，跟我肉眼实际玩的体验不一样」。
+            //
+            // Emulation.setDeviceMetricsOverride 只改**渲染用的视口尺寸**，
+            // 不切页、不改可见性、不动用户眼前的界面；截完立刻 clear 还原。
+            //
+            // 例外：用户**正停在预览页**时不做覆盖 —— 那种时候当前视口就是他眼睛
+            // 看到的东西，按原样截反而更准。
+            val overrode = if (activeTab != 1) {
+                val dm = resources.displayMetrics
+                val dpr = dm.density.takeIf { it > 0f } ?: 1f
+                val cssW = (dm.widthPixels / dpr).toInt().coerceAtLeast(320)
+                val cssH = (dm.heightPixels / dpr).toInt().coerceAtLeast(480)
+                cdpCall(
+                    out, ins, 3, "Emulation.setDeviceMetricsOverride",
+                    JSONObject().put("width", cssW).put("height", cssH)
+                        .put("deviceScaleFactor", dpr.toDouble())
+                        .put("mobile", true),
+                    sid
+                ) != null
+            } else false
+
             //   · captureBeyondViewport=true：页面比视口长时也完整截下来
             val shot = cdpCall(
-                out, ins, 3, "Page.captureScreenshot",
+                out, ins, 4, "Page.captureScreenshot",
                 JSONObject().put("format", "jpeg").put("quality", 80)
                     .put("captureBeyondViewport", true)
                     .put("optimizeForSpeed", false),
                 sid
             )
+            if (overrode) {
+                runCatching { cdpCall(out, ins, 5, "Emulation.clearDeviceMetricsOverride", null, sid) }
+            }
             val d = shot?.optJSONObject("result")?.optString("data", "").orEmpty()
             if (d.isEmpty()) return null
             android.util.Base64.decode(d, android.util.Base64.DEFAULT)
