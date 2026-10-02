@@ -1860,17 +1860,20 @@ class EngineTools(private val ui: GameUi, private val root: File) {
             val img = ui.snapshotGameOffscreen(a.optInt("maxWidth", 1080), vw, vh)
             if (img == null || img.size < 128) {
                 ToolResult(
-                    "没抓到画面（${img?.size ?: 0} 字节）。抓图走的是「**从页面内部取 canvas**」，" +
-                        "不切页、不改可见性、不动用户屏幕，所以抓不到只会是这两种情况：\n" +
-                        "  · 页面里根本没有 canvas（纯 DOM 排版的界面）—— 这种就是抓不到，别重试；\n" +
-                        "  · 游戏刚打开/刚热重载，canvas 还没画第一帧 —— 稍等一下再抓一次就行。\n" +
+                    "没抓到画面（${img?.size ?: 0} 字节）。抓图走的是 **CDP 离屏抓「整屏合成结果」**" +
+                        "（DOM 文字 + canvas + WebGL 全都在图里），" +
+                        "不切页、不改可见性、不动用户屏幕。抓不到通常是这几种：\n" +
+                        "  · 游戏刚打开 / 刚热重载，页面还没画第一帧 —— 稍等一下再抓一次；\n" +
+                        "  · 页面确实还是空的（比如加载失败、脚本报错没渲染）—— 先看 console_logs；\n" +
+                        "  · 该机型 / 该 WebView 版本不允许离屏合成 —— 这种就是抓不到，别反复重试。\n" +
+                        "⚠️ **不要**据此断言「纯 DOM 页面抓不到」—— CDP 抓的是合成结果，DOM 界面一样能抓到。\n" +
                         "→ **不要请用户切到预览页**（用户明确不许动他正在看的屏幕）。" +
                         "改用 js_eval / console_logs / engine_status 做逻辑验证：" +
                         "把关键状态（当前屏幕名、关键变量、元素是否存在）读出来自检，一样能定位问题。"
                 )
             } else {
                 ToolResult(
-                    "已抓到画面（${img.size / 1024} KB）—— 从页面内部取的 canvas，" +
+                    "已抓到画面（${img.size / 1024} KB）—— CDP 离屏抓的整屏合成结果，" +
                         "用户屏幕没有被切换、没有被动过。\n" +
                         "看图确认：有没有白屏、布局是否完整、有没有被系统栏压住、素材有没有加载出来。",
                     listOf(img)

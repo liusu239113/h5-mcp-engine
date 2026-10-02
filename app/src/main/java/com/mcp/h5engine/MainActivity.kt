@@ -7820,46 +7820,63 @@ makerRow1.addView(ghostBtnOf(ctx, pal, "扫码登录").apply {
             // 视口尺寸：调用方指定了「模拟真机尺寸」就用它（任何 tab 下都覆盖 ——
             // 那正是「我要按这个尺寸看」的意思）；没指定就在非预览页按整屏来。
             val explicit = viewportW > 0 && viewportH > 0
-            val overrode = if (explicit || activeTab != 1) {
+            val wantOverride = explicit || activeTab != 1
+
+            /** 发一条 captureScreenshot 并把 base64 解成字节；拿不到返回 null */
+            fun capture(id: Int, beyond: Boolean): ByteArray? {
+                val r = cdpCall(
+                    out, ins, id, "Page.captureScreenshot",
+                    JSONObject().put("format", "jpeg").put("quality", 80)
+                        .put("captureBeyondViewport", beyond)
+                        .put("optimizeForSpeed", false),
+                    sid
+                ) ?: return null
+                val d = r.optJSONObject("result")?.optString("data", "").orEmpty()
+                if (d.isEmpty()) return null
+                return runCatching { android.util.Base64.decode(d, android.util.Base64.DEFAULT) }.getOrNull()
+            }
+
+            // ── 尝试 A：按整屏视口覆盖后截（图最接近用户全屏看到的样子）──
+            //
+            // 覆盖是**尽力而为**的：CDP 版本 / 页面状态都可能让 setDeviceMetricsOverride
+            // 失败或让合成器不出帧。所以它一旦没成功、或截出来是空的，
+            // 必须能退回「不带覆盖」那条路 —— 否则就是「本来抓得到，改完反而抓不到了」
+            // （用户反馈的正是这个）。**截图这个能力本身不能因为一次优化而变脆。**
+            var overrode = false
+            if (wantOverride) {
                 val dm = resources.displayMetrics
                 val dpr = dm.density.takeIf { it > 0f } ?: 1f
                 val cssW = if (explicit) viewportW else (dm.widthPixels / dpr).toInt().coerceAtLeast(320)
                 val cssH = if (explicit) viewportH else (dm.heightPixels / dpr).toInt().coerceAtLeast(480)
-                cdpCall(
+                val resp = cdpCall(
                     out, ins, 3, "Emulation.setDeviceMetricsOverride",
                     JSONObject().put("width", cssW).put("height", cssH)
                         .put("deviceScaleFactor", dpr.toDouble())
                         .put("mobile", true),
                     sid
-                ) != null
-            } else false
+                )
+                // 明确检查有没有 error —— 只看「非 null」会把失败响应当成成功
+                overrode = resp != null && resp.optJSONObject("error") == null
+                // 等页面重排完再截：游戏都在 window.resize 里重算 canvas 尺寸，
+                // 不等的话截到的还是旧尺寸 canvas（图里只有上半部分有内容）。
+                // 350ms 是个折中：够重排，又不至于把 CDP socket 的超时预算吃光。
+                if (overrode) runCatching { Thread.sleep(350) }
+            }
 
-            // ⚠️ 设完视口**必须等页面重排完**再截。
-            //
-            // 游戏都在 `window.resize` 里重算 canvas 尺寸（`canvas.width = clientWidth * DPR`）。
-            // 视口刚改完的那一瞬间，页面还没跑 resize 回调 —— 这时候截，
-            // 拿到的还是**旧尺寸的 canvas**，于是图里只有上半部分有内容、
-            // 下面一大片空白（用户反馈的第二张图就是这个）。
-            // 真实用户的显示器 DPR 通常是 2~3，重排更慢，所以要等得比直觉久一点。
-            if (overrode) runCatching { Thread.sleep(400) }
+            // 覆盖成功时按视口尺寸截（文档≈视口，不会多出空白）；
+            // 没覆盖时用 beyond=true（这是**原来就能抓到图**的那套参数，保底）。
+            var bytes = capture(4, beyond = !overrode)
 
-            //   · captureBeyondViewport：**关掉**。
-            //     开着的话 CDP 会按「文档总高度」出图，而文档往往比视口高
-            //     （body 有最小高度、或页面自己撑高），结果就是图里多出一大截空白。
-            //     用户要的是「他全屏看到的那一屏」，所以严格按视口尺寸截。
-            val shot = cdpCall(
-                out, ins, 4, "Page.captureScreenshot",
-                JSONObject().put("format", "jpeg").put("quality", 80)
-                    .put("captureBeyondViewport", false)
-                    .put("optimizeForSpeed", false),
-                sid
-            )
             if (overrode) {
                 runCatching { cdpCall(out, ins, 5, "Emulation.clearDeviceMetricsOverride", null, sid) }
             }
-            val d = shot?.optJSONObject("result")?.optString("data", "").orEmpty()
-            if (d.isEmpty()) return null
-            android.util.Base64.decode(d, android.util.Base64.DEFAULT)
+
+            // ── 尝试 B：兜底。A 没拿到图（或拿到的是坏图）就不带覆盖再来一次 ──
+            if (bytes == null || bytes.size < 1024) {
+                bytes = capture(6, beyond = true)
+            }
+
+            bytes ?: return null
         } catch (t: Throwable) {
             null
         } finally {
