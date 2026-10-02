@@ -242,7 +242,7 @@ object Shizuku2 {
      */
     fun exec(cmd: List<String>, timeoutMs: Long = 20_000): Pair<Int?, String> {
         if (!isReady()) return null to "Shizuku 未就绪（${describe()}）"
-        val p = newProcess(cmd) ?: return null to "拿不到 Shizuku 服务（反射 newProcess 失败）"
+        val p = newProcess(cmd) ?: return null to "拿不到 Shizuku 服务（binder 或 AIDL 调用失败）"
         return runCatching {
             val out = StringBuilder()
             val err = StringBuilder()

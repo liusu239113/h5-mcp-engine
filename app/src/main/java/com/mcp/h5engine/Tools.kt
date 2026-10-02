@@ -459,6 +459,20 @@ class EngineTools(private val ui: GameUi, private val root: File) {
                    "timeoutMs":{"type":"integer","description":"可选，超时毫秒，默认 3000"}}""",
                 listOf("code")),
 
+            fn("file_op",
+                "【手机文件】直接读写手机上的文件（**用 App 自己的权限，不需要 Shizuku**）。\n" +
+                    "能做 list / read / write / mkdir / delete，path 是**绝对路径**，" +
+                    "如 `/storage/emulated/0/A代码库/h5游戏项目`。\n" +
+                    "⚠️ 前提：用户要开过「所有文件访问」权限（发布页 → 切换项目 → 顶部那个授权按钮）。\n" +
+                    "没开的话只能看目录名、读不到文件 —— 这时**如实告诉用户去开**，" +
+                    "**不要**自己造页面、更不要把预览换成别的东西。\n" +
+                    "和 workspace 工具的区别：file_op 用绝对路径、覆盖全盘（需权限）；" +
+                    "workspace 只覆盖用户授权的那一个目录（不需要任何权限）。",
+                """{"action":{"type":"string","description":"list/read/write/mkdir/delete"},
+                   "path":{"type":"string","description":"绝对路径，如 /storage/emulated/0/xxx"},
+                   "text":{"type":"string","description":"action=write 时的内容"}}""",
+                listOf("action", "path")),
+
             fn("workspace",
                 "【工作区文件】读写用户授权的**工作区目录**（SAF，不需要 Shizuku）。\n" +
                     "这是读手机文件的**首选**路子：用户在「发布页 → 工作区目录」授权一个目录后，" +
@@ -1012,6 +1026,83 @@ class EngineTools(private val ui: GameUi, private val root: File) {
                         { ToolResult(it.take(4000)) },
                         { ToolResult("脚本出错：${it.message}") }
                     )
+            }
+        }
+
+        "file_op" -> {
+            val c = ctxRef
+            if (c == null) ToolResult("App 上下文不可用，重启一次 App 再试")
+            else {
+                val act = a.optString("action").trim().lowercase()
+                val p = a.optString("path").trim()
+                val f = if (p.startsWith("/")) File(p) else File("/storage/emulated/0", p)
+
+                // 先看有没有「所有文件访问」权限 —— 没有的话直读会「看得见目录、看不见文件」，
+                // 那种「空目录」是假象，必须说清楚，别让模型据此下结论。
+                val hasAll = runCatching {
+                    android.os.Environment.isExternalStorageManager()
+                }.getOrDefault(false)
+
+                fun needPerm(): ToolResult? =
+                    if (hasAll) null
+                    else if (f.absolutePath.startsWith("/storage/emulated/0") ||
+                        f.absolutePath.startsWith("/sdcard")
+                    ) ToolResult(
+                        "读不了：App 没有「所有文件访问」权限。\n" +
+                            "让用户去「发布页 → 切换 / 新建项目 → 顶部『授权所有文件访问』」开启，" +
+                            "或者用「工作区目录（免 Shizuku）」授权这个目录。\n" +
+                            "⚠️ 别把「看不到文件」当成「目录是空的」—— 那是权限被挡。"
+                    ) else null
+
+                when (act) {
+                    "list" -> {
+                        needPerm() ?: run {
+                            val fs = f.listFiles()
+                            if (fs == null) ToolResult("读不了这个目录：${f.absolutePath}")
+                            else if (fs.isEmpty()) ToolResult("（空目录）${f.absolutePath}")
+                            else ToolResult(
+                                "${f.absolutePath} 共 ${fs.size} 项：\n" +
+                                    fs.sortedWith(compareByDescending<File> { it.isDirectory }.thenBy { it.name })
+                                        .joinToString("\n") { x ->
+                                            (if (x.isDirectory) "📁 " else "📄 ") + x.name +
+                                                if (x.isDirectory) "" else "  (${x.length()} B)"
+                                        }
+                            )
+                        }
+                    }
+                    "read" -> {
+                        needPerm() ?: run {
+                            if (!f.isFile) ToolResult("不是文件或读不到：${f.absolutePath}")
+                            else runCatching { f.readText().take(60_000) }
+                                .map { txt -> ToolResult("${f.name}（${txt.length} 字符）\n\n$txt") }
+                                .getOrElse { e ->
+                                    ToolResult("读不了：${f.absolutePath}（${e.javaClass.simpleName}: ${e.message}）")
+                                }
+                        }
+                    }
+                    "write" -> {
+                        needPerm() ?: run {
+                            val t = a.optString("text")
+                            runCatching {
+                                f.parentFile?.mkdirs()
+                                f.writeText(t)
+                            }.map { ToolResult("已写入 ${f.absolutePath}（${t.length} 字符）") }
+                                .getOrElse { ToolResult("写不了：${f.absolutePath}（${it.javaClass.simpleName}）") }
+                        }
+                    }
+                    "mkdir" -> {
+                        needPerm() ?: ToolResult(
+                            if (f.mkdirs() || f.isDirectory) "已创建 ${f.absolutePath}" else "建不了：${f.absolutePath}"
+                        )
+                    }
+                    "delete" -> {
+                        needPerm() ?: ToolResult(
+                            if (if (f.isDirectory) f.deleteRecursively() else f.delete()) "已删除 ${f.absolutePath}"
+                            else "删不了：${f.absolutePath}"
+                        )
+                    }
+                    else -> ToolResult("未知 action：$act（可用 list/read/write/mkdir/delete）")
+                }
             }
         }
 

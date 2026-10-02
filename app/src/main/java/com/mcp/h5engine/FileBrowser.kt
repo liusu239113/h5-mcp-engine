@@ -55,8 +55,23 @@ class FileBrowser(
     private lateinit var pathTv: TextView
     private lateinit var hintTv: TextView
 
-    /** 有没有提权（决定能不能看到受保护的文件） */
+    /** 有没有 Shizuku 提权 */
     private val elevated: Boolean get() = Shizuku2.isReady()
+
+    /**
+     * 有没有「所有文件访问」权限。
+     *
+     * 这条和 Shizuku **是两条独立的路**：
+     *   · 有它 = 能读写 /sdcard 下的普通文件（**不用装 Shizuku**）；
+     *   · 没它 + 没 Shizuku = 只能看见目录名，文件全被 scoped storage 挡住。
+     * 之前这里只认 Shizuku，导致开了「所有文件访问」的用户仍被判定为「读不了」。
+     */
+    private val hasAllFiles: Boolean get() = runCatching {
+        android.os.Environment.isExternalStorageManager()
+    }.getOrDefault(false)
+
+    /** 能不能真正读到文件内容 */
+    private val canReadFiles: Boolean get() = elevated || hasAllFiles
 
     fun show(start: File? = null) {
         start?.let { if (it.isDirectory) cur = it }
@@ -139,11 +154,12 @@ class FileBrowser(
 
     private fun render() {
         pathTv.text = cur.absolutePath
-        hintTv.text = if (elevated) {
-            "已提权（Shizuku）：能看受保护目录，包括 Android/data"
-        } else {
-            "⚠️ 未提权：只能看到目录名，普通文件被系统挡住 —— " +
-                "去「发布页 → Shizuku 提权」开启后重进"
+        hintTv.text = when {
+            elevated -> "已提权（Shizuku）：能看受保护目录，包括 Android/data"
+            hasAllFiles -> "已授权「所有文件访问」：/sdcard 下都能读写（不需要 Shizuku）"
+            else -> "⚠️ 只能看到目录名，普通文件被系统挡住 —— " +
+                "去「发布页 → 切换项目 → 授权所有文件访问」（不用装 Shizuku），" +
+                "或用「工作区目录」授权一个目录"
         }
         listBox.removeAllViews()
 
