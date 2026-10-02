@@ -133,5 +133,12 @@ configurations.configureEach {
         force("androidx.media3:media3-container:1.3.1")
         force("androidx.media3:media3-extractor:1.3.1")
         force("androidx.media3:media3-database:1.3.1")
+        // Shizuku（dev.rikka.shizuku）会拉进一批用 Kotlin 2.1 编译的新版 androidx，
+        // 而本项目 Kotlin 是 1.9 —— 读不了 2.1 的 metadata，编译直接报
+        // "binary version of its metadata is 2.1.0, expected version is 1.9.0"。
+        // 压到 1.9 时代能读的版本（这些库 Shizuku 只用最基础的 API，降版本无影响）。
+        force("androidx.collection:collection-jvm:1.4.0")
+        force("androidx.annotation:annotation-jvm:1.7.1")
+        force("androidx.annotation:annotation-experimental:1.4.0")
     }
 }
