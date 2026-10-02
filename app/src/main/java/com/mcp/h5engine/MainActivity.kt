@@ -382,8 +382,6 @@ class MainActivity : AppCompatActivity(), GameUi {
     /** 运行中用户又发的消息：排队，等这轮结束自动发出去（而不是粗暴掐断上一轮） */
     private val msgQueue = ArrayDeque<String>()
     private var runToggle: TextView? = null
-    /** 用户手动收起了思考面板：那就别再自动摊开 */
-    private var userCollapsedThinking = false
     private var runSeq = 0
     private var runWrote = false
     /** 本轮是否摸过 maker_ 工具（保证「第一次做 Maker」也能自动构建） */
@@ -2774,13 +2772,29 @@ class MainActivity : AppCompatActivity(), GameUi {
             setTextIsSelectable(true)
             visibility = View.GONE
         }
-        val rows = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        val body = LinearLayout(this).apply {
+        // 【结构】折叠的只有「思考」，**工作流（工具行 / 过程自述）永远可见**。
+        //
+        //   ▸ 已工作 · 读取 2 次 · 12s     ← 组头（点它 = 折叠 / 展开**思考**）
+        //     思考中… <流式全文>           ← 折叠区：默认收起，只装思考
+        //     ✓ read_file   README.md      ← 工作流：**不折叠**，一直在对话里
+        //     ✎ 我先看一下这个文件
+        //
+        // 为什么这么分（用户原话）：「你为什么要把这个已工作、和这个在输出的
+        // 包在一起呀？这个输出的东西你不要给它包在一起，已工作这个默认就是折叠的，
+        // 但是外面这个工作流程我还是能看得见的。」
+        //
+        // 之前把工具行也塞进折叠区，结果是：组一收，**整个工作过程全没了**，
+        // 用户只能看到一个「已工作 · 12s」，根本不知道它到底干了什么。
+        val rows = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(11), 0, dp(11), dp(9))
+        }
+        val thinkBox = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(11), 0, dp(11), 0)
             addView(think)
-            addView(rows)
-            visibility = View.VISIBLE
+            // 默认**收起**：思考是过程噪音，用户要的是结论和工作流
+            visibility = View.GONE
         }
 
         val card = LinearLayout(this).apply {
@@ -2788,7 +2802,8 @@ class MainActivity : AppCompatActivity(), GameUi {
             background = roundCard(this@MainActivity, pal.groupBg, pal.groupBorder, 10)
         }
         card.addView(head)
-        card.addView(body)
+        card.addView(thinkBox)
+        card.addView(rows)
         chatList.addView(card, LinearLayout.LayoutParams(-1, -2).apply {
             topMargin = dp(4)
             bottomMargin = dp(6)
@@ -2799,24 +2814,21 @@ class MainActivity : AppCompatActivity(), GameUi {
         runBody = think
         runToggle = toggle
 
-        // 本轮从「展开」开始：用户要一眼看见「在改哪个文件、跑了多久」。
-        // 展开不再意味着闪 —— 流式文字不走组体（走底部状态行），组体只在
-        // 「工具开始 / 工具结束」时动一两行，频率从每秒几十次降到每轮几次。
-        bodyExpanded = true
-        userCollapsedThinking = false
+        // 思考默认收起（用户明确要的）；工作流那部分不受它影响，照样显示。
+        bodyExpanded = false
+        thinkBox.visibleIf(false)
+        setTextIf(toggle, "›")
         // 组头文案的节流状态必须清掉：它记着**上一张卡**写过什么，
         // 不清的话新卡上的 setTextIf 会以为「没变」，一个字都不写。
         lastWorkStat = ""
         updateWorkStat("")
 
+        // 点组头 = 展开 / 收起**思考**（不影响工作流）
         head.setOnClickListener {
             bodyExpanded = !bodyExpanded
-            body.visibleIf(bodyExpanded)
+            thinkBox.visibleIf(bodyExpanded)
             setTextIf(toggle, if (bodyExpanded) "⌄" else "›")
-            // 记住用户的手动选择：他自己收起了，流式进度就不要再强行摊开
-            userCollapsedThinking = !bodyExpanded
             if (bodyExpanded) {
-                // 运行期间思考文字是只攒不画的；用户主动点开这一下，强制补上
                 paintThink(force = true)
                 scrollChatToBottom()
             }
