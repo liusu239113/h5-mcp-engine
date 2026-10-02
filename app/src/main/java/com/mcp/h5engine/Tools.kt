@@ -178,7 +178,20 @@ interface GameUi {
 class EngineTools(private val ui: GameUi, private val root: File) {
 
     data class ToolResult(val text: String, val images: List<ByteArray> = emptyList())
+
     companion object {
+        /**
+         * 当前是不是**子任务**在执行。
+         *
+         * 为什么需要：子任务和主线共用同一套工具，而它写文件一样会触发热重载。
+         * 真实事故：子任务在写文件 → 预览被重载回主菜单 → **主线**看到页面自己变了，
+         * 却不知道是自己的子任务干的，于是得出结论「有外部进程在动我的文件」，
+         * 跑去排查一个不存在的东西（用户原话：「谁在动我的文件？」）。
+         * 用这个标记把「这次写入来自子任务」写进 file_journal，主线一查就明白。
+         */
+        @Volatile
+        var subtaskMode: Boolean = false
+
         /**
          * 「精简工具定义」打开时要砍掉的工具。
          *
@@ -360,6 +373,14 @@ class EngineTools(private val ui: GameUi, private val root: File) {
                 listOf("game")),
 
             fn("game_reload", "热重载当前游戏，改完代码立刻看效果", "{}", emptyList()),
+            fn("file_journal",
+                "**查「谁在动我的文件」** —— 最近哪些文件被写过、被谁写的（AI / 用户 / 自动热重载）。" +
+                    "⚠️ 当你发现「页面自己刷新了 / 状态自己变了 / 回到了主菜单」时**先查这个**：" +
+                    "绝大多数情况就是**你自己刚才 game_write 触发的自动热重载**（这是引擎的设计行为），" +
+                    "不是有什么外部进程在改文件 —— 别去排查不存在的东西。" +
+                    "如果流水是空的，说明没有文件被改，问题在页面自身逻辑（定时器 / 状态机）。",
+                """{"lines":{"type":"integer","description":"返回最近多少条，默认 40"}}""",
+                emptyList()),
 
             fn("js_eval", "在当前游戏里执行 JS 并返回结果。用于取状态、改数值、调内部函数",
                 """{"code":{"type":"string","description":"表达式或 IIFE，返回值需可 JSON 化"}}""",
@@ -915,6 +936,7 @@ class EngineTools(private val ui: GameUi, private val root: File) {
                 js.writeText(DefaultGame.JS)
                 created += "game.js"
             }
+            FileJournal.record("game_create", id, 0, "新建工程：" + created.joinToString())
             ToolResult(
                 if (created.isEmpty()) "游戏 $id 已存在，共 ${d.listFiles()?.size ?: 0} 个文件"
                 else "已创建游戏 $id（${created.joinToString()}）"
@@ -937,7 +959,16 @@ class EngineTools(private val ui: GameUi, private val root: File) {
                 else -> "行数 $oldLines → $newLines"
             }
             val isShared = rel.trim().trimStart('/').startsWith("_shared/")
-            if (!isShared) ui.reloadGame()
+            // 记一笔「谁动了文件」：AI 后面如果看到页面自己刷新了，查这份流水就能
+            // 确认是它自己写文件引起的，不用去猜「是不是有外部进程在动我的文件」。
+            FileJournal.record(
+                if (subtaskMode) "子任务写入" else "game_write", rel, f.length(),
+                if (isShared) "共享资产，不触发重载" else "已自动热重载"
+            )
+            if (!isShared) {
+                ui.reloadGame()
+                FileJournal.record("auto-reload", rel, 0, "由本次写入触发")
+            }
             ToolResult(
                 "已写入 $rel（$growth，${f.length()} 字节）" +
                     if (isShared) "（共享资产，不需要重载）" else "，并已热重载"
@@ -1626,8 +1657,14 @@ class EngineTools(private val ui: GameUi, private val root: File) {
             repeat(to - s) { lines.removeAt(s) }
             val added = a.getString("content").split("\n")
             lines.addAll(s, added)
-            f.writeText(lines.joinToString("\n"))
+            val body2 = lines.joinToString("\n")
+            f.writeText(body2)
+            FileJournal.record(
+                if (subtaskMode) "子任务补丁" else "game_patch",
+                fnPath, body2.toByteArray().size.toLong(), "已自动热重载"
+            )
             ui.reloadGame()
+            FileJournal.record("auto-reload", fnPath, 0, "由本次补丁触发")
             // 报出 -删 +增：这是「这次改动多大」最直观的表达，用户和模型都用得上
             ToolResult(
                 "已替换 ${a.getInt("startLine")}-$e 行（-${to - s} +${added.size}），" +
@@ -1654,7 +1691,16 @@ class EngineTools(private val ui: GameUi, private val root: File) {
             }
         }
 
-        "game_reload" -> { ui.reloadGame(); ToolResult("已热重载") }
+        "game_reload" -> {
+            FileJournal.record(
+                if (subtaskMode) "子任务重载" else "game_reload",
+                ui.currentGameId(), 0, "AI 主动调用的重载"
+            )
+            ui.reloadGame()
+            ToolResult("已热重载")
+        }
+
+        "file_journal" -> ToolResult(FileJournal.render(a.optInt("lines", 40)))
 
         "js_eval" -> ToolResult(ui.runJsSync(a.getString("code")).take(6000))
 

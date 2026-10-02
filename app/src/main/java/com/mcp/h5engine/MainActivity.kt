@@ -3668,6 +3668,7 @@ class MainActivity : AppCompatActivity(), GameUi {
             .setPositiveButton("保存") { ->
                 runCatching {
                     f.writeText(et.text.toString())
+                    FileJournal.record("用户编辑", f.name, f.length(), "在 App 里手改并保存，已热重载")
                     reloadGame()
                     toast("已保存并热重载")
                 }.onFailure { toast("保存失败：${it.message}") }
@@ -6896,6 +6897,9 @@ makerRow1.addView(ghostBtnOf(ctx, pal, "扫码登录").apply {
         }
 
         subtaskDepth = depth + 1
+        // 打上「当前是子任务在执行」的标记：子任务写文件也会触发热重载，
+        // 主线看到预览被冲掉时，靠 file_journal 里这个标记才知道是自己派的子任务干的。
+        EngineTools.subtaskMode = true
         val result = try {
             runner.run(
                 subHistory,
@@ -6920,6 +6924,7 @@ makerRow1.addView(ghostBtnOf(ctx, pal, "扫码登录").apply {
         } catch (t: Throwable) {
             "子任务出错：${t.javaClass.simpleName}: ${t.message}"
         } finally {
+            EngineTools.subtaskMode = false
             subtaskDepth = depth
         }
 
