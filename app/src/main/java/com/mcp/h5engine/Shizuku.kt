@@ -197,20 +197,13 @@ object Shizuku2 {
     /**
      * 拿到 IShizukuService 的远程代理。
      *
-     * ## 为什么这些 stub 是**源码**放在项目里，而不是靠依赖
+     * `moe.shizuku.server.IShizukuService` 由 `dev.rikka.shizuku:aidl` 提供，
+     * 而它是 `dev.rikka.shizuku:api` 的**传递依赖** —— 也就是说加了 api 就自动有了，
+     * 不用自己 vendor 一份（我一开始 vendor 过，结果 dex 里类重复、构建失败：
+     *   `Type moe.shizuku.server.IRemoteProcess is defined multiple times`）。
      *
-     * `moe.shizuku.server.IShizukuService` 是**服务端**的 AIDL 接口。
-     * `dev.rikka.shizuku:api` / `:provider` 两个依赖里**都没有它** ——
-     * 官方把它单独发在 `dev.rikka.shizuku:aidl`，而那个 artifact **只有 sources**，
-     * 没有编译好的 jar。
-     *
-     * 所以正确做法是：把这些**已生成好的 Java stub**（官方 sources jar 里就是
-     * 编译前的 .java）放进源码树 `app/src/main/java/moe/shizuku/server/`，
-     * 由我们的编译器一起编。Operit 也是这么干的。
-     *
-     * ⚠️ 之前这里用反射 `Class.forName("...IShizukuService$Stub")` —— **必然失败**：
-     * 那个类只在 Shizuku 自己的进程里，我们的进程里根本没有，
-     * 反射查不到类。真机上的报错就是「拿不到 Shizuku 服务（反射 newProcess 失败）」。
+     * 之前这里用 `Class.forName("...IShizukuService$Stub")` 反射 —— 那条路本来就绕，
+     * 现在直接静态引用，编译期就能查错。
      */
     private fun serviceProxy(): IShizukuService? = runCatching {
         val binder = Shizuku.getBinder() ?: return null
