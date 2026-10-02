@@ -192,6 +192,18 @@ class EngineTools(private val ui: GameUi, private val root: File) {
          */
         val SLIM_DROP: Set<String> = setOf("toolpkg", "localserver")
 
+        /**
+         * 子任务运行器（由 MainActivity 注入）。
+         *
+         * 为什么放在 companion：`subtask` 工具在 [EngineTools.exec] 里执行，
+         * 而它需要「起一个独立上下文的 Agent」这个能力 —— 那是 MainActivity 才有的
+         * （要拿 history、cfg、projectDir）。用回调注入，避免 Tools 反向依赖 Activity。
+         *
+         * 返回：子任务的**最终结论**（不是它的完整过程 —— 那正是省 context 的关键）。
+         */
+        @Volatile
+        var subtaskRunner: ((String, String) -> String)? = null
+
         /** MCP 工具桥（TapTap 小游戏等），App 启动时注入；声明与执行都会带上它 */
         @Volatile
         var mcp: McpHub? = null
@@ -466,6 +478,22 @@ class EngineTools(private val ui: GameUi, private val root: File) {
                 """{"code":{"type":"string","description":"JS 代码，用 return 返回结果"},
                    "timeoutMs":{"type":"integer","description":"可选，超时毫秒，默认 3000"}}""",
                 listOf("code")),
+
+            fn("subtask",
+                "【子任务】把一个**独立的小目标**丢给一个全新的助手去完成，只把它干完的**结论**拿回来。\n" +
+                    "为什么有用：主线上下文不会被它的过程撑爆。比如「把这个游戏的音效接上」——" +
+                    "它会自己读文件、改代码、验证，中间几十轮往返都发生在**它的**上下文里，" +
+                    "回到你手上的只有一句结论。\n" +
+                    "什么时候用：\n" +
+                    "  · 一个目标**相对独立**（改一个模块、加一个功能、修一类 bug），不需要你中途决策；\n" +
+                    "  · 主线已经很长、你感觉上下文快满了；\n" +
+                    "  · 有几件互不相干的事，可以连发几个子任务。\n" +
+                    "什么时候**别**用：目标还模糊、需要边做边和你商量、或者几件事有先后依赖。\n" +
+                    "⚠️ 子任务看不到你和用户的对话，所以 goal 要写全：要做什么、改哪个文件、" +
+                    "验收标准是什么。写得越具体，它干得越准。",
+                """{"goal":{"type":"string","description":"给子任务的完整目标描述（它看不到本对话，要写全）"},
+                   "title":{"type":"string","description":"可选。短标题，显示在对话里，如「接入音效」"}}""",
+                listOf("goal")),
 
             fn("context_budget",
                 "【上下文预算】查当前对话用了多少 token、还剩多少、离压缩还有多远。\n" +
@@ -1044,6 +1072,21 @@ class EngineTools(private val ui: GameUi, private val root: File) {
             }
         }
 
+        "subtask" -> {
+            val goal = a.optString("goal").trim()
+            val title = a.optString("title").trim().ifBlank { goal.take(20) }
+            val runner = subtaskRunner
+            if (goal.isBlank()) ToolResult("subtask 需要 goal")
+            else if (runner == null) ToolResult("子任务能力没注入（重启一次 App 再试）")
+            else {
+                // ⚠️ 这里是**阻塞**调用（子任务要跑几十轮）。工具本身就在子线程里跑，
+                // 阻塞是安全的；但要让用户看见进展，所以 runner 内部会往对话里发事件。
+                val r = runCatching { runner(title, goal) }
+                    .getOrElse { "子任务执行失败：${it.javaClass.simpleName}: ${it.message}" }
+                ToolResult("【子任务「$title」的结果】\n$r")
+            }
+        }
+
         "context_budget" -> {
             // 历史在 AgentRunner 手里，这里通过 GameUi 拿一个只读快照
             val h = runCatching { ui.contextSnapshot() }.getOrNull()
@@ -1051,7 +1094,7 @@ class EngineTools(private val ui: GameUi, private val root: File) {
             if (h == null || c == null) {
                 ToolResult("拿不到当前上下文（可能在测试环境）。")
             } else {
-                val cfgNow = AiConfigStore(c).toConfig()
+                val cfgNow = AiConfigStore(c).active()
                 val win = TokenBudget.window(cfgNow)
                 val used = TokenBudget.estimate(h)
                 val left = (win - used).coerceAtLeast(0)

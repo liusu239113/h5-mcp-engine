@@ -509,6 +509,8 @@ class MainActivity : AppCompatActivity(), GameUi {
         // 构建钩子：maker_build_current_directory 成功 → 把当前工程钉成 Maker。
         // 判型不靠「目录里有什么文件」（能被 AI 写的东西骗），只认「真构建过」这个动作。
         EngineTools.onMakerBuiltProject = { markCurrentProjectAsMaker(currentGame) }
+        // 子任务：把「起一个独立上下文的助手」这个能力注入给工具层
+        EngineTools.subtaskRunner = { title, goal -> runSubtask(title, goal) }
 
         rootView = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -6845,6 +6847,167 @@ makerRow1.addView(ghostBtnOf(ctx, pal, "扫码登录").apply {
 
     private fun showConsole() {
         alert("console 输出", logs.tail(120).joinToString("\n").ifBlank { "(暂无输出)" })
+    }
+
+    // ==================== 子任务 ====================
+
+    /** 正在跑的子任务数（避免无限套娃：子任务里再开子任务） */
+    @Volatile private var subtaskDepth = 0
+
+    /**
+     * 跑一个子任务：**独立上下文**的新助手，只把结论带回主线。
+     *
+     * ## 为什么这么做
+     *
+     * 主线跑大项目时，几十轮工具往返会把上下文撑满。把「一个独立小目标」丢出去：
+     * 它自己读文件 / 改代码 / 验证（这些过程都发生在**它的**上下文里），
+     * 回主线只有一句结论 —— 主线因此能一直保持轻。
+     *
+     * ## 关键约束
+     *
+     * · **独立 history**：子任务看不到主对话，所以 goal 必须自带全部信息；
+     * · **不污染主 history**：子任务的历史跑完即弃，绝不并进主线；
+     * · **防套娃**：子任务里再调 subtask 直接拒绝（否则会指数级爆）；
+     * · **用户看得见**：往主对话里发 `SUBTASK:` 事件，界面上能展开看它干了什么。
+     *
+     * @return 子任务的最终结论（给主线模型看的）
+     */
+    private fun runSubtask(title: String, goal: String): String {
+        if (subtaskDepth > 0) {
+            return "子任务里不能再开子任务（会无限套娃）。请直接在当前子任务里完成这件事。"
+        }
+        val cfgNow = cfgStore.active()
+        // 子任务用**当前配置的技能**：用户选的就是他要的做法，不该被子任务改掉
+        val skillNow = SkillPresets.byId(cfgStore.skillId)
+
+        // 给用户看见：对话里出现一张「子任务」卡
+        main.post { addSubtaskCard(title, "running") }
+
+        // 独立历史：一条 system + 一条 user(goal)。**不带**主对话的任何内容。
+        val subHistory = mutableListOf<ChatMsg>()
+        val subTools = EngineTools(this, gameRoot)
+
+        // 把子任务的每一行输出转成主对话里的事件，用户能实时看到它在干什么
+        val buffer = StringBuilder()
+        val depth = subtaskDepth
+        val runner = AgentRunner(
+            appCtx = this,
+            cfg = cfgNow,
+            skill = skillNow,
+            tools = subTools,
+            visionFallback = cfgStore.visionFallback,
+            shotDir = File(gameRoot, "_shots"),
+            projectDir = projDir()
+        ) { ev ->
+            // 只挑有信息量的往主线转，避免把子任务的几百行噪音灌进主对话
+            when {
+                ev.startsWith("TOOLRUN:") -> {
+                    val nm = ev.removePrefix("TOOLRUN:").trim()
+                        .removePrefix("[").substringBefore("]")
+                    main.post { appendSubtaskLine(title, nm) }
+                }
+                ev.startsWith("AIFINAL: ") -> buffer.append(ev.removePrefix("AIFINAL: "))
+                ev.startsWith("INFO: 完成") -> {}
+            }
+        }
+
+        subtaskDepth = depth + 1
+        val result = try {
+            runner.run(
+                subHistory,
+                goal,
+                emptyList(),
+                resume = false,
+                startStep = 0
+            )
+            // 结论优先用最终回复；没有就退到 buffer / 最后一条 assistant
+            val finalText = subHistory.lastOrNull { it.role == "assistant" && !it.text.isNullOrBlank() }
+                ?.text?.takeIf { it.isNotBlank() }
+                ?: buffer.toString().takeIf { it.isNotBlank() }
+                ?: "（子任务没有产出结论）"
+            finalText.take(6000)
+        } catch (t: Throwable) {
+            "子任务出错：${t.javaClass.simpleName}: ${t.message}"
+        } finally {
+            subtaskDepth = depth
+        }
+
+        main.post {
+            finishSubtaskCard(title, result)
+            // 子任务改过代码 → 刷新预览
+            ensurePreviewFresh()
+        }
+        return result
+    }
+
+    /** 对话里那张「子任务」卡：标题 + 状态 + 过程行 */
+    private val subtaskCards = mutableMapOf<String, LinearLayout>()
+
+    private fun addSubtaskCard(title: String, state: String) {
+        if (!::chatList.isInitialized) return
+        val card = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(12), dp(10), dp(12), dp(10))
+            background = roundCard(this@MainActivity, pal.cardAlt, pal.border, 12)
+        }
+        card.addView(TextView(this).apply {
+            text = "🧩 子任务 · $title"
+            textSize = 13.5f
+            typeface = MEDIUM
+            setTextColor(pal.accent)
+        })
+        val lines = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(0, dp(6), 0, 0)
+        }
+        card.addView(lines)
+        card.tag = lines          // 过程行挂这儿，后面往里追加
+        subtaskCards[title] = card
+        chatList.addView(card, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(8) })
+        scrollChatToBottom()
+    }
+
+    private fun appendSubtaskLine(title: String, tool: String) {
+        val card = subtaskCards[title] ?: return
+        val lines = card.tag as? LinearLayout ?: return
+        // 最多显示 6 行，再多就折成一行「…」
+        if (lines.childCount >= 6) {
+            (lines.getChildAt(lines.childCount - 1) as? TextView)?.text = "  …（还有更多步骤）"
+            return
+        }
+        lines.addView(TextView(this).apply {
+            text = "  · $tool"
+            textSize = 11.5f
+            setTextColor(pal.sub)
+        })
+        scrollChatToBottom()
+    }
+
+    private fun finishSubtaskCard(title: String, result: String) {
+        val card = subtaskCards.remove(title) ?: return
+        val lines = card.tag as? LinearLayout
+        lines?.addView(TextView(this).apply {
+            text = "  ✓ 完成"
+            textSize = 11.5f
+            setTextColor(pal.accent)
+        })
+        // 结论折在卡片里，点一下展开 —— 不占对话正文
+        val head = result.lineSequence().firstOrNull()?.take(60).orEmpty()
+        card.addView(TextView(this).apply {
+            text = "结论：$head"
+            textSize = 12f
+            setTextColor(pal.text)
+            setPadding(0, dp(6), 0, 0)
+            isClickable = true
+            setOnClickListener {
+                AlertDialog.Builder(themed())
+                    .setTitle("子任务「$title」的结论")
+                    .setMessage(result.take(20_000))
+                    .setPositiveButton("好", null)
+                    .show()
+            }
+        })
+        scrollChatToBottom()
     }
 
     // ==================== git ====================
