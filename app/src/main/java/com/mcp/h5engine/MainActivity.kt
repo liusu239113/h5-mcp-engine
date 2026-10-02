@@ -6934,7 +6934,9 @@ makerRow1.addView(ghostBtnOf(ctx, pal, "扫码登录").apply {
             // 不等看门狗（它最多要 1 秒）—— 子任务只要还想再动一下文件，
             // 就会先经过这里，直接把它掐掉，少写一个文件是一个。
             if (runSeq != subtaskOwnerSeq) {
-                runner.cancel()
+                // 用字段而不是局部名 `runner`：这个 lambda 在 `val runner = ...` 之前
+                // 就写好了，里面写 `runner` 会解析到可空的 MainActivity 字段。
+                subtaskRunnerRef?.cancel()
                 return@AgentRunner
             }
             // 只挑有信息量的往主线转，避免把子任务的几百行噪音灌进主对话。
