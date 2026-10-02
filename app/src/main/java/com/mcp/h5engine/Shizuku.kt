@@ -76,13 +76,33 @@ object Shizuku2 {
     /** 整体可用 = 服务在跑 + 已授权 */
     fun isReady(): Boolean = isServiceRunning() && hasPermission()
 
-    /** 拿当前权限等级（shell / root），给 UI 显示用 */
+    /**
+     * 拿当前权限等级（shell / root），给 UI 显示用。
+     *
+     * ⚠️ 判断顺序很重要：**先看 binder 活不活**，最后才看「装没装」。
+     *
+     * 因为 `isInstalled` 依赖 PackageManager，而 Android 11+ 有包可见性限制 ——
+     * 就算我们在 manifest 里声明了 `<queries>`，个别 ROM 上仍可能查不到。
+     * 但 binder 是**运行时事实**：它活着就说明 Shizuku 一定装了、也在跑，
+     * 没必要再去问 PackageManager（用户真机上「明明开了却说未安装」就是这个）。
+     */
     fun describe(): String = when {
-        // appCtx 可能还没 attach（冷启动极早期），那就按「未安装」显示，别崩
+        isServiceRunning() && hasPermission() -> "已授权（ADB 级权限）"
+        isServiceRunning() -> "等待授权"
         appCtx?.let { isInstalled(it) } != true -> "未安装 Shizuku"
-        !isServiceRunning() -> "Shizuku 没在运行"
-        !hasPermission() -> "等待授权"
-        else -> "已授权（ADB 级权限）"
+        else -> "Shizuku 没在运行（装好了但服务没启动）"
+    }
+
+    /**
+     * 详细诊断（排障用）。用户报「明明开了却没用」时，把这段给他看/发回来，
+     * 就能立刻分清是「包看不见」还是「服务没起」还是「没授权」。
+     */
+    fun diagnose(): String = buildString {
+        append("安装: ").append(appCtx?.let { isInstalled(it) }?.let { if (it) "是" else "否（也可能是包可见性被挡）" } ?: "上下文未就绪").append('\n')
+        append("binder 活着: ").append(if (isServiceRunning()) "是" else "否").append('\n')
+        append("已授权: ").append(if (hasPermission()) "是" else "否").append('\n')
+        append("整体可用: ").append(if (isReady()) "是" else "否").append('\n')
+        append("权限等级: ").append(describe())
     }
 
     /** App 上下文，由 MainActivity 在 onCreate 时注入（Shizuku 回调里也要用） */

@@ -3036,6 +3036,17 @@ class MainActivity : AppCompatActivity(), GameUi {
     /** 装载当前项目的会话列表（切项目后调用：界面上的上下文整体换掉，互不串味） */
     private fun reloadSessionsForProject() {
         if (!::chatList.isInitialized) return
+
+        // ★ 正在跑的一轮绝不能被冲掉。
+        //
+        // 这个函数是「从磁盘重新读会话」—— 磁盘上只有**上一次落盘**的内容，
+        // 而当前这一轮新攒的 assistant 回复 / 工具结果还在内存里没落盘。
+        // 直接换掉就等于把它们扔了（用户看到「对话突然失忆」）。
+        //
+        // 正常切项目不会走到这里（openGame 已经拦掉「项目没变」的情况），
+        // 但重载预览等路径仍可能触发，所以这里再兜一道：先把当前进度落盘。
+        if (runAlive) runCatching { persistSessions() }
+
         val loaded = ss().load().ifEmpty { mutableListOf(ChatSession(newId(), "新对话")) }
         sessions.clear()
         sessions.addAll(loaded)
@@ -6798,7 +6809,8 @@ makerRow1.addView(ghostBtnOf(ctx, pal, "扫码登录").apply {
                 "当前权限：ADB 级（shell）。\n\n" +
                     "现在 AI 可以直接读 /sdcard 下的文件了（包括之前被 scoped storage " +
                     "挡住的那些），也能以 shell 身份跑命令。\n\n" +
-                    "试试对 AI 说：「用 shell 看看 /sdcard 下有什么」或者「把某个文件夹扫一遍」。"
+                    "试试对 AI 说：「用 shell 看看 /sdcard 下有什么」或者「把某个文件夹扫一遍」。\n\n" +
+                    "—— 诊断 ——\n" + Shizuku2.diagnose()
             )
         }
     }
@@ -6904,7 +6916,18 @@ makerRow1.addView(ghostBtnOf(ctx, pal, "扫码登录").apply {
         // 把画面又带回旧状态（用户看到的就是「预览没跟着切」）。
         main.removeCallbacks(previewReloadTask)
         previewDirty = false
-        if (id != currentGame) {
+
+        // ⚠️ **项目没变就什么都别做**。
+        //
+        // 这里曾经无条件往下跑，而末尾会 reloadSessionsForProject() ——
+        // 那一步是 `history = sessions[activeSession].msgs`，**从磁盘重新读**。
+        // 于是「AI 调一次 game_launch（打开当前这个游戏）」就会把内存里
+        // 这一轮刚攒的对话整个换掉：还没落盘的 assistant 回复 / 工具结果全没了，
+        // 用户看到的就是**对话突然失忆**（正在跑的上下文凭空消失）。
+        //
+        // game_launch 是 AI 很常调的工具（启动/切换游戏），所以这个坑极易触发。
+        if (id == currentGame) return
+        {
             // 切项目 = 换一份会话库：先把旧项目这轮对话落盘，再切新库
             runCatching { persistSessions() }
             sessStore = null
