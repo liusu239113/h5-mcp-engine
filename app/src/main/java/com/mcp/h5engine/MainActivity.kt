@@ -7676,12 +7676,13 @@ makerRow1.addView(ghostBtnOf(ctx, pal, "扫码登录").apply {
      * 先把常驻的游戏 WebView 按屏幕尺寸排一次版，draw 到内存 Bitmap，再还原尺寸。
      * WebView 是硬件加速的，离屏 draw 在部分机型上会拿到纯色图 —— 那种情况直接返回 null。
      */
-    override fun snapshotGameOffscreen(maxWidth: Int): ByteArray? {
+    override fun snapshotGameOffscreen(maxWidth: Int, cssW: Int, cssH: Int): ByteArray? {
         if (!::web.isInitialized) return null
         if (Looper.myLooper() == Looper.getMainLooper()) return null
         // ① CDP：最完整（DOM + canvas + WebGL 全在），连「卡在加载页」都抓得到，
         //    而且同样不碰用户的屏幕 —— 用户选的就是这条。
-        shootViaCdp()?.let { if (it.size > 1024) return scaleJpeg(it, maxWidth) }
+        //    cssW/cssH 传了就用它当「模拟的真机视口」，不传用当前设备整屏。
+        shootViaCdp(viewportW = cssW, viewportH = cssH)?.let { if (it.size > 1024) return scaleJpeg(it, maxWidth) }
         // ② 退一步：直接从页面里取 canvas。更轻，但只有 canvas 类游戏有，
         //    加载页 / 纯 DOM 排版那种拿不到。
         shootFromPage()?.let { if (it.size > 1024) return scaleJpeg(it, maxWidth) }
@@ -7755,7 +7756,12 @@ makerRow1.addView(ghostBtnOf(ctx, pal, "扫码登录").apply {
      * 抓图要走三步（这个端点先是**浏览器级**的，得先挂到具体的页面 target 上）：
      * Target.getTargets → Target.attachToTarget(flatten) → Page.captureScreenshot。
      */
-    private fun shootViaCdp(timeoutMs: Int = 3500): ByteArray? {
+    private fun shootViaCdp(
+        timeoutMs: Int = 3500,
+        /** 模拟的真机视口（CSS 像素）。传了就用它渲染；不传用当前设备整屏 */
+        viewportW: Int = 0,
+        viewportH: Int = 0
+    ): ByteArray? {
         val name = "webview_devtools_remote_" + android.os.Process.myPid()
         val s = android.net.LocalSocket()
         return try {
@@ -7811,11 +7817,14 @@ makerRow1.addView(ghostBtnOf(ctx, pal, "扫码登录").apply {
             //
             // 例外：用户**正停在预览页**时不做覆盖 —— 那种时候当前视口就是他眼睛
             // 看到的东西，按原样截反而更准。
-            val overrode = if (activeTab != 1) {
+            // 视口尺寸：调用方指定了「模拟真机尺寸」就用它（任何 tab 下都覆盖 ——
+            // 那正是「我要按这个尺寸看」的意思）；没指定就在非预览页按整屏来。
+            val explicit = viewportW > 0 && viewportH > 0
+            val overrode = if (explicit || activeTab != 1) {
                 val dm = resources.displayMetrics
                 val dpr = dm.density.takeIf { it > 0f } ?: 1f
-                val cssW = (dm.widthPixels / dpr).toInt().coerceAtLeast(320)
-                val cssH = (dm.heightPixels / dpr).toInt().coerceAtLeast(480)
+                val cssW = if (explicit) viewportW else (dm.widthPixels / dpr).toInt().coerceAtLeast(320)
+                val cssH = if (explicit) viewportH else (dm.heightPixels / dpr).toInt().coerceAtLeast(480)
                 cdpCall(
                     out, ins, 3, "Emulation.setDeviceMetricsOverride",
                     JSONObject().put("width", cssW).put("height", cssH)

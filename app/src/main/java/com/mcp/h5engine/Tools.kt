@@ -146,8 +146,12 @@ interface GameUi {
      * **离屏**抓一张「游戏预览」画面：不切页、不改可见性、不点屏幕。
      * 这是 AI 自己的调试眼 —— 用户明确要求"截图验证必须有"，但"不许动我的屏幕"。
      * 返回 null = 拿不到（游戏页没加载过 / 该机型不允许离屏画 WebView / 图是纯色空白）。
+     *
+     * @param cssW / cssH **模拟的真机视口尺寸**（CSS 像素）。传了就用它渲染后再截，
+     *   不传就用当前设备整屏。为什么要能指定：不同手机尺寸下布局会不一样，
+     *   让 AI 按一个确定的「标准手机屏」验证，比拿当前设备的槽位/整屏碰运气可靠。
      */
-    fun snapshotGameOffscreen(maxWidth: Int = 1080): ByteArray? = null
+    fun snapshotGameOffscreen(maxWidth: Int = 1080, cssW: Int = 0, cssH: Int = 0): ByteArray? = null
 
     /** 把「截图里的像素坐标」换算成网页 CSS 坐标；没截过图返回 null */
     fun shotToCss(x: Float, y: Float): FloatArray? = null
@@ -412,8 +416,11 @@ class EngineTools(private val ui: GameUi, private val root: File) {
 
             fn("game_shot", "**离屏抓一张「游戏画面」**（不切页、不动用户屏幕、不点击）。" +
                 "这是你自己的调试眼：确认游戏画面有没有白屏/错位/被遮挡、素材有没有渲染出来。" +
+                "默认按**整屏视口**抓（等于用户全屏玩看到的那一屏），图是完整的一整屏、不会有空白。" +
                 "拿不到图会说明原因，**不要**据此断言「游戏坏了」",
-                "{\"maxWidth\":{\"type\":\"integer\",\"description\":\"图片最长边，默认 1080（够看清小字；要更细可调到 1440）\"}}",
+                """{"maxWidth":{"type":"integer","description":"图片最长边，默认 1080（够看清小字；要更细可调到 1440）"},
+                   "width":{"type":"integer","description":"可选。模拟一个真机视口宽度（CSS 像素），如 360 / 390 / 412。传了它就会按这个尺寸渲染后再截 —— 验证小屏适配时用"},
+                   "height":{"type":"integer","description":"可选。配合 width 用的视口高度，如 640 / 844 / 915"}}""",
                 emptyList()),
             fn("screenshot", "截取**整屏**画面（跟手机自带截图一样，含 App 顶栏/底栏/游戏画面，返回图片）。" +
                 "用它检查 UI 有没有白屏/错位/遮挡。返回文本里带「图内坐标 → 点击坐标」的换算，" +
@@ -1826,7 +1833,10 @@ class EngineTools(private val ui: GameUi, private val root: File) {
         }
 
         "game_shot" -> {
-            val img = ui.snapshotGameOffscreen(a.optInt("maxWidth", 1080))
+            // 可选：模拟一个真机视口尺寸再截（验证小屏适配 / 想要可复现的标准屏时用）
+            val vw = a.optInt("width", 0).coerceIn(0, 2000)
+            val vh = a.optInt("height", 0).coerceIn(0, 3000)
+            val img = ui.snapshotGameOffscreen(a.optInt("maxWidth", 1080), vw, vh)
             if (img == null || img.size < 128) {
                 ToolResult(
                     "没抓到画面（${img?.size ?: 0} 字节）。抓图走的是「**从页面内部取 canvas**」，" +
