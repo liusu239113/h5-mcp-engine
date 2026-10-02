@@ -400,6 +400,8 @@ class MainActivity : AppCompatActivity(), GameUi {
     /** 事件批量合并用的缓冲：忙的时候一秒几十条，逐条建 View 会明显卡 */
     private val pendingEvents = mutableListOf<String>()
     private var flushScheduled = false
+    /** 思考内容的节流重绘是否已排期（见 scheduleThinkPaint） */
+    private var thinkPaintScheduled = false
     private var scrollPending = false
 
     /** 是否跟随到底部：用户往上翻就停下（免得边看边被拽走），滑回底部附近自动恢复 */
@@ -3882,17 +3884,35 @@ class MainActivity : AppCompatActivity(), GameUi {
     private fun appendThinking(line: String) {
         thinkLog = if (thinkLog.isEmpty()) line else thinkLog + "\n" + line
         if (thinkLog.length > 3000) thinkLog = thinkLog.takeLast(3000)
-        paintThink()
+        // 运行期间**也要**把思考画进对话里（节流），不能只等收尾那一下。
+        //
+        // 用户反馈的原话：「真遇到那个催他那一步之后，工作输出又在对话里面看不见了，
+        // 他只会在底部那个输入框上面那个思考模式里面输出。」
+        // 原因就是这里以前调的是 paintThink()，而 paintThink 在 running 时直接 return ——
+        // 于是运行期间思考只出现在底部状态行，对话区一片空白，看着像「什么都没干」。
+        scheduleThinkPaint()
+    }
+
+    /**
+     * 思考内容的**节流**重绘：运行期间每 600ms 最多画一次。
+     *
+     * 为什么不能每来一条就画：思考是流式的，一秒能来几十条；每来一条就把
+     * 几千字的文本重新 setText 一次 = 整棵对话树重排，那就是老版本「边输出边闪」的来源。
+     * 节流到 600ms 之后，观感上是「实时在写」，代价却只有一个数量级。
+     */
+    private fun scheduleThinkPaint() {
+        if (thinkPaintScheduled) return
+        thinkPaintScheduled = true
+        main.postDelayed({
+            thinkPaintScheduled = false
+            paintThink(force = true)
+        }, 600)
     }
 
     /**
      * 把 thinkLog 画进组体。
      *
-     * @param force true = 无视「运行中不画」这条限制，本轮收尾 / 用户主动点开时用。
-     *
-     * 运行期间刻意不画：每 200ms 重写一段几千字的文本 = 整棵对话树重排一次，
-     * 正是老版本「边输出边闪」的来源。实时内容由底部状态行滚动播放，
-     * 全文等跑完再一次性补上 —— 看起来一样，代价差两个数量级。
+     * @param force true = 无视「运行中不画」这条限制（收尾 / 用户点开 / 节流重绘时用）。
      */
     private fun paintThink(force: Boolean = false) {
         if (running && !force) return
