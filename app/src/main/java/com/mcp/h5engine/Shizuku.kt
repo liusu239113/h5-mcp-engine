@@ -78,7 +78,8 @@ object Shizuku2 {
 
     /** 拿当前权限等级（shell / root），给 UI 显示用 */
     fun describe(): String = when {
-        !isInstalled(appCtx) -> "未安装 Shizuku"
+        // appCtx 可能还没 attach（冷启动极早期），那就按「未安装」显示，别崩
+        appCtx?.let { isInstalled(it) } != true -> "未安装 Shizuku"
         !isServiceRunning() -> "Shizuku 没在运行"
         !hasPermission() -> "等待授权"
         else -> "已授权（ADB 级权限）"
@@ -114,11 +115,15 @@ object Shizuku2 {
                 binderListenerAdded = true
             }
             if (!permListenerAdded) {
-                Shizuku.addRequestPermissionResultListener { code, grant ->
+                // ⚠️ 回调签名是 (requestCode: Int, grantResult: Int) ——
+                // grantResult 是 PackageManager 的常量，**不是 Boolean**（猜错过，编译报
+                // "inferred type is Int but Boolean was expected"）。
+                Shizuku.addRequestPermissionResultListener { code, grantResult ->
                     if (code == REQ_CODE) {
-                        Log.i(TAG, "Shizuku 授权结果: $grant")
+                        val granted = grantResult == PackageManager.PERMISSION_GRANTED
+                        Log.i(TAG, "Shizuku 授权结果: $granted (raw=$grantResult)")
                         // 转给等待中的调用方（见 request / deliverPermission）
-                        deliverPermission(grant)
+                        deliverPermission(granted)
                         notifyChanged()
                     }
                 }
@@ -284,7 +289,7 @@ object Shizuku2 {
 
     /** 给用户看的启动指引 */
     fun setupHint(): String = when {
-        !isInstalled(appCtx) ->
+        appCtx?.let { isInstalled(it) } != true ->
             "① 先装 Shizuku（应用商店搜「Shizuku」，或从 GitHub 下 rikka 的 Shizuku）\n" +
                 "② 装好后按它的引导用「无线调试」启动服务\n" +
                 "③ 回来点「授权 Shizuku」"
