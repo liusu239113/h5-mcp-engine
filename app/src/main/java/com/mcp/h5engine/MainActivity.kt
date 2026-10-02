@@ -7892,20 +7892,26 @@ makerRow1.addView(ghostBtnOf(ctx, pal, "扫码登录").apply {
                 return runCatching { android.util.Base64.decode(d, android.util.Base64.DEFAULT) }.getOrNull()
             }
 
-            // ── 始终按**全屏视口**截 ──
+            // ── 主路径：**不改视口**，按 WebView 当前的视口原样截 ──
             //
-            // 关键前提（我之前搞错了）：**预览默认就是全屏状态** —— 切到预览页
-            // 看到的就是铺满整屏的游戏画面，右上角那个「缩小」是它处于全屏模式的标志。
-            // 所以「游戏真正的样子」= **全屏视口下的样子**，截图必须按这个尺寸来。
+            // 为什么不能去改视口（这是我反复踩的坑，记下来别再犯）：
+            // 预览默认就是全屏（切到预览页会自动进全屏），所以 **WebView 本身
+            // 已经是全屏尺寸、游戏也已经按这个尺寸排好版了** —— 根本不需要再动视口。
             //
-            // 不能直接用页面当前视口：用户可能在别的 tab（WebView 收在预览槽位里、
-            // 尺寸更小），也可能自己点了「缩小」。那些状态下当前视口都不是全屏，
-            // 截出来就跟「用户全屏玩」对不上。
+            // 而 `Emulation.setDeviceMetricsOverride` 改的只是「渲染视口」：
+            // 游戏几乎都是**只在加载时读一次 innerHeight** 来定 canvas 尺寸、
+            // 并不监听 resize。我把视口改大之后，游戏内容还是旧尺寸，
+            // 于是截图下半部分一片空白（用户连着反馈了两轮的就是这个）。
             //
-            // 所以：**总是**把渲染视口设成全屏尺寸再截（调用方指定了 width/height
-            // 就用指定的那个尺寸），截完立刻还原 —— 只改渲染视口，不动用户的屏幕。
-            var overrode = false
-            run {
+            // 所以：**直接截当前视口**。WebView 多大，图就多大，游戏也是按这个尺寸画的 ——
+            // 三者一致，不会再有空白、也不会跟用户看到的不一样。
+            //
+            // 唯一例外：调用方**明确**传了 width/height（想在某个标准手机尺寸下验证），
+            // 那时才做覆盖，并且截完立刻还原。
+            var bytes = capture(4, beyond = false)
+
+            // ── 兜底 1：当前视口太小 / 还没排版（比如从没进过预览页）→ 覆盖成全屏再来 ──
+            if (bytes == null || bytes.size < 1024) {
                 val dm = resources.displayMetrics
                 val dpr = dm.density.takeIf { it > 0f } ?: 1f
                 val cssW = if (explicit) viewportW else (dm.widthPixels / dpr).toInt().coerceAtLeast(320)
@@ -7918,24 +7924,18 @@ makerRow1.addView(ghostBtnOf(ctx, pal, "扫码登录").apply {
                     sid
                 )
                 // 明确检查有没有 error —— 只看「非 null」会把失败响应当成成功
-                overrode = resp != null && resp.optJSONObject("error") == null
-                // 等页面重排完再截：游戏都在 window.resize 里重算 canvas 尺寸，
-                // 不等的话截到的还是旧尺寸 canvas（图里只有上半部分有内容）。
-                // 350ms 是个折中：够重排，又不至于把 CDP socket 的超时预算吃光。
-                if (overrode) runCatching { Thread.sleep(350) }
+                val overrode = resp != null && resp.optJSONObject("error") == null
+                if (overrode) {
+                    // 等页面重排：游戏在 window.resize 里重算 canvas 尺寸时要用上这段
+                    runCatching { Thread.sleep(350) }
+                    bytes = capture(5, beyond = false)
+                    runCatching { cdpCall(out, ins, 6, "Emulation.clearDeviceMetricsOverride", null, sid) }
+                }
             }
 
-            // 覆盖了就用 beyond=false（严格按那个视口尺寸）；
-            // 没覆盖用 beyond=true（**原来就能抓到图**的那套参数，保底）。
-            var bytes = capture(4, beyond = !overrode)
-
-            if (overrode) {
-                runCatching { cdpCall(out, ins, 5, "Emulation.clearDeviceMetricsOverride", null, sid) }
-            }
-
-            // ── 兜底：没拿到图（或拿到的是坏图）就换个参数再来一次 ──
+            // ── 兜底 2：还是没图就换 beyond 参数再试（老版本能抓到的就是这套）──
             if (bytes == null || bytes.size < 1024) {
-                bytes = capture(6, beyond = true)
+                bytes = capture(7, beyond = true)
             }
 
             bytes ?: return null
