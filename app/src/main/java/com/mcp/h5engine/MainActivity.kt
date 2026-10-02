@@ -7857,13 +7857,10 @@ makerRow1.addView(ghostBtnOf(ctx, pal, "扫码登录").apply {
             // Emulation.setDeviceMetricsOverride 只改**渲染用的视口尺寸**，
             // 不切页、不改可见性、不动用户眼前的界面；截完立刻 clear 还原。
             //
-            // 例外：用户**正停在预览页**时不做覆盖 —— 那种时候当前视口就是他眼睛
-            // 看到的东西，按原样截反而更准。
-            // 视口尺寸：调用方指定了「模拟真机尺寸」就用它（任何 tab 下都覆盖 ——
-            // 那正是「我要按这个尺寸看」的意思）；没指定就在非预览页按整屏来。
+            // 视口尺寸：调用方指定了「模拟真机尺寸」就用它；没指定就用**整屏**。
+            // 不管用户当前在哪个 tab、有没有手动缩小 —— 因为预览本来默认就是全屏，
+            // 截图必须始终按全屏来（详见下面那段说明）。
             val explicit = viewportW > 0 && viewportH > 0
-            val wantOverride = explicit || activeTab != 1
-
             /** 发一条 captureScreenshot 并把 base64 解成字节；拿不到返回 null */
             fun capture(id: Int, beyond: Boolean): ByteArray? {
                 val r = cdpCall(
@@ -7878,14 +7875,20 @@ makerRow1.addView(ghostBtnOf(ctx, pal, "扫码登录").apply {
                 return runCatching { android.util.Base64.decode(d, android.util.Base64.DEFAULT) }.getOrNull()
             }
 
-            // ── 尝试 A：按整屏视口覆盖后截（图最接近用户全屏看到的样子）──
+            // ── 始终按**全屏视口**截 ──
             //
-            // 覆盖是**尽力而为**的：CDP 版本 / 页面状态都可能让 setDeviceMetricsOverride
-            // 失败或让合成器不出帧。所以它一旦没成功、或截出来是空的，
-            // 必须能退回「不带覆盖」那条路 —— 否则就是「本来抓得到，改完反而抓不到了」
-            // （用户反馈的正是这个）。**截图这个能力本身不能因为一次优化而变脆。**
+            // 关键前提（我之前搞错了）：**预览默认就是全屏状态** —— 切到预览页
+            // 看到的就是铺满整屏的游戏画面，右上角那个「缩小」是它处于全屏模式的标志。
+            // 所以「游戏真正的样子」= **全屏视口下的样子**，截图必须按这个尺寸来。
+            //
+            // 不能直接用页面当前视口：用户可能在别的 tab（WebView 收在预览槽位里、
+            // 尺寸更小），也可能自己点了「缩小」。那些状态下当前视口都不是全屏，
+            // 截出来就跟「用户全屏玩」对不上。
+            //
+            // 所以：**总是**把渲染视口设成全屏尺寸再截（调用方指定了 width/height
+            // 就用指定的那个尺寸），截完立刻还原 —— 只改渲染视口，不动用户的屏幕。
             var overrode = false
-            if (wantOverride) {
+            run {
                 val dm = resources.displayMetrics
                 val dpr = dm.density.takeIf { it > 0f } ?: 1f
                 val cssW = if (explicit) viewportW else (dm.widthPixels / dpr).toInt().coerceAtLeast(320)
@@ -7905,15 +7908,15 @@ makerRow1.addView(ghostBtnOf(ctx, pal, "扫码登录").apply {
                 if (overrode) runCatching { Thread.sleep(350) }
             }
 
-            // 覆盖成功时按视口尺寸截（文档≈视口，不会多出空白）；
-            // 没覆盖时用 beyond=true（这是**原来就能抓到图**的那套参数，保底）。
+            // 覆盖了就用 beyond=false（严格按那个视口尺寸）；
+            // 没覆盖用 beyond=true（**原来就能抓到图**的那套参数，保底）。
             var bytes = capture(4, beyond = !overrode)
 
             if (overrode) {
                 runCatching { cdpCall(out, ins, 5, "Emulation.clearDeviceMetricsOverride", null, sid) }
             }
 
-            // ── 尝试 B：兜底。A 没拿到图（或拿到的是坏图）就不带覆盖再来一次 ──
+            // ── 兜底：没拿到图（或拿到的是坏图）就换个参数再来一次 ──
             if (bytes == null || bytes.size < 1024) {
                 bytes = capture(6, beyond = true)
             }
