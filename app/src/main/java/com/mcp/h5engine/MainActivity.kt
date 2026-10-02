@@ -1960,8 +1960,8 @@ class MainActivity : AppCompatActivity(), GameUi {
         pendingSpinView?.let { if (it.visibility != View.GONE) it.visibility = View.GONE }
         pendingMarkView?.let {
             if (it.visibility != View.VISIBLE) it.visibility = View.VISIBLE
-            setTextIf(it, "–")
-            it.setTextColor(pal.faint)
+            // 标记槽现在是 ImageView（线稿），用一条短横表示「已停止」
+            it.setImageDrawable(LineIcon("stop", pal.faint, 2.4f))
         }
         pendingStatus = null
         pendingSpinView = null
@@ -2475,6 +2475,10 @@ class MainActivity : AppCompatActivity(), GameUi {
             tools = tools,
             visionFallback = cfgStore.visionFallback,
             shotDir = File(gameRoot, "_shots"),
+            // 交付前强制截图自检：只在 H5 工程开。
+            // Maker 工程跑在 GeckoView 里，game_shot 抓不到画面（抓到的只是对话页），
+            // 强制截图会变成死循环 —— 那种工程走的是「构建 + 预览页」那条验证路。
+            requireVisualCheck = projKind(currentGame) != "maker",
             // 工程目录：AI 截到的画面要落进这个项目的**工作区**（_uploads/media），
             // 这样对话里能显示、重启还在、游戏代码也能用相对路径引用
             projectDir = projDir()
@@ -3655,7 +3659,7 @@ class MainActivity : AppCompatActivity(), GameUi {
         val body = runCatching { f.readText() }.getOrDefault("")
         val et = hxInput(this, pal, "文件内容", body, multiLine = true).apply {
             textSize = 12.5f
-            typeface = MONOSPACE
+            typeface = android.graphics.Typeface.MONOSPACE
             gravity = Gravity.TOP or Gravity.START
         }
         HxDialog.Builder(themed(), pal)
@@ -6857,6 +6861,8 @@ makerRow1.addView(ghostBtnOf(ctx, pal, "扫码登录").apply {
             tools = subTools,
             visionFallback = cfgStore.visionFallback,
             shotDir = File(gameRoot, "_shots"),
+            // 子任务同样强制截图自检（同样只在 H5 工程开）
+            requireVisualCheck = projKind(currentGame) != "maker",
             projectDir = projDir()
         ) { ev ->
             // 只挑有信息量的往主线转，避免把子任务的几百行噪音灌进主对话。

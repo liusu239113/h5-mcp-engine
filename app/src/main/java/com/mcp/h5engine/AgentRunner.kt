@@ -15,6 +15,23 @@ private const val CONTINUE_NUDGE =
         "用工具去执行，不要只描述打算怎么做。全部做完再用一段话汇报结果。）"
 
 /**
+ * 「改完代码就想直接交付、却没截图看过画面」时顶回去的那句话。
+ *
+ * 这是用户反复抱怨的第一名：交付前不验证画面。所以不靠提示词自觉，
+ * 由 AgentRunner 在代码层强制补一轮验证（见 requireVisualCheck）。
+ */
+private const val VISUAL_CHECK_NUDGE =
+    "（先别交付 —— 你这一轮改了游戏代码，但**一次画面都没看过**。" +
+        "没看过画面就说「完成」，等于把问题留给用户去发现。现在按顺序做完这三步再收尾：\n" +
+        "  1. `game_shot` 截图，自己看：白屏吗？元素出屏 / 被遮挡吗？文字重叠吗？按钮太小吗？布局错位吗？\n" +
+        "  2. 用 `tap`（坐标直接从截图上量，space=\"shot\"）真的点一遍核心操作，" +
+        "再 `game_shot` 确认状态**真的变了**（不是点了没反应）；运动对不对用 `game_shot_motion`。\n" +
+        "  3. `js_eval` 跑一遍断言：把游戏状态挂到 window.__G，断言" +
+        "「开始 / 得分 / 失败 / 结算 / 重开」整条核心循环。\n" +
+        "发现任何问题就先修，修完再截一次。全部确认没问题了，再给结论 —— " +
+        "汇报里要写清「你截图看到了什么、点了哪里、结果如何」。）"
+
+/**
  * AI 代理循环：把「用户一句话」变成「多轮工具调用」。
  *
  * 事件协议（界面靠前缀分流，别改前缀）：
@@ -36,6 +53,19 @@ class AgentRunner(
     private val tools: EngineTools,
     private val visionFallback: Boolean,
     private val shotDir: File,
+    /**
+     * 改完游戏代码后，**强制**先截图验证再允许收尾。
+     *
+     * 为什么要做成硬闸门、而不是只写在提示词里：
+     * 用户的原话是「每次交付任务之前都不会截图验证画面有没有问题」——
+     * 提示词里明明写了「没看过画面不许说完成」，弱模型照样跳过。
+     * 所以这里在**代码层**拦一道：只要这一轮改过游戏文件，
+     * 而模型想说「做完了」却没截图，就把它的结论顶回去、逼它去截。
+     *
+     * 只在 H5 工程生效：Maker 工程跑在 GeckoView 里，game_shot 抓不到画面
+     * （抓到的只会是对话页），强制截图等于死循环。
+     */
+    private val requireVisualCheck: Boolean = true,
     /**
      * 当前工程目录（`<工程根>/<项目名>`）。
      * 工具产出的图要落到它的 `_uploads/media/` —— 也就是**工作区**，
@@ -276,6 +306,16 @@ class AgentRunner(
         /** 「说了要做却没动手」被自动催了几次（上限 2，见下面的判断） */
         var nudges = 0
 
+        // ===== 交付前的强制自检证据（见 requireVisualCheck 的说明）=====
+        /** 改过代码之后，有没有真的截图看过画面 */
+        var shotAfterWrite = false
+        /** 有没有用 tap / swipe 真的操作过游戏 */
+        var playedManually = false
+        /** 有没有跑过 js_eval / js_sandbox 做逻辑自测 */
+        var ranAssertion = false
+        /** 被「先去截图验证」顶回去过几次（上限 2，防止把轮数烧光） */
+        var verifyNudges = 0
+
         // 续跑但步数预算已经用满：明说一句。否则用户点了「再试一次」之后毫无反应，
         // 只会以为按钮坏了。
         if (resume && step >= limit) {
@@ -326,6 +366,30 @@ class AgentRunner(
                     history += ChatMsg("user", CONTINUE_NUDGE)
                     onEvent("INFO: 它说了要做却没动手，已自动催它继续（第 $nudges 次）")
                     continue
+                }
+
+                // 【硬闸门】改完代码想说「做完了」，但**一次画面都没看过** → 顶回去。
+                //
+                // 这就是用户反复抱怨的那件事：「每次交付任务之前都不会截图验证画面
+                // 有没有问题」。提示词里写了「没看过画面不许说完成」，但弱模型照样跳过，
+                // 所以这里在代码层拦：不截图 = 这一轮不算完成，把它的结论退回历史，
+                // 补一句「先去截图」，逼它接着跑。
+                //
+                // 上限 2 次：真截不到（页面没有 canvas、工程是 Maker）也不能死循环，
+                // 顶两次还不截就放行，但会在日志里留一条，用户看得见它没验。
+                if (requireVisualCheck && wrote && !shotAfterWrite && verifyNudges < 2) {
+                    verifyNudges++
+                    history += ChatMsg("user", VISUAL_CHECK_NUDGE)
+                    onEvent("INFO: 它想直接交付，但还没截图看过画面 —— 已要求先截图验证（第 $verifyNudges 次）")
+                    continue
+                }
+
+                // 跑过但没截到（比如纯 DOM 页面没有 canvas）：如实说明，别假装验过了
+                if (requireVisualCheck && wrote && !shotAfterWrite) {
+                    onEvent("INFO: 注意：这一轮没有成功截到画面，画面是否正常**未经确认**")
+                } else if (requireVisualCheck && wrote && !playedManually) {
+                    // 看过画面但没实际玩过 —— 不拦，但提醒用户「交互没被真正验证」
+                    onEvent("INFO: 提示：只看过截图、没有实际点击试玩，交互逻辑未经验证")
                 }
                 if (wrote) onEvent("RELOAD")
                 onEvent("INFO: 完成 · 共跑了 $step 轮 · " + TokenStats.summary())
@@ -449,6 +513,18 @@ class AgentRunner(
                 ) {
                     wrote = true
                 }
+
+                // 【硬闸门 · 记录证据】改完代码之后，模型到底有没有「看过画面」。
+                // 只认真的产出图片的调用：game_shot（离屏抓 canvas）/ screenshot。
+                // 不看 console_logs / game_validate —— 那两个发现不了「按钮点不动、
+                // 角色不动、布局错位」这类最影响体验的问题，用户抱怨的正是这些。
+                if (res.images.isNotEmpty() && (tc.name == "game_shot" || tc.name == "screenshot")) {
+                    shotAfterWrite = true
+                }
+                // 真的玩过：用 tap / swipe 操作过游戏
+                if (tc.name == "tap" || tc.name == "swipe") playedManually = true
+                // 逻辑自测：跑过 js_eval 断言
+                if (tc.name == "js_eval" || tc.name == "js_sandbox") ranAssertion = true
             }
             }  // ← 关闭「批次」循环
 

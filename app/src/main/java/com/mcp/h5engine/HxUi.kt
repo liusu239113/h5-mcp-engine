@@ -313,7 +313,7 @@ class HxDialog internal constructor(
                 gravity = Gravity.END or Gravity.CENTER_VERTICAL
                 setPadding(ctx.dp(12), ctx.dp(11), ctx.dp(12), ctx.dp(11))
             }
-            fun add(which: Int, p: Pair<String, (() -> Unit)?>?, primary: Boolean, danger: Boolean) {
+            fun add(which: Int, p: Pair<String, (() -> Unit)?>, primary: Boolean, danger: Boolean) {
                 val tv = hxButton(ctx, pal, p.first, primary, danger)
                 tv.setOnClickListener {
                     // 有回调：先关弹窗再执行（跟 AlertDialog 行为一致）
