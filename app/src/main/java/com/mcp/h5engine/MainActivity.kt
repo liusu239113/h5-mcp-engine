@@ -453,31 +453,12 @@ class MainActivity : AppCompatActivity(), GameUi {
             }.getOrNull()
             val small = bytes?.let { shrinkToJpeg(it, 1024, 80) }
 
-            // 发布页「上传图片」也会走这条通道：它要的是**磁盘上的原图**（要传给 TapTap），
-            // 不是压缩后喂给模型的 JPEG。所以这里先把原图落到工作区，再交回给面板。
-            // ⚠️ 这里**不能**用 return@registerForActivityResult —— 我们已经在 Thread {} 里了，
-            // Thread 的 lambda 不是 inline 的，非局部返回是不允许的（编译报 'return' is not allowed here）。
-            // 用 if/else 分流。
-            val forPublish = pickPublishImage
-            if (forPublish != null && bytes != null) {
-                pickPublishImage = null
-                val saved = runCatching {
-                    val dir = kindDir("media").apply { mkdirs() }
-                    val f = File(dir, "publish_" + System.currentTimeMillis() + ".png")
-                    f.writeBytes(bytes)
-                    f
-                }.getOrNull()
-                main.post {
-                    if (saved == null) toast("保存图片失败") else forPublish(saved)
-                }
-            } else {
-                main.post {
-                    if (small == null) {
-                        toast("读取图片失败")
-                    } else {
-                        pendingShots += small
-                        updateAttachInfo()
-                    }
+            main.post {
+                if (small == null) {
+                    toast("读取图片失败")
+                } else {
+                    pendingShots += small
+                    updateAttachInfo()
                 }
             }
         }.start()
@@ -927,9 +908,6 @@ class MainActivity : AppCompatActivity(), GameUi {
         if (tab != 1) main.postDelayed({ if (activeTab != 1) applyPreviewMute(true) }, 350)
         if (tab == 1) ensurePreviewFresh(true)
         if (tab == 2) refreshExportRow()
-        // 切到别的页就把「管理发布」那层收起来：下次回到发布页应该先看到发布页本身，
-        // 而不是停在上次进的面板里（那会让人以为发布页被换掉了）
-        if (tab != 2) closePublishPanel()
     }
 
     /**
@@ -2392,20 +2370,7 @@ class MainActivity : AppCompatActivity(), GameUi {
         val skill = if (resume) {
             SkillPresets.byId(lastRunSkillId ?: cfgStore.skillId)
         } else {
-            // 发布类动作单独放行一次：用户这轮提到了发布/上传/审核，
-        // 才把 taptap_publish 这个工具的「写」能力打开。
-        // 注意 submit（提审）**不在这里** —— 它由发布页的用户确认触发，AI 只能做快照+预检。
-        val publishWanted = listOf(
-            "发布", "上架", "提审", "审核", "商店页", "更新线上", "传素材", "上传素材",
-            "游戏简介", "宣传图", "截图", "icon", "封面", "资料",
-            "taptap", "tap", "开发者", "应用信息"
-        ).any { text.lowercase().contains(it) } || shortOK(text)
-        EngineTools.publishAllowed = publishWanted
-        if (publishWanted) {
-            addSystemLine("本轮已放行「发布到 TapTap」工具（查资料 / 传素材 / 改资料）；提审仍需你在发布页点确认")
-        }
-
-        EngineTools.mcpAllowed = mcpWanted
+            EngineTools.mcpAllowed = mcpWanted
             if (mcpWanted) {
                 addSystemLine("本轮已放行 TapTap / Maker 的写 / 发布类接口（上传、发布、改信息等）；它动手前仍会先跟你确认")
             } else if (EngineTools.mcp != null) {
@@ -5397,16 +5362,6 @@ class MainActivity : AppCompatActivity(), GameUi {
             setPadding(dp(14), dp(14), dp(14), dp(18))
         }
 
-        // ==================== 管理发布（入口） ====================
-        // 只放一个入口卡，点进去才是 TapTap 发布面板（登录 / 选游戏 / 资料 / 提审）。
-        // 刻意**不做内嵌**：那个面板很长（账号 + 三个分组 + 素材 + 提审），
-        // 铺在这里会把下面「导出与发布」那些原有功能全挤到看不见的地方 ——
-        // 上一版就是这么干的，把好好的东西挤没了。
-        pubScroll.addView(
-            publishEntryCard(),
-            LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(16) }
-        )
-
         pubScroll.addView(TextView(this).apply {
             text = "导出与发布"
             textSize = 12f
@@ -5445,148 +5400,6 @@ class MainActivity : AppCompatActivity(), GameUi {
         )
         refreshExportRow()
     }
-
-    // ==================== 发布面板（点「管理发布」进来） ====================
-
-    /** 发布面板（TapTap 发布）——懒建，构建时注入 publishBody */
-    private var publishPanel: PublishPanel? = null
-
-    /** 发布面板的内容容器（独立页面里那个） */
-    private lateinit var publishBody: LinearLayout
-
-    /** 发布面板整页：进去之后盖住发布页，返回就露出来 */
-    private var publishPage: LinearLayout? = null
-
-    /**
-     * 「管理发布」入口卡 —— 发布页最上面那一块。
-     *
-     * 它只是个**入口**：原来的导出 / 文件 / console / 保活等全留在下面没动。
-     */
-    private fun publishEntryCard(): LinearLayout {
-        val card = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(14), dp(13), dp(12), dp(13))
-            background = pressable(roundCard(this@MainActivity, pal.accentSoft, pal.accent, 14), 0x14000000)
-            isClickable = true
-            setOnClickListener { openPublishPanel() }
-        }
-        card.addView(ImageView(this).apply {
-            setImageDrawable(LineIcon("upload", pal.accent, 1.8f))
-        }, LinearLayout.LayoutParams(dp(22), dp(22)).apply { rightMargin = dp(12) })
-
-        val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        col.addView(TextView(this).apply {
-            text = "管理发布"
-            textSize = 15f
-            typeface = MEDIUM
-            setTextColor(pal.accent)
-        })
-        col.addView(TextView(this).apply {
-            text = "TapTap 商店页：登录 · 选游戏 · 查资料缺什么 · 传素材 · 提审"
-            textSize = 11.5f
-            setTextColor(pal.sub)
-            setPadding(0, dp(4), 0, 0)
-        })
-        card.addView(col, LinearLayout.LayoutParams(0, -2, 1f))
-        card.addView(TextView(this).apply {
-            text = "›"
-            textSize = 16f
-            setTextColor(pal.accent)
-        })
-        return card
-    }
-
-    /** 进「管理发布」：把面板页盖在发布页上（原页面原地留着，返回就回来） */
-    private fun openPublishPanel() {
-        if (publishPage == null) {
-            publishBody = LinearLayout(this).apply {
-                orientation = LinearLayout.VERTICAL
-                setPadding(dp(14), dp(6), dp(14), dp(18))
-            }
-            // 面板在**这里**建，注入的是它自己的容器 —— 不碰 pubScroll
-            publishPanel = PublishPanel(publishHost, publishBody)
-
-            val page = LinearLayout(this).apply {
-                orientation = LinearLayout.VERTICAL
-                setBackgroundColor(pal.bg)
-            }
-            // 顶部返回条
-            val bar = LinearLayout(this).apply {
-                orientation = LinearLayout.HORIZONTAL
-                gravity = Gravity.CENTER_VERTICAL
-                setPadding(dp(10), dp(12), dp(14), dp(10))
-                setBackgroundColor(pal.navBg)
-            }
-            bar.addView(TextView(this).apply {
-                text = "‹ 返回"
-                textSize = 14f
-                setTextColor(pal.accent)
-                setPadding(dp(6), dp(6), dp(14), dp(6))
-                setOnClickListener { closePublishPanel() }
-            })
-            bar.addView(TextView(this).apply {
-                text = "管理发布"
-                textSize = 15.5f
-                typeface = MEDIUM
-                setTextColor(pal.text)
-            }, LinearLayout.LayoutParams(0, -2, 1f))
-            page.addView(bar, LinearLayout.LayoutParams(-1, -2))
-            page.addView(View(this).apply { setBackgroundColor(pal.border) },
-                LinearLayout.LayoutParams(-1, dp(1)))
-            page.addView(
-                ScrollView(this).apply { addView(publishBody) },
-                LinearLayout.LayoutParams(-1, 0, 1f)
-            )
-            pubPage.addView(page, FrameLayout.LayoutParams(-1, -1))
-            publishPage = page
-        }
-        publishPage?.visibleIf(true)
-        publishPanel?.refresh()
-    }
-
-    private fun closePublishPanel() {
-        publishPage?.visibleIf(false)
-        // 回来时刷一下导出行，顺手把发布页的滚动位置留在原位
-        refreshExportRow()
-    }
-
-    /** 给 PublishPanel 用的窄接口：它只需要这几件事，不该看得见 MainActivity 的全部私有成员 */
-    private val publishHost = object : PublishHost {
-        override val pubCtx: Context get() = this@MainActivity
-        override val pubPal: Palette get() = pal
-        override fun pubDp(v: Int): Int = dp(v)
-        override fun pubToast(s: String) = toast(s)
-        override fun pubOpenUrl(url: String) = openExternal(url)
-
-        override fun pubConfirm(title: String, msg: String, onOk: () -> Unit) {
-            AlertDialog.Builder(themed())
-                .setTitle(title)
-                .setMessage(msg.take(6000))
-                .setPositiveButton("继续") { _, _ -> onOk() }
-                .setNegativeButton("取消", null)
-                .show()
-        }
-
-        override fun pubPickImage(onPicked: (File) -> Unit) {
-            pickPublishImage = onPicked
-            runCatching {
-                pickImage.launch("image/*")
-            }.onFailure { toast("打不开相册：${it.message}") }
-        }
-
-        override fun pubAskAi(prompt: String) {
-            inputEt.setText(prompt)
-            toast("已填进输入框，点「发送」交给 AI")
-        }
-
-        override fun pubWorkspaceDir(): File = kindDir("media")
-
-        override fun pubIngest(src: File, kind: String): File = ensureInWorkspace(src)
-    }
-
-    /** 发布页「上传图片」选完之后的落点（选图回调是全局单例，所以拿个变量接一下） */
-    private var pickPublishImage: ((File) -> Unit)? = null
 
     private fun refreshExportRow() {
         val f = lastExport
