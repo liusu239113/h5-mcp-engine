@@ -60,6 +60,7 @@ import androidx.webkit.WebViewAssetLoader
 import org.mozilla.geckoview.GeckoView
 import androidx.webkit.WebViewCompat
 import androidx.webkit.WebViewFeature
+import android.util.Log
 import org.json.JSONObject
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
@@ -306,7 +307,7 @@ private val PAGE_EXTENT_W_JS = """
 })()
 """.trimIndent()
 
-class MainActivity : AppCompatActivity(), GameUi {
+class MainActivity : AppCompatActivity(), GameUi, CindyUi.Host {
 
     // ---------- 视图 ----------
     private lateinit var web: WebView
@@ -319,6 +320,9 @@ class MainActivity : AppCompatActivity(), GameUi {
     private lateinit var chatList: LinearLayout
     private lateinit var chatScroll: ScrollView
     private lateinit var inputEt: EditText
+
+    /** Cindy 风格对话层（叠在对话页上的 WebView）。null = 还没建。 */
+    private var cindy: CindyUi? = null
     private lateinit var sendBtn: TextView
     private lateinit var stopBtn: TextView
     private lateinit var modelBtn: TextView
@@ -905,6 +909,13 @@ class MainActivity : AppCompatActivity(), GameUi {
         stage.addView(chatPage, FrameLayout.LayoutParams(-1, -1))
         stage.addView(previewPage, FrameLayout.LayoutParams(-1, -1))
         stage.addView(pubPage, FrameLayout.LayoutParams(-1, -1))
+
+        // Cindy 对话层：叠在对话页之上（默认显示）。
+        // 用「叠加」而不是「替换」，是为了不动原有聊天逻辑一行代码 ——
+        // 新界面只是多长了一层皮，旧的渲染仍在跑，随时可切回。
+        val cu = CindyUi(this, cfgStore, this)
+        cindy = cu
+        stage.addView(cu.create(), FrameLayout.LayoutParams(-1, -1))
     }
 
     // ==================== 底栏 ====================
@@ -1102,6 +1113,8 @@ class MainActivity : AppCompatActivity(), GameUi {
         chatPage.visibleIf(tab == 0)
         previewPage.visibleIf(tab == 1)
         pubPage.visibleIf(tab == 2)
+        // Cindy 对话层跟着对话页一起显隐（它是叠在 chatPage 上面的）
+        cindy?.let { it.web.visibleIf(tab == 0) }
         tintNav(navChat, tab == 0)
         tintNav(navPreview, tab == 1)
         tintNav(navPub, tab == 2)
@@ -3086,6 +3099,8 @@ class MainActivity : AppCompatActivity(), GameUi {
     }
 
     private fun onAgentEvent(ev: String) {
+        // 先喂给 Cindy 对话层（它自己翻译事件，不影响下面的原生渲染）
+        cindy?.onEvent(ev)
         main.post {
             when {
                 ev.startsWith("AIFINAL: ") -> {
@@ -3198,6 +3213,7 @@ class MainActivity : AppCompatActivity(), GameUi {
      * **对话区的可见高度从头到尾不变**，屏幕自然不会闪。
      */
     private fun startRunCard() {
+        cindy?.busy(true)
         // 本轮统计清零 + 计时重置，然后挂卡
         latestActivity = ""
         lastTail = ""
@@ -3633,6 +3649,7 @@ class MainActivity : AppCompatActivity(), GameUi {
 
     private fun finishRun() {
         running = false
+        cindy?.busy(false)
         // 主线这一轮结束了 —— 不管它是正常做完、出错还是被停，
         // 都不该再留着子任务在后台继续跑、继续改用户的文件。
         // （真实事故：主线「做完了」，子任务还在跑几十轮，用户问「这合理吗」。）
@@ -7404,6 +7421,40 @@ makerRow1.addView(ghostBtnOf(ctx, pal, "扫码登录").apply {
     // ==================== 小工具 ====================
 
     private fun toast(s: String) = Toast.makeText(this, s, Toast.LENGTH_SHORT).show()
+
+    // ==================== Cindy 对话层：JS 上行动作 ====================
+
+    /**
+     * Cindy 界面点出来的动作，全部转发到**原有**方法上 ——
+     * 新界面不重新实现任何业务逻辑，它只是个「外壳」。
+     */
+    override fun onCindyAction(a: String, o: JSONObject) {
+        when (a) {
+            "send" -> {
+                val t = o.optString("text").trim()
+                if (t.isEmpty()) return
+                // 复用原有发送链路：回填输入框 → send()
+                // （队列 / 长按打断 / 附件 / 技能自动切换全都照旧生效）
+                inputEt.setText(t)
+                send()
+            }
+            "stop" -> doStop("界面点了停止")
+            "newChat" -> newChat()
+            "getConfig" -> cindy?.buildConfig()
+            "saveConfig" -> cindy?.saveConfig(o)
+            "workspace" -> askWorkspace()
+            "skills" -> pickMedia("skill")
+            "sessions" -> showSessions()
+            "publish" -> showTab(2)
+            "open", "asset" -> {
+                val p = o.optString("path")
+                val f = File(p)
+                if (f.exists()) openFileEditor(f, f.parentFile ?: f) else toast("文件不存在：$p")
+            }
+            "jserr" -> Log.w("CindyUi", "JS错误：" + o.optString("text"))
+            else -> toast("未支持的操作：$a")
+        }
+    }
 
     private fun alert(title: String, msg: String) {
         HxDialog.Builder(themed(), pal)
