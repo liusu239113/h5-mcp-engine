@@ -54,7 +54,8 @@
     think: null,        // 当前思考块
     tools: null,        // 当前工具组
     toolMap: {},        // 工具行索引
-    buf: ''             // 正文流缓冲
+    buf: '',            // 正文流缓冲
+    toolsStart: 0       // 工具组起始时刻（算「已工作 Xs」）
   };
 
   function el(tag, cls, html) {
@@ -134,8 +135,25 @@
     var d = el('div', 'tools', '<div class="th">已工作</div>');
     S.cur.wrap.insertBefore(d, S.cur.body);
     S.tools = d;
+    S.toolsStart = Date.now();
     S.toolMap = {};
     return d;
+  }
+
+  /** 秒 → 「X分 Y秒」/「Y秒」 */
+  function fmtDur(sec) {
+    sec = Math.max(0, Math.round(sec));
+    var m = Math.floor(sec / 60), s = sec % 60;
+    return m > 0 ? (m + '分 ' + s + '秒') : (s + '秒');
+  }
+
+  /** 工具组头：已工作 Xs */
+  function paintToolsHead(live) {
+    if (!S.tools || !S.toolsStart) return;
+    var sec = (Date.now() - S.toolsStart) / 1000;
+    if (!live) S.tools._done = sec;
+    S.tools.querySelector('.th').textContent =
+      '已工作 ' + Math.round(S.tools._done != null && !live ? S.tools._done : sec) + 's';
   }
 
   function toolRow(name, target, state, head, full) {
@@ -154,6 +172,7 @@
       '<span class="nm">' + esc(name) + '</span>' +
       '<span class="tg">' + esc(full || head || target || '') + '</span>';
     row.onclick = function () { row.classList.toggle('open'); };
+    if (state !== 'run') paintToolsHead(false);
     return row;
   }
 
@@ -388,6 +407,12 @@
       case 'error': endThink(); addError(e.text || ''); break;
       case 'sys': addSys(e.text || ''); break;
       case 'status': setStat(e.text || ''); break;
+      case 'tick':
+        setStat('正在工作… ' + fmtDur(e.sec) +
+          (e.tok > 0 ? ' · ' + e.tok + ' tok/s' : '') +
+          (e.total ? ' · 累计 ' + e.total + ' tok' : ''));
+        paintToolsHead(true);
+        break;
       case 'step': setStep(e.n); break;
       case 'summary': addSummary(e.ms || 0, e.steps || 0, !!e.verified, e.sections || []); break;
       case 'busy': setBusy(!!e.on); if (!e.on) { endThink(); appendText('', true); } break;

@@ -3,6 +3,9 @@ package com.mcp.h5engine
 import android.annotation.SuppressLint
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.os.Handler
+import android.os.Looper
+import android.os.SystemClock
 import android.util.Base64
 import android.util.Log
 import android.webkit.JavascriptInterface
@@ -42,6 +45,26 @@ class CindyUi(
 
     private var ready = false
     private val snack = ArrayDeque<String>()
+
+    // ---- 运行计时 / 速率：每秒推一次给界面（对应「正在工作… X分Y秒 · Z tok/s」）----
+    private val tickHandle = Handler(Looper.getMainLooper())
+    private var busyOn = false
+    private var busyAt = 0L
+    private var busyTok = 0L
+    private val ticker = object : Runnable {
+        override fun run() {
+            if (!busyOn) return
+            val sec = ((SystemClock.elapsedRealtime() - busyAt) / 1000L).coerceAtLeast(0)
+            val now = TokenStats.inTokens + TokenStats.outTokens
+            val rate = if (sec > 0) (now - busyTok).toDouble() / sec.toDouble() else 0.0
+            push(
+                JSONObject().put("t", "tick").put("sec", sec)
+                    .put("tok", Math.round(rate * 10.0) / 10.0)
+                    .put("total", now)
+            )
+            tickHandle.postDelayed(this, 1000L)
+        }
+    }
 
     @SuppressLint("SetJavaScriptEnabled")
     fun create(): WebView {
@@ -245,8 +268,18 @@ class CindyUi(
     fun toast(text: String) =
         push(JSONObject().put("t", "toast").put("text", text))
 
-    fun busy(on: Boolean) =
+fun busy(on: Boolean) {
+        busyOn = on
+        if (on) {
+            busyAt = SystemClock.elapsedRealtime()
+            busyTok = TokenStats.inTokens + TokenStats.outTokens
+            tickHandle.removeCallbacks(ticker)
+            tickHandle.postDelayed(ticker, 1000L)
+        } else {
+            tickHandle.removeCallbacks(ticker)
+        }
         push(JSONObject().put("t", "busy").put("on", on))
+    }
 
     fun clear() = push(JSONObject().put("t", "clear"))
 
