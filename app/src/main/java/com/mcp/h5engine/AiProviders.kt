@@ -229,15 +229,6 @@ object AiProviders {
         ),
 
         Provider(
-            "unisound", "云知声 U2", "https://maas.unisound.com/v1",
-            keyHint = "云知声 MAAS API Key",
-            models = listOf(
-                ModelSpec("u2-flash", "U2-Flash（通用·快）"),
-                ModelSpec("u2", "Unisound U2（自主智能体）")
-            ),
-            editableBaseUrl = true
-        ),
-        Provider(
             "siliconflow", "硅基流动（聚合）", "https://api.siliconflow.cn/v1",
             models = listOf(
                 ModelSpec("deepseek-ai/DeepSeek-V3.2", "DeepSeek V3.2"),
@@ -394,7 +385,6 @@ object AiProviders {
         "yi" to "https://platform.lingyiwanwu.com/apikeys",
         "sensenova" to "https://platform.sensenova.cn/",
         "agnes" to "https://agnes.ai/",
-        "unisound" to "https://maas.unisound.com/",
         "siliconflow" to "https://cloud.siliconflow.cn/account/ak",
         // ---------- 国外 ----------
         "openai" to "https://platform.openai.com/api-keys",
