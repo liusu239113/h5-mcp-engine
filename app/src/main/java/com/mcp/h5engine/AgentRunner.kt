@@ -9,6 +9,19 @@ import java.io.File
  * 这是用户反复抱怨的第一名：交付前不验证画面。所以不靠提示词自觉，
  * 由 AgentRunner 在代码层强制补一轮验证（见 requireVisualCheck）。
  */
+/**
+ * 「只说了没做」的退回提示。
+ *
+ * 之所以敢在这里硬顶回去（以前那版靠猜意图、被误伤后删掉了），是因为现在
+ * 「等用户拍板」有了 ask_user 这个**显式出口**：模型真想问你，就该去调它。
+ * 于是「一个工具都没调」这件事不再有歧义 —— 要么没干完，要么得用 finish 交付。
+ */
+private const val NUDGE_NO_TOOL =
+    "（你上一轮**没有调用任何工具**，只留了一段话 —— 这不等于交付。现在二选一：\n" +
+        "  1. 还没干完 → 立刻调用工具继续推进，不要只描述你打算做什么；\n" +
+        "  2. 已经干完 → 调用 finish 把结果交出来（summary / verified / remaining 都要填全）。\n" +
+        "如果是要我拍板，就用 ask_user 提问，不要用嘴问。）"
+
 private const val VISUAL_CHECK_NUDGE =
     "（先别交付 —— 你这一轮改了游戏代码，但**一次画面都没看过**。" +
         "没看过画面就说「完成」，等于把问题留给用户去发现。现在按顺序做完这三步再收尾：\n" +
@@ -268,6 +281,38 @@ class AgentRunner(
   它要先在 设置 → 图片工具（抠图） 配一次 Key（https://www.koukoutu.com/user/dev，
   1 积分/张、png 再 +1）；返回「没配 Key」就如实告诉用户去哪配，别反复重试白烧额度。""".trimIndent()
             )
+
+            // =====【收尾纪律】把「停下」这件事工具化 =====
+            //
+            // 对齐 Claude Code（AskUserQuestion / ExitPlanMode）与 Codex（escalation 请求）的做法：
+            // 主循环判定一轮结束，只看「这轮有没有调用工具」。在没有 finish / ask_user 之前，
+            // 模型「想收尾」和「想等用户拍板」都只能靠自然语言表达，于是跟「说一句计划就停」
+            // 完全无法区分 —— 用户看到的现象就是「它老自己中断不干活」。
+            //
+            // 现在给两个显式出口，并在提示词里写死：不调工具 = 没干完。
+            append(
+                """
+
+                【收尾纪律 —— 必须遵守】
+
+                「结束这一轮」只有三个合法出口，而且**都必须靠调用工具**：
+                  1. 干完了       → 调 finish
+                  2. 需要用户拍板  → 调 ask_user
+                  3. 还没干完     → 继续调工作工具（读 / 写文件、跑命令、截图……）
+
+                以下全部算**违规**：
+                  · 「我先去看一下 X」然后就停了 —— 要去看就**现在**调工具去看
+                  · 「要我直接开始改吗？」—— 用嘴问。要问就调 ask_user
+                  · 「接下来我会 A、B、C」—— 这是计划不是行动，直接动手做 A
+                  · 只汇报进度就停 —— 进度不是交付
+
+                ask_user 的边界：只在「答案会改变你下一步动作」且「无法从需求 / 代码 / 默认值推断」时才用。
+                有常规默认做法的：自己选最合理那个、在正文里说明一句、继续做。
+                不许问「这个方案行吗」「可以继续吗」—— 那种话该用 finish 交出结果让用户看。
+
+                finish 的参数必须填全，尤其 verified：没验证就**如实写「未验证」**，不许编。
+                """.trimIndent()
+            )
         }
 
         if (history.isNotEmpty() && history[0].role == "system") {
@@ -298,6 +343,16 @@ class AgentRunner(
         var shotAfterWrite = false
         /** 有没有用 tap / swipe 真的操作过游戏 */
         var playedManually = false
+
+        // =====【协议工具】finish / ask_user 的状态 =====
+        /** 这一轮模型调过 finish = 正式交付（不再是「说了话就算交」） */
+        var finishCalled = false
+        /** 这一轮模型调过 ask_user = 正在等用户拍板 */
+        var askCalled = false
+        /** finish 的结构化参数；收尾卡直接读它，不用再去猜正文里有没有「怎么验的」段落 */
+        var finishJson: String? = null
+        /** 「只说了没做」被退回重试的次数（上限 2，防止死循环） */
+        var narrateNudges = 0
         /** 有没有跑过 js_eval / js_sandbox 做逻辑自测 */
         var ranAssertion = false
         /** 被「先去截图验证」顶回去过几次（上限 2，防止把轮数烧光） */
@@ -344,6 +399,24 @@ class AgentRunner(
             }
 
             if (reply.toolCalls.isEmpty()) {
+                // =====【协议收尾】这一批一个工具都没调用 =====
+                //
+                // 装了 finish / ask_user 之后，这件事终于有明确含义了：
+                //   · 本批调过 finish   → 真交付        → 正常收工
+                //   · 调过 ask_user     → 在等用户拍板  → 正常收工（工具层已阻塞拿到回答）
+                //   · 什么都没调        → 「只说了没做」→ 退回重试（上限 2 次，防死循环）
+                //
+                // 注意：这里判的是**协议违规**，不是猜正文里有没有「我先」。
+                // 之前那版「自动催它继续」之所以被删，恰恰因为它靠猜意图，
+                // 把模型「正经问用户确认」也一起误伤了 —— 现在「问用户」有了
+                // ask_user 这个显式出口，需要猜的那部分就消失了。
+                if (!finishCalled && !askCalled && narrateNudges < 2) {
+                    narrateNudges++
+                    history += ChatMsg("user", NUDGE_NO_TOOL)
+                    onEvent("INFO: 它只说了没做（一个工具都没调）—— 已要求直接调工具推进（第 $narrateNudges 次）")
+                    continue
+                }
+
                 // ⚠️ 这里以前有一个「自动催它继续」：模型只要说一句
                 // 「我接下来要做 X」却没收尾调工具，就被顶回去强行继续，最多 2 次。
                 //
@@ -463,6 +536,18 @@ class AgentRunner(
                 // 工具自己抛异常（参数不合法 / 文件不存在之类）同样要补响应，道理同上。
                 // 并发跑过就直接取结果；否则现跑（写操作、单个调用都走这里）。
                 val res = precomputed[tc.id] ?: safeCall(tc)
+
+                // 【协议工具】结果带 sentinel → 这不是普通工具结果，而是「交付」或「提问」。
+                // 必须在截断 / 拼接后缀**之前**认出来，否则前缀被改掉就再也认不出。
+                if (res.text.startsWith("__FINISH__")) {
+                    finishCalled = true
+                    finishJson = res.text.removePrefix("__FINISH__")
+                    onEvent("FINISH:" + finishJson.orEmpty().take(4000))
+                } else if (res.text.startsWith("__ASK__")) {
+                    askCalled = true
+                    onEvent("ASK:" + res.text.removePrefix("__ASK__").take(4000))
+                }
+
                 // 工具产出的图（主要是 game_shot 的截图）分两路走：
                 //   ① 给模型看（走多模态）—— 前提是当前模型能看图；
                 //   ② **落到工程工作区**，并往历史里塞一张缩略图，
@@ -471,7 +556,16 @@ class AgentRunner(
                 // 而且对话区**一张图都看不到**（用户报的正是这个）。
                 val savedShots = res.images.mapNotNull { saveShotToWorkspace(it) }
                 val images = if (cfg.vision) res.images else emptyList()
-                var text = res.text
+                var text = when {
+                    // finish / ask_user 的结果是给 App 看的协议载荷，不该原样塞进历史，
+                    // 否则模型会把它当普通工具输出，甚至学着自己伪造这个前缀。
+                    res.text.startsWith("__FINISH__") ->
+                        "（已交付：App 已记录本轮 finish 结果。不要再重复交付。）"
+                    res.text.startsWith("__ASK__") ->
+                        "（用户的回答：\n" + res.text.removePrefix("__ASK__") +
+                            "\n按这个回答继续做；还需要确认就再调 ask_user。）"
+                    else -> res.text
+                }
                 if (res.images.isNotEmpty() && !cfg.vision && visionFallback) {
                     text += "\n" + saveShot(res.images.first())
                 }
@@ -494,7 +588,7 @@ class AgentRunner(
                     shotPaths = savedShots.map { it.absolutePath }.ifEmpty { null }
                 )
 
-                var head = res.text.lineSequence().firstOrNull() ?: ""
+                var head = text.lineSequence().firstOrNull() ?: ""
                 if (head.length > 150) head = head.take(150) + "…"
                 // 判失败：工具返回首行带这些味道 = 失败了，UI 卡片显示红点（Operit 那种）。
                 val fail = head.startsWith("错误") || head.contains("失败") ||

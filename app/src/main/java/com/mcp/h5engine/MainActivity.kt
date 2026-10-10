@@ -1396,8 +1396,10 @@ class MainActivity : AppCompatActivity(), GameUi {
                     .show()
             }
         }
-        val shotBtn = chipOf(this, pal, "当前画面", false).apply {
-            setOnClickListener { attachScreenshot() }
+        // 「当前画面」按钮已删 —— 「＋附件」菜单里本来就有「当前游戏画面」，
+        // 两个入口一个功能，白占一格。这个位置换成权限开关（点开是底部抽屉，三档）。
+        val permBtn = chipOf(this, pal, "权限·" + permShort(cfgStore.permissionMode), false).apply {
+            setOnClickListener { showPermSheet(this) }
         }
         // 模型胶囊：底部随时可见、随手可切。
         // 点 = 开模型面板（换模型）；长按 = 直接进设置页（改 Key / 参数）。
@@ -1427,7 +1429,7 @@ class MainActivity : AppCompatActivity(), GameUi {
         }
 
         row.addView(attachBtn)
-        row.addView(shotBtn, LinearLayout.LayoutParams(-2, -2).apply { leftMargin = dp(6) })
+        row.addView(permBtn, LinearLayout.LayoutParams(-2, -2).apply { leftMargin = dp(6) })
         row.addView(modelBtn, LinearLayout.LayoutParams(0, -2, 1f).apply {
             leftMargin = dp(8)
             rightMargin = dp(8)
@@ -3015,6 +3017,9 @@ class MainActivity : AppCompatActivity(), GameUi {
         // 续跑不清：刚刚才失败的连接多半还活着，正好接着用。
         if (!resume) AiClient.evictConnections()
         val tools = EngineTools(this, gameRoot)
+        // 权限模式从设置里灌进来（默认 2 = 完全访问，等于改动前的行为）。
+        // 闸门本身在 EngineTools.checkPermission 里。
+        tools.permMode = cfgStore.permissionMode
         runSeq++
         val mySeq = runSeq
         // 事件只认「当前这一轮」：被停止 / 被新消息打断的那一轮，不再往界面上写。
@@ -3099,6 +3104,37 @@ class MainActivity : AppCompatActivity(), GameUi {
                     // 干活途中的过程自述：缩进折进「已工作」组里当一行，不单独占一张卡
                     flushNow()
                     addNoteRow(ev.removePrefix("AI: "))
+                }
+                ev.startsWith("FINISH: ") -> {
+                    // 模型调了 finish = 它显式交付了。这是**唯一**算「干完了」的信号。
+                    // 直接读结构化参数，不再去猜正文里有没有「怎么验的」那一段。
+                    flushNow()
+                    val j = runCatching { JSONObject(ev.removePrefix("FINISH: ")) }.getOrNull()
+                    val sb = StringBuilder()
+                    sb.append(j?.optString("summary").orEmpty().ifBlank { "（本轮完成）" })
+                    val ver = j?.optString("verified").orEmpty()
+                    if (ver.isNotBlank()) sb.append("\n\n验证：").append(ver)
+                    val rem = j?.optString("remaining").orEmpty()
+                    if (rem.isNotBlank()) sb.append("\n还剩：").append(rem)
+                    val txt = sb.toString()
+                    lastFinalText = txt
+                    addBubble(txt, false)
+                }
+                ev.startsWith("ASK: ") -> {
+                    // 模型调了 ask_user = 它在等用户拍板。卡片本身由工具层弹（会阻塞等答案），
+                    // 这里只把「它问过什么 / 用户选了什么」在对话里留一条痕。
+                    flushNow()
+                    val j = runCatching { JSONObject(ev.removePrefix("ASK: ")) }.getOrNull()
+                    val arr = j?.optJSONArray("answers")
+                    val picked = if (arr == null || arr.length() == 0) ""
+                    else (0 until arr.length()).joinToString("；") { i ->
+                        val o = arr.optJSONObject(i)
+                        o?.optString("header").orEmpty() + "：" + o?.optString("label").orEmpty()
+                    }
+                    addBubble(
+                        if (picked.isBlank()) "（已向用户提问）" else "（用户选择了 —— $picked）",
+                        false
+                    )
                 }
                 ev.startsWith("[失败]") -> {
                     flushNow()
@@ -6512,6 +6548,113 @@ class MainActivity : AppCompatActivity(), GameUi {
         dlg.window?.setLayout(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
     }
 
+    /** 权限档位的短标签（给底部那个小胶囊用，尽量短，别把输入栏挤变形） */
+    private fun permShort(m: Int): String = when (m) {
+        0 -> "只读"
+        1 -> "工作区"
+        else -> "全开"
+    }
+
+    /**
+     * 权限抽屉（底部面板）—— 照 Codex 的 `sandbox_mode` 分三档。
+     *
+     * 为什么放在对话页输入栏、而不是埋进设置页：这是**每轮都可能想改**的东西
+     * （想让它放手干 → 全开；想盯着它干 → 工作区），埋进设置里每次都要点三层。
+     */
+    private fun showPermSheet(btn: TextView) {
+        val dlg = Dialog(this)
+        dlg.requestWindowFeature(android.view.Window.FEATURE_NO_TITLE)
+        val radius = dp(16).toFloat()
+        val sheetBg = android.graphics.drawable.GradientDrawable().apply {
+            setColor(pal.card)
+            cornerRadii = floatArrayOf(radius, radius, radius, radius, 0f, 0f, 0f, 0f)
+        }
+        val root = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = sheetBg
+        }
+
+        val titleRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(16), dp(14), dp(12), dp(10))
+        }
+        titleRow.addView(TextView(this).apply {
+            text = "权限"
+            textSize = 15f
+            typeface = MEDIUM
+            setTextColor(pal.text)
+        }, LinearLayout.LayoutParams(0, -2, 1f))
+        titleRow.addView(iconView(this, pal, "close", 15, pal.sub).apply {
+            setPadding(dp(9), dp(3), dp(6), dp(3))
+            setOnClickListener { dlg.dismiss() }
+        }, LinearLayout.LayoutParams(dp(30), dp(27)))
+        root.addView(titleRow)
+        root.addView(View(this).apply { setBackgroundColor(pal.border) },
+            LinearLayout.LayoutParams(-1, dp(1)))
+
+        val names = listOf("只读", "工作区", "完全访问")
+        val descs = listOf(
+            "只让 AI 看：不许改文件、不许跑命令。",
+            "工程目录内随便改；跑命令、动工程外面的东西，会先弹框问你。推荐。",
+            "AI 可以改任何文件、跑任何命令，不再询问。最省事，也最危险。"
+        )
+        var sel = cfgStore.permissionMode.coerceIn(0, 2)
+        val nameViews = ArrayList<TextView>()
+
+        // 先把 paint 声明出来：下面每个行的点击监听器里都要用它
+        val paint: () -> Unit = {
+            nameViews.forEachIndexed { i, v ->
+                val on = i == sel
+                v.setTextColor(if (on) pal.accent else pal.text)
+                v.typeface = if (on) MEDIUM else null
+            }
+        }
+
+        names.forEachIndexed { i, nm ->
+            val row = TextView(this).apply {
+                text = nm
+                textSize = 14.5f
+                setTextColor(pal.text)
+                setPadding(dp(16), dp(13), dp(16), dp(13))
+                setOnClickListener {
+                    cfgStore.permissionMode = i
+                    sel = i
+                    paint()
+                    btn.text = "权限·" + permShort(i)
+                    toast("权限已切到「$nm」")
+                    dlg.dismiss()
+                }
+            }
+            nameViews.add(row)
+            root.addView(row)
+            root.addView(TextView(this).apply {
+                text = descs[i]
+                textSize = 11f
+                setTextColor(pal.sub)
+                setPadding(dp(16), 0, dp(16), dp(12))
+            })
+        }
+        paint()
+
+        root.addView(TextView(this).apply {
+            text = "改了立刻生效，下一轮就按新权限走。"
+            textSize = 10.5f
+            setTextColor(pal.faint)
+            setPadding(dp(16), dp(4), dp(16), dp(12))
+        })
+
+        dlg.setContentView(root)
+        dlg.window?.let { w ->
+            w.setBackgroundDrawable(android.graphics.drawable.ColorDrawable(0))
+            w.addFlags(android.view.WindowManager.LayoutParams.FLAG_DIM_BEHIND)
+            w.setDimAmount(0.42f)
+            w.setGravity(Gravity.BOTTOM)
+        }
+        dlg.show()
+        dlg.window?.setLayout(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+    }
+
     private fun showSettings() {
         val ctx = this
         val col = LinearLayout(ctx).apply {
@@ -6636,6 +6779,52 @@ class MainActivity : AppCompatActivity(), GameUi {
             }
         }
         col.addView(themeRow)
+
+        // ---------- 权限（对齐 Codex 的 sandbox_mode 三档） ----------
+        //
+        // 为什么要有它：AI 能改文件、能跑命令。默认全放行对新手太危险，
+        // 但一刀切只读又什么都干不了 —— 所以照 Codex 的做法分三档：
+        // 只读（看看） / 工作区（推荐：工程内可改，跑命令必须问你） / 完全访问（不再问）。
+        section("权限（AI 能对手机做什么）")
+        val permLabels = listOf("完全访问", "工作区", "只读")
+        val permDescs = listOf(
+            "AI 可以改任何文件、跑任何命令，不再询问。最省事，也最危险。",
+            "工程目录内随便改；跑命令、动工程外面的东西，会先弹框问你。推荐。",
+            "只让 AI 看，不许改文件、不许跑命令。"
+        )
+        var permSel = cfgStore.permissionMode.coerceIn(0, 2)
+        // 注意：permHint 必须**先声明**——下面的点击监听器里会用到它，
+        // Kotlin 不允许 lambda 引用它后面才声明的局部变量。
+        val permHint = TextView(ctx).apply {
+            text = permDescs[permSel]
+            textSize = 11.5f
+            setTextColor(pal.sub)
+            setPadding(dp(2), dp(8), dp(2), 0)
+        }
+        val permRow = LinearLayout(ctx).apply { orientation = LinearLayout.HORIZONTAL }
+        var permViews: List<TextView> = emptyList()
+        permViews = permLabels.mapIndexed { i, t ->
+            chipOf(ctx, pal, t, i == permSel).also { c ->
+                c.setOnClickListener {
+                    permSel = i
+                    // 立刻落盘：不依赖页面底部的「保存」——权限是「改了马上要生效」的东西，
+                    // 用户从设置页退出去时不该还惦记着有没有点保存。
+                    cfgStore.permissionMode = i
+                    permViews.forEachIndexed { j, v ->
+                        val active = j == permSel
+                        v.setTextColor(if (active) pal.onAccent else pal.text)
+                        v.background = pressable(
+                            roundCard(ctx, if (active) pal.accent else pal.cardAlt,
+                                if (active) pal.accent else pal.border, 20), 0x55FFFFFF
+                        )
+                    }
+                    permHint.text = permDescs[permSel]
+                }
+                permRow.addView(c, LinearLayout.LayoutParams(-2, -2).apply { rightMargin = dp(8) })
+            }
+        }
+        col.addView(permRow)
+        col.addView(permHint)
 
         // ---------- TapTap Maker（素材生产线） ----------
         // 为什么放这里：AI 跑在 WebView 沙箱里，没有任何 exec 通道，
@@ -8172,6 +8361,135 @@ makerRow1.addView(ghostBtnOf(ctx, pal, "扫码登录").apply {
     // ==================== GameUi 实现 ====================
 
     override fun currentGameId(): String = currentGame
+
+    // ==================== 【AI 主动提问 / 提权批准】 ====================
+    //
+    // 这两个是「把停下这件事工具化」的 UI 半边：
+    //   · ask_user        → 对应 Claude Code 的 AskUserQuestion（弹选择卡片）
+    //   · requestApproval → 对应 Codex 的 escalation 请求（危险动作弹批准框）
+    //
+    // 共同点：**必须在子线程上阻塞等一个"人"的决定**。agent 线程已经停在这里了，
+    // 拿到答案才有下一轮。所以用 CountDownLatch 挂住子线程、在主线程弹卡片。
+
+    /**
+     * ask_user 工具的实现：弹一张选择卡片，阻塞等用户点选后把答案交回模型。
+     *
+     * 版式对齐 Claude Code 的 AskUserQuestion：一题一组选项按钮，点了就记下。
+     * 用户随时可以关掉 = 取消，此时**明确告诉模型按最合理默认继续** ——
+     * 不能让它干等（等不到答案就干等，比让它自己猜还糟）。
+     */
+    override fun askUser(questionsJson: String, timeoutMs: Long): String {
+        val qs = runCatching { JSONObject(questionsJson).optJSONArray("questions") }.getOrNull()
+        if (qs == null || qs.length() == 0) {
+            return """{"answers":[],"cancelled":true,"note":"模型没有给出问题。按最合理默认继续做。"}"""
+        }
+
+        val answers = org.json.JSONArray()
+        val latch = CountDownLatch(1)
+        var dlg: android.app.AlertDialog? = null
+
+        main.post {
+            runCatching {
+                val dp = resources.displayMetrics.density
+                val col = android.widget.LinearLayout(this).apply {
+                    orientation = android.widget.LinearLayout.VERTICAL
+                    setPadding((18 * dp).toInt(), (10 * dp).toInt(), (18 * dp).toInt(), (10 * dp).toInt())
+                }
+                for (i in 0 until qs.length()) {
+                    val q = qs.optJSONObject(i) ?: continue
+                    col.addView(android.widget.TextView(this).apply {
+                        text = q.optString("question")
+                        textSize = 15f
+                        setTextColor(0xFFD4D4D4.toInt())
+                        setPadding(0, (12 * dp).toInt(), 0, (4 * dp).toInt())
+                    })
+                    val opts = q.optJSONArray("options")
+                    if (opts != null) for (k in 0 until opts.length()) {
+                        val o = opts.optJSONObject(k) ?: continue
+                        val label = o.optString("label")
+                        col.addView(android.widget.Button(this).apply {
+                            text = label
+                            textSize = 13f
+                            isAllCaps = false
+                            setOnClickListener {
+                                answers.put(
+                                    JSONObject()
+                                        .put("header", q.optString("header"))
+                                        .put("label", label)
+                                )
+                                latch.countDown()
+                                runCatching { dlg?.dismiss() }
+                            }
+                        })
+                        val desc = o.optString("description")
+                        if (desc.isNotBlank()) {
+                            col.addView(android.widget.TextView(this).apply {
+                                text = desc
+                                textSize = 11f
+                                setTextColor(0xFF6F6F6F.toInt())
+                                setPadding((10 * dp).toInt(), 0, 0, (6 * dp).toInt())
+                            })
+                        }
+                    }
+                }
+                dlg = android.app.AlertDialog.Builder(this)
+                    .setTitle("AI 需要你定一下")
+                    .setView(android.widget.ScrollView(this).apply { addView(col) })
+                    .setNegativeButton("都不选，按默认继续") { _, _ -> latch.countDown() }
+                    .create()
+                dlg?.setOnCancelListener { latch.countDown() }
+                dlg?.show()
+            }
+        }
+
+        runCatching { latch.await(timeoutMs.coerceAtLeast(10_000L), TimeUnit.MILLISECONDS) }
+        main.post { runCatching { dlg?.dismiss() } }
+
+        return if (answers.length() == 0) {
+            JSONObject()
+                .put("answers", answers)
+                .put("cancelled", true)
+                .put(
+                    "note",
+                    "用户没有回答（超时或直接关掉了卡片）。**不要为此停下** —— " +
+                        "直接选最合理的默认方案继续做，并在正文里说明你选了哪个、为什么。"
+                )
+                .toString()
+        } else {
+            JSONObject().put("answers", answers).put("cancelled", false).toString()
+        }
+    }
+
+    /**
+     * requestApproval 的实现：危险动作前弹一次批准框。
+     *
+     * `allow_always` = 用户勾了「以后这类都允许」（对应 Codex 的 prefix_rule）。
+     * 目前只做了「这一次 / 这一类 / 拒绝」三档，规则记忆留给后面的设置页。
+     */
+    override fun requestApproval(action: String, detail: String, danger: Boolean, timeoutMs: Long): String {
+        val latch = CountDownLatch(1)
+        var decision = "deny"
+        var dlg: android.app.AlertDialog? = null
+
+        main.post {
+            runCatching {
+                dlg = android.app.AlertDialog.Builder(this)
+                    .setTitle(if (danger) "AI 想执行（有风险）" else "AI 想执行")
+                    .setMessage("动作：$action\n\n$detail")
+                    .setPositiveButton("允许这一次") { _, _ -> decision = "allow"; latch.countDown() }
+                    .setNeutralButton("这类都允许") { _, _ -> decision = "allow_always"; latch.countDown() }
+                    .setNegativeButton("拒绝") { _, _ -> decision = "deny"; latch.countDown() }
+                    .create()
+                dlg?.setOnCancelListener { latch.countDown() }
+                dlg?.show()
+            }
+        }
+
+        runCatching { latch.await(timeoutMs.coerceAtLeast(10_000L), TimeUnit.MILLISECONDS) }
+        main.post { runCatching { dlg?.dismiss() } }
+
+        return JSONObject().put("decision", decision).put("reason", "（用户选择：$decision）").toString()
+    }
 
     /** 给 context_budget 工具用的历史快照（拷贝一份，避免和正在跑的一轮抢同一个表） */
     override fun contextSnapshot(): List<ChatMsg> = runCatching {

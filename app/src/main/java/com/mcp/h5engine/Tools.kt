@@ -173,6 +173,19 @@ interface GameUi {
      * **这里不提供切页能力** —— 切页会动用户正在看的屏幕（用户明确不许）。
      * 只提供只读的 currentTab()，让 AI 知道自己截到的到底是哪一页。
      */
+    fun askUser(questionsJson: String, timeoutMs: Long = 300_000L): String = """
+        {"answers":[],"cancelled":true,"note":"App 未提供交互卡片。不要停下等待 —— 直接选最合理的默认方案继续做，并在正文里说明你选了哪个、为什么。"}
+    """.trimIndent()
+
+    /**
+     * 【提权请求】对应 Codex 的 escalation：某个动作需要用户点头时，弹框问一次。
+     * 返回 JSON：{"decision":"allow|deny|allow_always","reason":"..."}
+     * allow_always = 用户勾了「以后同类不再问」（对应 Codex 的 prefix_rule）。
+     *
+     * 默认实现「放行」：保证 UI 层还没接上时，行为跟改动前一致，不会把 App 锁死。
+     */
+    fun requestApproval(action: String, detail: String, danger: Boolean, timeoutMs: Long = 300_000L): String =
+        """{"decision":"allow","reason":"App 未提供批准弹框，默认放行"}"""
 }
 
 /**
@@ -327,8 +340,51 @@ class EngineTools(private val ui: GameUi, private val root: File) {
                 .put("parameters", params))
     }
 
+    /**
+     * 【协议工具】finish / ask_user —— 这一对是「收尾语义」的地基。
+     *
+     * 为什么必须有：主循环判断「这一轮结束」的唯一依据是**这轮有没有调用工具**。
+     * 没有这两个工具时，模型「想收尾」和「想等用户拍板」都只能用自然语言表达，
+     * 于是和「说一句计划就停」完全无法区分 —— 用户看到的现象就是「它老自己中断不干活」。
+     *
+     * Claude Code 用 AskUserQuestion / ExitPlanMode，Codex 用 escalation 请求，
+     * 都是同一个思路：**把"停下"变成一次工具调用**，规则才重新变得无歧义。
+     * 有了它俩，「没有工具调用」就只剩「没干完」一种含义，可以安全地退回重试。
+     */
     private val allSpecs: List<JSONObject> by lazy {
         listOf(
+            fn("finish",
+                "本轮任务交付。**只有调用它才算收工**。只输出文字而不调用它，系统视为你还没干完，" +
+                    "会把你的话退回来要求继续 —— 所以想收尾就必须调它。",
+                """
+                {"summary":{"type":"string","description":"给用户看的一段总结（Markdown）"},
+                 "done":{"type":"array","items":{"type":"string"},"description":"已产出的实物清单：文件名 / 路径 / 大小 / 时长"},
+                 "verified":{"type":"string","description":"你是怎么验证的（截图 / 断言 / 实际点过）。没验证就如实写「未验证」，不许编"},
+                 "remaining":{"type":"string","description":"还剩什么没做；没有就写「无」"},
+                 "files":{"type":"array","items":{"type":"string"},"description":"本轮改动或新增的文件路径"}}
+                """.trimIndent(),
+                listOf("summary", "verified", "remaining")),
+
+            fn("ask_user",
+                "需要用户拍板时使用：会弹出选择卡片，并**暂停**等用户点选后把答案返回给你。" +
+                    "只在「答案会改变你下一步动作」且「无法从需求 / 代码 / 合理默认值推断」时才用。" +
+                    "有常规默认做法的：自己选最合理那个、在正文里说明一句、继续做，不许问。" +
+                    "不许用它问「这个方案行吗」「可以继续吗」——那种话该用 finish 交出结果让用户看。",
+                """
+                {"questions":{"type":"array","minItems":1,"maxItems":4,"description":"1-4 个问题",
+                 "items":{"type":"object","properties":{
+                   "question":{"type":"string","description":"完整问题，以问号结尾"},
+                   "header":{"type":"string","description":"很短的小标签，≤12 字"},
+                   "multiSelect":{"type":"boolean","description":"是否允许多选，默认 false"},
+                   "options":{"type":"array","minItems":2,"maxItems":4,"description":"2-4 个互斥选项（不用给 Other，会自动提供）",
+                     "items":{"type":"object","properties":{
+                       "label":{"type":"string","description":"显示文字，1-5 词；推荐项放第一个并在标签后加（推荐）"},
+                       "description":{"type":"string","description":"这个选项意味着什么、选了会发生什么"}},
+                       "required":["label","description"]}}},
+                 "required":["question","header","options","multiSelect"]}}}
+                """.trimIndent(),
+                listOf("questions")),
+
             fn("engine_status", "查看引擎状态：当前游戏、屏幕尺寸、游戏列表",
                 """{"game":{"type":"string","description":"可选，指定游戏 id"}}""",
                 emptyList()),
@@ -739,8 +795,15 @@ class EngineTools(private val ui: GameUi, private val root: File) {
      * 否则模型连这些工具的存在都看不到 —— 从源头杜绝「自动识别一圈 / 顺手发布」。
      */
     fun specs(allow: Set<String>? = null): List<JSONObject> {
+        // finish / ask_user 是**协议工具**，永远要在场：
+        // 技能如果自带 allowTools 白名单，会把它们一起滤掉 —— 那样模型就失去了
+        // 「合法收尾」和「合法提问」两个出口，又退回到「说一句计划就停」的老毛病。
+        val always = setOf("finish", "ask_user")
         val base = if (allow.isNullOrEmpty()) allSpecs
-        else allSpecs.filter { allow.contains(it.getJSONObject("function").getString("name")) }
+        else allSpecs.filter {
+            val n = it.getJSONObject("function").getString("name")
+            allow.contains(n) || always.contains(n)
+        }
         val extra = mcp?.specs()?.filter {
             val n = it.getJSONObject("function").getString("name")
             mcpAllowed || !isWriteTool(n)
@@ -749,6 +812,57 @@ class EngineTools(private val ui: GameUi, private val root: File) {
     }
 
     fun names(): List<String> = allSpecs.map { it.getJSONObject("function").getString("name") }
+
+    // ==================== 权限模式 ====================
+
+    /**
+     * 权限模式 —— 照抄 Codex 的 `sandbox_mode` 三档语义（仓库里的原文模板）：
+     *
+     *   0 只读      ← read-only        ：只允许读文件，写 / 执行一律拒绝
+     *   1 工作区    ← workspace-write  ：工程目录内可写；**改外面 / 跑命令要用户点头**
+     *   2 完全访问  ← danger-full-access：无沙箱，全部放行，不弹框（默认值 = 改动前行为）
+     *
+     * 默认 2 是刻意的：这一版先把机制装进去、不改变现有体验，
+     * 等设置页里的三档开关接上后，由用户自己选要不要收紧。
+     */
+    @Volatile
+    var permMode: Int = 2
+
+    /** 需要用户点头才能跑的工具（对应 Codex 的 escalation 场景：动代码之外的世界） */
+    private val NEED_APPROVAL = setOf("shell_run", "git_op", "localserver")
+
+    /** 只读模式下禁止的动作（写文件 / 跑命令 / 动版本库） */
+    private val READ_ONLY_BLOCKED = setOf(
+        "shell_run", "git_op", "localserver",
+        "game_write", "game_create", "game_patch",
+        "workflow_save", "memory_save", "memory_forget"
+    )
+
+    /**
+     * 权限闸门。返回 null = 放行；返回非空 = 把这段话当工具结果交回模型（**不执行**）。
+     */
+    private fun checkPermission(name: String, argsJson: String): String? {
+        if (permMode >= 2) return null
+
+        if (permMode <= 0 && (READ_ONLY_BLOCKED.contains(name) || name in NEED_APPROVAL)) {
+            return "「$name」被拒绝：当前权限模式是**只读**。要改文件 / 跑命令，" +
+                "请让用户在设置里切到「工作区」或「完全访问」。别重试，先说明你需要更高权限。"
+        }
+
+        if (permMode == 1 && NEED_APPROVAL.contains(name)) {
+            val ans = ui.requestApproval(
+                action = name,
+                detail = argsJson.take(600),
+                danger = name == "shell_run" || name == "git_op"
+            )
+            val decision = runCatching { JSONObject(ans).optString("decision", "deny") }
+                .getOrDefault("deny")
+            return if (decision == "allow" || decision == "allow_always") null
+            else "「$name」被用户拒绝执行。不要重试同一件事 —— 换个做法，" +
+                "或者用 ask_user 问清楚他到底想要什么。"
+        }
+        return null
+    }
 
     // ==================== 执行 ====================
 
@@ -760,6 +874,11 @@ class EngineTools(private val ui: GameUi, private val root: File) {
         // 里就返回了，走不到下面。宁可保守清一次，也不要让模型读到过期内容。
         // （只读工具不受影响 —— 它们本来就不该清。）
         if (!ToolCache.cacheable(name)) ToolCache.invalidateAll()
+
+        // 【协议工具】不进 exec：finish / ask_user 是「收尾 / 提问」，由 UI 层承接，
+        // 返回值带 sentinel 前缀，AgentRunner 靠它判定这一轮该收工还是该等用户。
+        if (name == "finish") return ToolResult("__FINISH__" + argsJson)
+        if (name == "ask_user") return ToolResult("__ASK__" + ui.askUser(argsJson))
 
         // MCP 工具（TapTap / Maker）转给对应服务器。
         // 只读类常驻；写 / 发布类要用户放行 —— 模型可能凭记忆猜工具名，猜中就等于绕过闸门，
@@ -792,6 +911,10 @@ class EngineTools(private val ui: GameUi, private val root: File) {
         // 弱模型很爱反复读同一个文件，这一层能省掉大量重复 IO。
         // 写操作绝不会走到这里（ToolCache.cacheable 只放只读工具）。
         ToolCache.get(name, argsJson)?.let { return it }
+
+        // 【权限闸门】对应 Codex 的 sandbox_mode + approval_policy：
+        // 只读 → 挡；工作区 → 跑命令这类要用户点头；完全访问 → 直接过。
+        checkPermission(name, argsJson)?.let { return ToolResult(it) }
 
         val result = try {
             exec(name, runCatching { JSONObject(argsJson) }.getOrDefault(JSONObject()))

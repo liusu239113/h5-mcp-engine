@@ -61,6 +61,21 @@ object McpStore {
     }
 }
 
+/** 普通 MCP 工具（含生图 / 配音）的等待上限：5 分钟 */
+private const val DEFAULT_TOOL_TIMEOUT_MS = 300_000
+
+/**
+ * 生音乐单独给 3 分钟上限。
+ *
+ * 为什么单独给它：Maker 的音乐通道偶尔会整个卡住 —— 不报错、就是不出结果，
+ * 一直干等到 5 分钟上限，用户已经等到火大，最后还是一场空。
+ * 到点就放弃它、改走音效通道把音乐做出来（见 [McpHub.musicFallbackViaSfx]）。
+ */
+private const val MUSIC_TIMEOUT_MS = 180_000
+
+/** 音效通道兜底时的等待上限（音效通道快得多，给 2.5 分钟足够） */
+private const val SFX_TIMEOUT_MS = 150_000
+
 /**
  * 极简 MCP 客户端，只实现了 Streamable HTTP 传输：
  *   initialize → notifications/initialized → tools/list → tools/call
@@ -128,12 +143,12 @@ class McpClient(private val url: String) {
         return out
     }
 
-    fun callTool(name: String, argsJson: String): String {
+    fun callTool(name: String, argsJson: String, timeoutMs: Int = DEFAULT_TOOL_TIMEOUT_MS): String {
         val args = runCatching { JSONObject(argsJson) }.getOrDefault(JSONObject())
         val r = rpc(
             "tools/call",
             JSONObject().put("name", name).put("arguments", args),
-            timeoutMs = 300_000
+            timeoutMs = timeoutMs
         ) ?: return "(无返回)"
         val sb = StringBuilder()
         r.optJSONArray("content")?.let { arr ->
@@ -310,7 +325,29 @@ class McpHub {
     @Volatile
     var onEnsure: (() -> Boolean)? = null
 
-    fun call(name: String, argsJson: String): String {
+    /**
+     * 工具入口。
+     *
+     * 生音乐（text_to_music）单独走一条路：只等 [MUSIC_TIMEOUT_MS]（3 分钟），
+     * 到点就放弃它、自动改走音效通道把音乐做出来（见 [musicFallbackViaSfx]）。
+     * 其余工具照旧。
+     */
+    fun call(name: String, argsJson: String, timeoutMs: Int = DEFAULT_TOOL_TIMEOUT_MS): String {
+        if (name.endsWith("text_to_music")) {
+            val t0 = System.currentTimeMillis()
+            val out = callInner(name, argsJson, MUSIC_TIMEOUT_MS)
+            // 只有「等超时」才兜底：授权错、参数错这类换成音效通道也一样错，
+            // 硬兜底只会把真正的报错盖掉、让问题更难查。
+            if (isTimeoutLike(out) || System.currentTimeMillis() - t0 >= MUSIC_TIMEOUT_MS) {
+                return musicFallbackViaSfx(name, argsJson, out)
+            }
+            return out
+        }
+        return callInner(name, argsJson, timeoutMs)
+    }
+
+    /** 真正的调用逻辑；[call] 负责在它前面套「生音乐兜底」这类策略 */
+    private fun callInner(name: String, argsJson: String, timeoutMs: Int): String {
         if (!index.containsKey(name)) {
             // 工具名不在索引里，先别急着跟模型说「未知工具」。
             //
@@ -321,7 +358,7 @@ class McpHub {
             // 现在：先把服务拉一次、把清单重抓一遍，抓到了就直接执行，用户完全无感。
             val revived = runCatching { onEnsure?.invoke() == true }.getOrDefault(false)
             if (revived && index.containsKey(name)) {
-                return runCatching { direct(name, argsJson) }
+                return runCatching { direct(name, argsJson, timeoutMs) }
                     .getOrElse { "[MCP 调用失败] ${it.message}" + authOwnershipHint(it.message, name) }
             }
             val why = if (makerStarved && !makerConnected) {
@@ -338,7 +375,7 @@ class McpHub {
                 "当前清单里可用的工具：${availableNames()}"
         }
         return try {
-            direct(name, argsJson)
+            direct(name, argsJson, timeoutMs)
         } catch (t: Throwable) {
             // 本地 node 被系统冻结/杀掉是常态：让守护逻辑把它拉回来，再重试一次
             val ok = runCatching { onEnsure?.invoke() == true }.getOrDefault(false)
@@ -346,7 +383,7 @@ class McpHub {
                 "[MCP 调用失败] ${t.message}（本地服务可能已退出，App 正在后台自动重连，过几秒再试一次）" +
                     authOwnershipHint(t.message, name)
             } else {
-                runCatching { direct(name, argsJson) }
+                runCatching { direct(name, argsJson, timeoutMs) }
                     .getOrElse { "[MCP 调用失败] 服务已重启但仍不可用：${it.message}" + authOwnershipHint(it.message, name) }
             }
         }
@@ -370,10 +407,10 @@ class McpHub {
             "不要把这条授权链接当成 Maker 的授权发给用户。"
     }
 
-    private fun direct(name: String, argsJson: String): String {
+    private fun direct(name: String, argsJson: String, timeoutMs: Int = DEFAULT_TOOL_TIMEOUT_MS): String {
         val e = index[name] ?: throw IllegalStateException("工具未注册：$name")
         val c = clients[e.server.url] ?: throw IllegalStateException("服务器未连接：${e.server.name}")
-        val out = c.callTool(e.tool.name, argsJson)
+        val out = c.callTool(e.tool.name, argsJson, timeoutMs)
         // 「构建过 Maker」是判型唯一骗不了人的事实：构建成功就把当前工程钉成 Maker
         // （写 .hexora-kind，projKind() 优先读它）。按「去前缀后的真名」判，
         // H5 开放平台那个同名工具不会被误算成 Maker 构建。
@@ -381,5 +418,85 @@ class McpHub {
             runCatching { EngineTools.onMakerBuiltProject?.invoke() }
         }
         return out
+    }
+
+    // ---------- 生音乐超时 → 音效通道兜底 ----------
+
+    /**
+     * 这条返回像不像「等超时」。
+     *
+     * 判据故意卡得很死：**只有超时才兜底**。授权没配 / 参数不对这类错误，
+     * 换成音效通道也一样错，硬兜底只会把真正的报错盖掉、让问题更难查。
+     */
+    private fun isTimeoutLike(out: String): Boolean {
+        if (!out.startsWith("[MCP调用失败]")) return false
+        val low = out.lowercase()
+        return low.contains("timed out") || low.contains("timeout") || low.contains("etimedout")
+    }
+
+    /**
+     * 生音乐超时后，改用音效通道把音乐做出来。
+     *
+     * 为什么这么干：Maker 的音乐通道（text_to_music）偶尔会整个卡住 —— 不报错、就是没结果。
+     * 音效通道（text_to_sound_effect）稳得多也快得多，同一句话让它出音乐也能出，
+     * 只是时长短一点。宁可给用户一段短 BGM，也别让他干等 5 分钟最后拿一片空白。
+     *
+     * 参数不能照搬：两个工具的 schema 不一样，所以按**音效工具的 schema** 逐字段翻译。
+     */
+    private fun musicFallbackViaSfx(musicTool: String, argsJson: String, musicOut: String): String {
+        val sfxTool = index.keys.firstOrNull { it.endsWith("text_to_sound_effect") }
+            ?: return musicOut + "\n\n【兜底失败】生音乐通道超时，而且当前没找到音效通道" +
+                "（text_to_sound_effect 不在工具清单里），没法自动顶上。" +
+                "跟用户说清楚「音乐通道超时」，问他是否要再试一次。"
+
+        val sfxArgs = translateArgsForSfx(argsJson, sfxTool)
+        val sfxOut = runCatching { call(sfxTool, sfxArgs, SFX_TIMEOUT_MS) }
+            .getOrElse { "[音效通道也失败] ${it.message}" }
+
+        return buildString {
+            append("【音乐通道超时，已自动改走音效通道】\n")
+            append("$musicTool 超过 ${MUSIC_TIMEOUT_MS / 1000} 秒没出结果，已放弃等待。\n")
+            append("已用音效通道 $sfxTool 生成，参数：$sfxArgs\n")
+            append("注意：音效通道产出的是**短音频**，当 BGM 用时要循环播放；\n")
+            append("如果这次确实必须要完整长音乐，就跟用户直说「音乐通道超时，先用音效顶上了」，\n")
+            append("**不要**自己再重试 text_to_music（大概率还是卡住）。\n")
+            append("---- 音效通道返回 ----\n")
+            append(sfxOut)
+        }
+    }
+
+    /**
+     * 把生音乐的参数按音效工具的 schema 翻译一份。
+     *
+     * ① 同名字段直接搬；② 音效那边要 prompt 而生音乐那边叫别的名字 → 按常见名挨个找；
+     * ③ 名字全对不上就把整包参数当描述递过去，别让兜底白跑一趟。
+     */
+    private fun translateArgsForSfx(argsJson: String, sfxTool: String): String {
+        val src = runCatching { JSONObject(argsJson) }.getOrDefault(JSONObject())
+        val props = index[sfxTool]?.tool.schema.optJSONObject("properties") ?: JSONObject()
+        val dst = JSONObject()
+
+        // ① 两边同名的字段直接搬
+        props.keys().forEach { k ->
+            if (src.has(k) && !src.isNull(k)) dst.put(k, src.get(k))
+        }
+        // ② 描述类字段：两边命名可能不一样，按常见名挨个找
+        if (props.has("prompt") && !dst.has("prompt")) {
+            val aliases = listOf(
+                "prompt", "text", "description", "desc", "idea",
+                "content", "query", "keywords", "music_prompt"
+            )
+            for (a in aliases) {
+                if (src.has(a) && !src.isNull(a)) {
+                    dst.put("prompt", src.get(a))
+                    break
+                }
+            }
+        }
+        // ③ 还是找不到：把整包参数当描述递过去
+        if (props.has("prompt") && !dst.has("prompt") && src.length() > 0) {
+            dst.put("prompt", src.toString())
+        }
+        return dst.toString()
     }
 }

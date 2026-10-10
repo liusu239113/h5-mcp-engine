@@ -136,6 +136,20 @@ class AiConfigStore(ctx: Context) {
             sp.edit().putString("temp", v.toString()).apply()
         }
 
+    /**
+     * 权限模式（对齐 Codex 的 `sandbox_mode` 三档）：
+     *   0 = 只读（read-only）            ：只让 AI 看，写文件 / 跑命令一律拒绝
+     *   1 = 工作区（workspace-write）    ：工程目录内可写；跑命令 / 动工程外要用户点头
+     *   2 = 完全访问（danger-full-access）：全部放行，不弹框
+     *
+     * 默认 2 是刻意保持的：等于改动前的行为，升级后不会处处被拦。
+     */
+    var permissionMode: Int
+        get() = sp.getInt("perm_mode", 2).coerceIn(0, 2)
+        set(v) {
+            sp.edit().putInt("perm_mode", v.coerceIn(0, 2)).apply()
+        }
+
     /** 一次任务里最多让 AI 调多少次工具（防止跑飞） */
     var maxSteps: Int
         // 400 起步：做一款完整游戏、反复截图自检时，40 轮根本不够
