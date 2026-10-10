@@ -473,7 +473,7 @@ class McpHub {
      */
     private fun translateArgsForSfx(argsJson: String, sfxTool: String): String {
         val src = runCatching { JSONObject(argsJson) }.getOrDefault(JSONObject())
-        val props = index[sfxTool]?.tool.schema.optJSONObject("properties") ?: JSONObject()
+        val props = index[sfxTool]?.let { it.tool.schema.optJSONObject("properties") } ?: JSONObject()
         val dst = JSONObject()
 
         // ① 两边同名的字段直接搬
