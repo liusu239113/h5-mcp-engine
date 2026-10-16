@@ -252,6 +252,36 @@ object AiProviders {
             )
         ),
 
+        /*
+         * OpenCode Go：$10/月订阅制（Go Plus $40），额度只在 /inference/go 这组端点上生效。
+         *
+         * 注意两点（都踩过）：
+         *  1. 网关强制要求 `x-opencode-session` 请求头，少了直接 400 MissingSessionID ——
+         *     AiClient 已按域名自动补，这里不用配。
+         *  2. 千万别把 Base URL 写成 /inference/openai/v1：那是**按量付费**入口，
+         *     会用「余额不足」把请求打回来（跟订阅无关）。必须带 /go/。
+         *  3. deepseek 系模型还要求在控制台把工作区 Privacy/Region 设成 Global，
+         *     否则报 "requires Global regions"；其它模型不受影响。
+         */
+        Provider(
+            "opencode-go", "OpenCode Go（订阅制）", "https://opencode.ai/inference/go/v1",
+            keyHint = "oc_sk-...", group = "国外", editableBaseUrl = true,
+            models = listOf(
+                ModelSpec("kimi-k3", "Kimi K3"),
+                ModelSpec("kimi-k2.7-code", "Kimi K2.7 Code（写代码）"),
+                ModelSpec("glm-5.3", "GLM-5.3"),
+                ModelSpec("glm-5.3-flash", "GLM-5.3 Flash（快）"),
+                ModelSpec("deepseek-v4.1-flash", "DeepSeek V4.1 Flash（需控制台设 Global）"),
+                ModelSpec("mimo-v2.6-flash", "MiMo V2.6 Flash（快）"),
+                ModelSpec("minimax-m2.7", "MiniMax M2.7"),
+                ModelSpec("longcat-2.0", "LongCat 2.0"),
+                ModelSpec("qwen3.8-flash", "Qwen3.8 Flash"),
+                ModelSpec("claude-haiku-5-5", "Claude Haiku 5.5"),
+                ModelSpec("grok-4.7", "Grok 4.7"),
+                ModelSpec("gpt-6-luna", "GPT-6 Luna")
+            )
+        ),
+
         Provider(
             "anthropic", "Anthropic Claude", "https://api.anthropic.com/v1",
             protocol = Protocol.ANTHROPIC, keyHint = "sk-ant-...", group = "国外",
@@ -388,6 +418,7 @@ object AiProviders {
         "siliconflow" to "https://cloud.siliconflow.cn/account/ak",
         // ---------- 国外 ----------
         "openai" to "https://platform.openai.com/api-keys",
+        "opencode-go" to "https://opencode.ai/console",
         "anthropic" to "https://console.anthropic.com/settings/keys",
         "gemini" to "https://aistudio.google.com/app/apikey",
         "xai" to "https://console.x.ai/",
@@ -409,6 +440,7 @@ object AiProviders {
         p.group == "本地" && p.id == "ollama" -> "下载安装 Ollama，本地跑模型不需要 Key"
         p.group == "本地" && p.id == "lmstudio" -> "下载 LM Studio，本地跑模型不需要 Key"
         p.id == "custom" -> "中转站 / 自建代理：Key 找你的服务商要"
+        p.id == "opencode-go" -> "控制台「Keys」建服务账号后创建 API Key（oc_sk- 开头）"
         p.id == "ark" -> "方舟控制台 → API Key 管理（模型名建议填接入点 ID）"
         p.id == "qianfan" -> "百度智能云 → 访问控制 → API Key（bce-v3/ 开头）"
         p.id == "spark" -> "讯飞开放平台 → 星火 → 服务管理（格式 APIKey:APISecret）"

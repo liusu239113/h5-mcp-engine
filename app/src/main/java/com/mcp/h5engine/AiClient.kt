@@ -427,6 +427,15 @@ class AiClient(private val cfg: ProviderConfig) {
                 rb.header("x-goog-api-key", cfg.apiKey)
         }
 
+        // OpenCode（订阅制 Go / 按量付费）在推理网关前面加了会话路由：请求缺
+        // `x-opencode-session` 会被直接拒掉，4xx 原文是 MissingSessionID
+        // （"Request is missing x-opencode-session and cannot be routed efficiently"）。
+        // 放 URL 里、JSON body 里都不认，只有请求头有效；所以只对它的域名补，
+        // 不给其它服务商塞无用头。进程内一个稳定 ID 即可，用于路由与提示缓存。
+        if (endpoint.contains("opencode.ai")) {
+            rb.header("x-opencode-session", OPENCODE_SESSION_ID)
+        }
+
         // 「思维链缺失」只洗一次：洗过还失败就是别的原因，别死循环
         var reasoningScrubbed = false
 
@@ -562,6 +571,15 @@ class AiClient(private val cfg: ProviderConfig) {
     }
 
     companion object {
+
+        /**
+         * OpenCode Go 的会话 ID。
+         *
+         * 它的推理网关要求每个请求都带 `x-opencode-session`（缺了直接 400
+         * MissingSessionID），并靠它在后端做路由与提示缓存。这里一个进程一个，
+         * 稳定即可 —— 不需要每次请求都换，换了反而让缓存失效。
+         */
+        val OPENCODE_SESSION_ID: String = UUID.randomUUID().toString().replace("-", "")
 
         // ==================== 连接复用 ====================
 
