@@ -52,6 +52,14 @@ class AgentRunner(
     private val appCtx: Context,
     private val cfg: ProviderConfig,
     private val skill: Skill,
+    /**
+     * 当前智能体（OpenCode 模式，见 Agents.kt）。影响三件事：
+     *   · 追加系统提示（自定义设定 + 计划模式的只读约束）；
+     *   · 工具白名单再收一层（技能 ∩ 智能体）；
+     *   · 把权限规则灌给 EngineTools（deny 的写 / 执行类工具会被直接拒绝）。
+     * null = 内置「构建」行为（与改造前一致）。
+     */
+    private val agent: AgentSpec? = null,
     private val tools: EngineTools,
     private val visionFallback: Boolean,
     private val shotDir: File,
@@ -112,8 +120,21 @@ class AgentRunner(
             skill.allowTools == null -> tools.names().filterNot { it in EngineTools.SLIM_DROP }.toSet()
             else -> skill.allowTools.filterNot { it in EngineTools.SLIM_DROP }.toSet()
         }
-        val spec = tools.specs(allow)
+        // 【智能体】工具白名单再收一层：技能 ∩ 智能体（空 = 该侧不限制）。
+        // 例：自建「只管文案」的智能体可以只放文件读写；计划模式则靠权限规则拦执行。
+        val agentTools = agent?.tools?.takeIf { it.isNotEmpty() }?.toSet()
+        val allowFinal = when {
+            agentTools == null -> allow
+            allow == null -> agentTools
+            else -> allow.intersect(agentTools)
+        }
+        val spec = tools.specs(allowFinal)
         val names = spec.map { it.getJSONObject("function").getString("name") }
+
+        // 【智能体权限】灌进工具层闸门（EngineTools 每轮新建，注入即生效；见 Tools.checkPermission）。
+        // 计划模式的「写 / 执行一律拒绝」就是从这里落下去的。
+        tools.agentRules = agent?.rules ?: emptyList()
+        tools.agentName = agent?.name ?: ""
 
         val sys = buildString {
             // 人格块放最前：它自称「最高优先级，覆盖以下所有其它设定」，
@@ -121,6 +142,8 @@ class AgentRunner(
             // 关了人格锁定时它返回空串，等于没这段。
             append(AiConfigStore(appCtx).personaBlock())
             append(skill.system)
+            // 智能体的追加设定 + 计划模式只读约束（OpenCode 的 plan reminder 对位）
+            agent?.let { append(AgentStore.promptBlock(it)) }
             // C1 长期记忆：把与本轮输入最相关的几条注入系统提示
             append(MemoryStore.promptBlock(appCtx, userText))
             // 交付纪律：用户反复踩到的坑，直接写死在系统提示里

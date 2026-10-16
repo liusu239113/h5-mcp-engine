@@ -322,6 +322,8 @@ class MainActivity : AppCompatActivity(), GameUi {
     private lateinit var sendBtn: TextView
     private lateinit var stopBtn: TextView
     private lateinit var modelBtn: TextView
+    /** 智能体胶囊（OpenCode 模式）；buildChatPage 才会创建，所以可空 */
+    private var agentBtn: TextView? = null
     private lateinit var attachInfo: TextView
     private lateinit var titleTv: TextView
     private lateinit var subTv: TextView
@@ -1396,6 +1398,13 @@ class MainActivity : AppCompatActivity(), GameUi {
                     .show()
             }
         }
+        // 智能体胶囊（OpenCode 模式）：构建 / 计划 / 自定义，随手切；
+        // 长按 = 直接进设置页管理（新建 / 编辑 / 删除）。
+        val agBtn = chipOf(this, pal, agentChipText(), false).apply {
+            setOnClickListener { showAgentSheet(this) }
+            setOnLongClickListener { showSettings(); true }
+        }
+        agentBtn = agBtn
         // 「当前画面」按钮已删 —— 「＋附件」菜单里本来就有「当前游戏画面」，
         // 两个入口一个功能，白占一格。这个位置换成权限开关（点开是底部抽屉，三档）。
         val permBtn = chipOf(this, pal, "权限·" + permShort(cfgStore.permissionMode), false).apply {
@@ -1429,6 +1438,7 @@ class MainActivity : AppCompatActivity(), GameUi {
         }
 
         row.addView(attachBtn)
+        row.addView(agBtn, LinearLayout.LayoutParams(-2, -2).apply { leftMargin = dp(6) })
         row.addView(permBtn, LinearLayout.LayoutParams(-2, -2).apply { leftMargin = dp(6) })
         row.addView(modelBtn, LinearLayout.LayoutParams(0, -2, 1f).apply {
             leftMargin = dp(8)
@@ -2897,7 +2907,13 @@ class MainActivity : AppCompatActivity(), GameUi {
             return
         }
 
-        val cfg = cfgStore.active()
+        // 【智能体】OpenCode 语义：智能体可以钉自己的模型（空 = 跟随全局模型）。
+        // 在这里统一覆盖：界面展示、请求体、视觉判定全用覆盖后的这一份。
+        val agentNow = AgentStore.current(this)
+        val cfg0 = cfgStore.active()
+        val cfg = if (agentNow.model.isNotBlank()) {
+            cfg0.copy(model = agentNow.model.trim(), modelLabel = agentNow.model.trim())
+        } else cfg0
         val local = cfg.baseUrl.contains("127.0.0.1") || cfg.baseUrl.contains("localhost")
         if (cfg.apiKey.isBlank() && !local) {
             showSettings()
@@ -2997,9 +3013,13 @@ class MainActivity : AppCompatActivity(), GameUi {
         val skill = if (resume) {
             SkillPresets.byId(lastRunSkillId ?: cfgStore.skillId)
         } else {
-            EngineTools.mcpAllowed = mcpWanted
-            if (mcpWanted) {
+            // 计划模式：MCP 的写 / 发布类接口一律锁住（只读调查够用；要动手先切回「构建」）
+            val mcpOpen = mcpWanted && agentNow.id != "plan"
+            EngineTools.mcpAllowed = mcpOpen
+            if (mcpOpen) {
                 addSystemLine("本轮已放行 TapTap / Maker 的写 / 发布类接口（上传、发布、改信息等）；它动手前仍会先跟你确认")
+            } else if (agentNow.id == "plan" && mcpWanted) {
+                addSystemLine("计划模式：TapTap / Maker 的写 / 发布类接口本轮锁定（只做调查与方案）")
             } else if (EngineTools.mcp != null) {
                 // 只读查询与素材生成是常驻的，不需要放行；这里只是日志：写类本轮还锁着
                 android.util.Log.i("Hexora", "本轮未放行 MCP 写 / 发布类工具（无明确同意）")
@@ -3028,6 +3048,7 @@ class MainActivity : AppCompatActivity(), GameUi {
             appCtx = this,
             cfg = cfg,
             skill = skill,
+            agent = agentNow,
             tools = tools,
             visionFallback = cfgStore.visionFallback,
             shotDir = File(gameRoot, "_shots"),
@@ -6655,6 +6676,267 @@ class MainActivity : AppCompatActivity(), GameUi {
         dlg.window?.setLayout(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
     }
 
+    // ==================== 智能体（OpenCode 模式） ====================
+
+    /** 输入栏那颗「◎ 构建 / ◎ 计划」胶囊的文字 */
+    private fun agentChipText(): String = "◎ " + AgentStore.current(this).name
+
+    /** 胶囊可能还没建出来（buildChatPage 尚未跑），所以空安全 */
+    private fun refreshAgentChip() {
+        agentBtn?.text = agentChipText()
+    }
+
+    /**
+     * 智能体切换抽屉（底部面板）—— 对位 OpenCode 的 agent 选择器。
+     * 只列 primary；管理（新建 / 编辑 / 删除）给一个入口跳设置页。
+     */
+    private fun showAgentSheet(btn: TextView) {
+        val dlg = Dialog(this)
+        dlg.requestWindowFeature(android.view.Window.FEATURE_NO_TITLE)
+        val radius = dp(16).toFloat()
+        val sheetBg = android.graphics.drawable.GradientDrawable().apply {
+            setColor(pal.card)
+            cornerRadii = floatArrayOf(radius, radius, radius, radius, 0f, 0f, 0f, 0f)
+        }
+        val root = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = sheetBg
+        }
+
+        val titleRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(16), dp(14), dp(12), dp(10))
+        }
+        titleRow.addView(TextView(this).apply {
+            text = "智能体"
+            textSize = 15f
+            typeface = MEDIUM
+            setTextColor(pal.text)
+        }, LinearLayout.LayoutParams(0, -2, 1f))
+        titleRow.addView(iconView(this, pal, "close", 15, pal.sub).apply {
+            setPadding(dp(9), dp(3), dp(6), dp(3))
+            setOnClickListener { dlg.dismiss() }
+        }, LinearLayout.LayoutParams(dp(30), dp(27)))
+        root.addView(titleRow)
+        root.addView(View(this).apply { setBackgroundColor(pal.border) },
+            LinearLayout.LayoutParams(-1, dp(1)))
+
+        val cur = AgentStore.current(this)
+        val list = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        val agents = AgentStore.all(this).filter { it.mode == "primary" && !it.hidden }
+        for (a in agents) {
+            val on = a.id == cur.id
+            val row = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(dp(16), dp(12), dp(16), dp(12))
+                setOnClickListener {
+                    AgentStore.setCurrent(this@MainActivity, a.id)
+                    btn.text = agentChipText()
+                    toast("已切到「" + a.name + "」")
+                    dlg.dismiss()
+                }
+            }
+            row.addView(TextView(this).apply {
+                text = a.name + (if (on) "  ✓" else "")
+                textSize = 14.5f
+                typeface = if (on) MEDIUM else null
+                setTextColor(if (on) pal.accent else pal.text)
+            })
+            row.addView(TextView(this).apply {
+                text = a.description + (if (a.model.isNotBlank()) "（模型：" + a.model + "）" else "")
+                textSize = 11f
+                setTextColor(pal.sub)
+                setPadding(0, dp(3), 0, 0)
+            })
+            list.addView(row)
+        }
+
+        if (agents.size > 5) {
+            root.addView(ScrollView(this).apply { addView(list) },
+                LinearLayout.LayoutParams(-1, dp(360)))
+        } else {
+            root.addView(list)
+        }
+
+        root.addView(View(this).apply { setBackgroundColor(pal.border) },
+            LinearLayout.LayoutParams(-1, dp(1)))
+        root.addView(TextView(this).apply {
+            text = "管理智能体（新建 / 编辑 / 删除）"
+            textSize = 13f
+            typeface = MEDIUM
+            setTextColor(pal.accent)
+            setPadding(dp(16), dp(14), dp(16), dp(16))
+            setOnClickListener {
+                dlg.dismiss()
+                showSettings()
+            }
+        })
+
+        dlg.setContentView(root)
+        dlg.window?.let { w ->
+            w.setBackgroundDrawable(android.graphics.drawable.ColorDrawable(0))
+            w.addFlags(android.view.WindowManager.LayoutParams.FLAG_DIM_BEHIND)
+            w.setDimAmount(0.42f)
+            w.setGravity(Gravity.BOTTOM)
+        }
+        dlg.show()
+        dlg.window?.setLayout(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+    }
+
+    /**
+     * 智能体编辑器：新建 / 编辑自定义；内置的只能「复制为自定义」——
+     * 兜底的构建 / 计划永远不被改坏。
+     */
+    private fun showAgentEditor(agentId: String?) {
+        val src = agentId?.let { id -> AgentStore.all(this).firstOrNull { it.id == id } }
+        val isBuiltin = src?.builtin == true
+
+        val dlg = Dialog(this)
+        dlg.requestWindowFeature(android.view.Window.FEATURE_NO_TITLE)
+        val root = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(18), dp(16), dp(18), dp(10))
+            background = roundCard(this@MainActivity, pal.card, pal.card, 16)
+        }
+
+        fun label(t: String) = TextView(this).apply {
+            text = t
+            textSize = 12f
+            setTextColor(pal.sub)
+            setPadding(dp(2), dp(12), dp(2), dp(5))
+        }
+        fun ed(hint: String, value: String, multiline: Boolean = false) = EditText(this).apply {
+            this.hint = hint
+            textSize = 14f
+            setText(value)
+            setTextColor(pal.text)
+            setHintTextColor(pal.faint)
+            setPadding(dp(14), dp(13), dp(14), dp(13))
+            includeFontPadding = false
+            background = roundCard(this@MainActivity, pal.cardAlt, pal.border, 12)
+            if (multiline) {
+                setSingleLine(false)
+                minLines = 3
+                gravity = Gravity.TOP
+            } else {
+                setSingleLine()
+            }
+        }
+
+        root.addView(TextView(this).apply {
+            text = when {
+                agentId == null -> "新建智能体"
+                isBuiltin -> "内置智能体 · " + (src?.name ?: "")
+                else -> "编辑智能体"
+            }
+            textSize = 16f
+            typeface = MEDIUM
+            setTextColor(pal.text)
+        })
+        root.addView(TextView(this).apply {
+            text = if (isBuiltin) {
+                "内置智能体不可改。要调整就「复制为自定义」——这样兜底的构建 / 计划永远不会被改坏。"
+            } else {
+                "智能体 = 工作方式 + 权限。模型留空 = 跟随全局；勾「只读」会拒绝所有写 / 执行 / 设备类工具。"
+            }
+            textSize = 11f
+            setTextColor(pal.sub)
+            setPadding(0, dp(6), 0, 0)
+        })
+
+        root.addView(label("名称"))
+        val nameEt = ed("例如：文案 / 测试 / 只读导师", src?.name ?: "")
+        root.addView(nameEt, LinearLayout.LayoutParams(-1, -2))
+
+        root.addView(label("模型（留空 = 跟随全局）"))
+        val modelEt = ed("例如：glm-5.3（用当前厂商的 Key 调它）", src?.model ?: "")
+        root.addView(modelEt, LinearLayout.LayoutParams(-1, -2))
+
+        root.addView(label("追加系统提示（可选）"))
+        val sysEt = ed("这个智能体专属的做事要求…", src?.system ?: "", multiline = true)
+        root.addView(sysEt, LinearLayout.LayoutParams(-1, -2))
+
+        root.addView(label("权限"))
+        val readCb = CheckBox(this).apply {
+            text = "只读（拒绝所有写 / 执行 / 设备类工具）"
+            textSize = 12.5f
+            setTextColor(pal.text)
+            // 自带全套 deny 规则的智能体，勾选状态按「是不是已按只读模板建过」推断
+            isChecked = src != null && src.rules.count { it.effect == "deny" } >= AgentStore.DESTRUCTIVE.size
+        }
+        root.addView(readCb, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(4) })
+
+        root.addView(label("其余工具的默认动作"))
+        val effectIds = listOf("allow", "ask", "deny")
+        val effectSp = android.widget.Spinner(this).apply {
+            adapter = android.widget.ArrayAdapter(
+                this@MainActivity,
+                android.R.layout.simple_spinner_dropdown_item,
+                listOf("允许（推荐）", "每次询问", "拒绝")
+            )
+            backgroundTintList = android.content.res.ColorStateList.valueOf(pal.accent)
+            // 回显已有规则里的兜底动作（最后一条 "*" 规则）
+            val def = src?.rules?.lastOrNull { it.action == "*" }?.effect ?: "allow"
+            setSelection(effectIds.indexOf(def).coerceAtLeast(0))
+        }
+        root.addView(effectSp, LinearLayout.LayoutParams(-1, -2))
+
+        val btnRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.END
+            setPadding(0, dp(16), 0, dp(4))
+        }
+        if (src != null && !isBuiltin) {
+            btnRow.addView(chipOf(this, pal, "删除", false).apply {
+                setTextColor(0xFFD0443E.toInt())
+                setOnClickListener {
+                    AgentStore.delete(this@MainActivity, src.id)
+                    refreshAgentChip()
+                    toast("已删除「" + src.name + "」")
+                    dlg.dismiss()
+                }
+            }, LinearLayout.LayoutParams(-2, -2).apply { rightMargin = dp(8) })
+        }
+        btnRow.addView(chipOf(this, pal, if (isBuiltin) "复制为自定义" else "保存", true).apply {
+            setOnClickListener {
+                val nm = nameEt.text.toString().trim().ifBlank { if (isBuiltin) (src?.name ?: "智能体") + "副本" else "智能体" }
+                val rules = ArrayList<PermRule>()
+                if (readCb.isChecked) {
+                    for (t in AgentStore.DESTRUCTIVE) rules.add(PermRule(t, "*", "deny"))
+                }
+                rules.add(PermRule("*", "*", effectIds[effectSp.selectedItemPosition]))
+                val id = if (src != null && !isBuiltin) src.id else AgentStore.newId(this@MainActivity)
+                val spec = AgentSpec(
+                    id = id,
+                    name = nm,
+                    description = "自定义智能体" + (if (readCb.isChecked) " · 只读" else ""),
+                    model = modelEt.text.toString().trim(),
+                    system = sysEt.text.toString().trim(),
+                    rules = rules
+                )
+                AgentStore.upsert(this@MainActivity, spec)
+                AgentStore.setCurrent(this@MainActivity, id)
+                refreshAgentChip()
+                toast(if (isBuiltin) "已复制为「" + nm + "」并切过去" else "已保存「" + nm + "」")
+                dlg.dismiss()
+            }
+        })
+        root.addView(btnRow)
+
+        val wrap = ScrollView(this).apply {
+            setPadding(dp(10), dp(10), dp(10), dp(10))
+            addView(root)
+        }
+        dlg.setContentView(wrap)
+        dlg.window?.let { w -> w.setBackgroundDrawable(android.graphics.drawable.ColorDrawable(0)) }
+        dlg.show()
+        dlg.window?.setLayout(
+            (resources.displayMetrics.widthPixels * 0.94f).toInt(),
+            ViewGroup.LayoutParams.WRAP_CONTENT
+        )
+    }
+
     private fun showSettings() {
         val ctx = this
         val col = LinearLayout(ctx).apply {
@@ -7142,6 +7424,65 @@ makerRow1.addView(ghostBtnOf(ctx, pal, "扫码登录").apply {
         )
         col.addView(spSpacer(skillSp))
 
+        // ---------- 智能体（OpenCode 模式） ----------
+        section("智能体（OpenCode 模式）")
+        col.addView(TextView(ctx).apply {
+            text = "智能体 = AI 的「工作方式 + 权限」。构建：动手干活；计划：只做调查、只出方案" +
+                "（写文件 / 跑命令会被直接拒绝）；也可以自建 —— 钉一个模型、加一段专属提示词。" +
+                "对话页输入栏的「◎」胶囊可随时切换。"
+            textSize = 11.5f
+            setTextColor(pal.faint)
+            setPadding(dp(2), dp(4), dp(2), dp(2))
+        })
+        val agentsBox = LinearLayout(ctx).apply { orientation = LinearLayout.VERTICAL }
+        col.addView(agentsBox)
+        fun renderAgents() {
+            agentsBox.removeAllViews()
+            for (a in AgentStore.all(ctx)) {
+                val on = a.id == cfgStore.agentId
+                val row = LinearLayout(ctx).apply {
+                    orientation = LinearLayout.VERTICAL
+                    setPadding(dp(14), dp(12), dp(14), dp(12))
+                    background = roundCard(ctx, pal.card, pal.border, 12)
+                }
+                row.addView(TextView(ctx).apply {
+                    text = a.name + (if (on) "  ✓ 当前" else "") + (if (a.builtin) "（内置）" else "")
+                    textSize = 14.5f
+                    typeface = if (on) MEDIUM else null
+                    setTextColor(if (on) pal.accent else pal.text)
+                })
+                row.addView(TextView(ctx).apply {
+                    text = a.description + (if (a.model.isNotBlank()) "\n模型：" + a.model + "（覆盖全局）" else "")
+                    textSize = 11.5f
+                    setTextColor(pal.sub)
+                    setPadding(0, dp(4), 0, 0)
+                })
+                val btnRow = LinearLayout(ctx).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    setPadding(0, dp(9), 0, 0)
+                }
+                if (!on) {
+                    btnRow.addView(chipOf(ctx, pal, "设为当前", false).apply {
+                        setOnClickListener {
+                            AgentStore.setCurrent(ctx, a.id)
+                            refreshAgentChip()
+                            renderAgents()
+                            toast("已切到「" + a.name + "」")
+                        }
+                    }, LinearLayout.LayoutParams(-2, -2).apply { rightMargin = dp(8) })
+                }
+                btnRow.addView(chipOf(ctx, pal, if (a.builtin) "查看 / 复制" else "编辑", false).apply {
+                    setOnClickListener { showAgentEditor(a.id) }
+                })
+                row.addView(btnRow)
+                agentsBox.addView(row, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(8) })
+            }
+            agentsBox.addView(chipOf(ctx, pal, "＋ 新建智能体", false).apply {
+                setOnClickListener { showAgentEditor(null) }
+            }, LinearLayout.LayoutParams(-2, -2).apply { topMargin = dp(10) })
+        }
+        renderAgents()
+
         // ---------- 参数 ----------
         section("参数")
         val tempEt = field("temperature 随机性（0 = 最稳，1 = 最放飞）", cfgStore.temperature.toString(), true)
@@ -7582,6 +7923,8 @@ makerRow1.addView(ghostBtnOf(ctx, pal, "扫码登录").apply {
         // ★ 表示「这一对就是默认配置」，让用户随时知道默认是哪一只。
         val star = if (cfgStore.isDefaultPair(cfg.provider.id, cfg.model)) "默认 · " else ""
         setTextIf(modelBtn, "$star${cfg.model} ▴")
+        // 智能体胶囊跟着当前智能体走（可能刚在设置页里切过 / 改过名字）
+        refreshAgentChip()
         setTextIf(projBtn, currentGame)
         setTextIf(statusProj, "$currentGame · $kind")
         setTextIf(statusModel, "${cfg.provider.label} / ${cfg.model}")
@@ -7652,7 +7995,13 @@ makerRow1.addView(ghostBtnOf(ctx, pal, "扫码登录").apply {
         if (subtaskDepth > 0) {
             return "子任务里不能再开子任务（会无限套娃）。请直接在当前子任务里完成这件事。"
         }
-        val cfgNow = cfgStore.active()
+        // 【智能体】子任务继承当前智能体：计划模式里派出去的子任务同样是只读 ——
+        // 否则「主线只读、子任务乱写」就成了绕过闸门的后门。
+        val agentNow = AgentStore.current(this)
+        val cfgNow0 = cfgStore.active()
+        val cfgNow = if (agentNow.model.isNotBlank()) {
+            cfgNow0.copy(model = agentNow.model.trim(), modelLabel = agentNow.model.trim())
+        } else cfgNow0
         // 子任务用**当前配置的技能**：用户选的就是他要的做法，不该被子任务改掉
         val skillNow = SkillPresets.byId(cfgStore.skillId)
 
@@ -7662,6 +8011,8 @@ makerRow1.addView(ghostBtnOf(ctx, pal, "扫码登录").apply {
         // 独立历史：一条 system + 一条 user(goal)。**不带**主对话的任何内容。
         val subHistory = mutableListOf<ChatMsg>()
         val subTools = EngineTools(this, gameRoot)
+        // 权限档跟着主配置走（子任务不是特权通道）
+        subTools.permMode = cfgStore.permissionMode
 
         // 把子任务的每一行输出转成主对话里的事件，用户能实时看到它在干什么
         val buffer = StringBuilder()
@@ -7670,6 +8021,7 @@ makerRow1.addView(ghostBtnOf(ctx, pal, "扫码登录").apply {
             appCtx = this,
             cfg = cfgNow,
             skill = skillNow,
+            agent = agentNow,
             tools = subTools,
             visionFallback = cfgStore.visionFallback,
             shotDir = File(gameRoot, "_shots"),

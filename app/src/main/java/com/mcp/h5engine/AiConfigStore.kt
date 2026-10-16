@@ -295,6 +295,25 @@ class AiConfigStore(ctx: Context) {
             sp.edit().putBoolean("auto_slim", v).apply()
         }
 
+    // ==================== 智能体（OpenCode 模式） ====================
+
+    /**
+     * 自定义智能体列表（org.json 数组字符串，见 Agents.kt）。
+     * 内置的「构建 / 计划」不在这里 —— 那两条永远存在、不可删改，是兜底。
+     */
+    var agentsJson: String
+        get() = sp.getString("agents", "") ?: ""
+        set(v) {
+            sp.edit().putString("agents", v).apply()
+        }
+
+    /** 当前智能体 id。默认 build；找不到对应项时 AgentStore 会回退 build */
+    var agentId: String
+        get() = sp.getString("agent", "build") ?: "build"
+        set(v) {
+            sp.edit().putString("agent", v.trim()).apply()
+        }
+
     // ==================== 各家独立配置 ====================
 
     fun keyOf(id: String): String = sp.getString("key_$id", "") ?: ""

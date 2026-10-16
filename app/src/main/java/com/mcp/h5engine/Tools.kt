@@ -828,6 +828,18 @@ class EngineTools(private val ui: GameUi, private val root: File) {
     @Volatile
     var permMode: Int = 2
 
+    /**
+     * 当前智能体的权限规则（OpenCode 语义：按顺序匹配、**最后命中的生效**）。
+     * 由 AgentRunner 每轮注入；空表 = 不干预，按上面的全局三档走。
+     * deny 优先级最高 —— 连「完全访问」都越不过它（计划模式靠的就是这条）。
+     */
+    @Volatile
+    var agentRules: List<PermRule> = emptyList()
+
+    /** 当前智能体名（拒绝话术里带上，模型和用户都知道是谁在拒） */
+    @Volatile
+    var agentName: String = ""
+
     /** 需要用户点头才能跑的工具（对应 Codex 的 escalation 场景：动代码之外的世界） */
     private val NEED_APPROVAL = setOf("shell_run", "git_op", "localserver")
 
@@ -840,8 +852,21 @@ class EngineTools(private val ui: GameUi, private val root: File) {
 
     /**
      * 权限闸门。返回 null = 放行；返回非空 = 把这段话当工具结果交回模型（**不执行**）。
+     *
+     * 判定顺序：
+     *   ① 智能体规则表（OpenCode 语义，最后命中生效）：
+     *        deny  → 一律拒绝（**完全访问也越不过** —— 这正是计划模式的意义）
+     *        allow → 直接放行
+     *        ask   → 弹框问用户（除非全局已经「完全访问」，那时不打扰）
+     *   ② 全局三档（Codex 式 sandbox_mode）：只读 / 工作区 / 完全访问
      */
     private fun checkPermission(name: String, argsJson: String): String? {
+        when (PermissionEngine.decide(name, argsJson, agentRules)) {
+            "deny" -> return agentDenyText(name)
+            "allow" -> return null
+            "ask" -> return if (permMode >= 2) null else askUserApproval(name, argsJson)
+        }
+
         if (permMode >= 2) return null
 
         if (permMode <= 0 && (READ_ONLY_BLOCKED.contains(name) || name in NEED_APPROVAL)) {
@@ -850,18 +875,30 @@ class EngineTools(private val ui: GameUi, private val root: File) {
         }
 
         if (permMode == 1 && NEED_APPROVAL.contains(name)) {
-            val ans = ui.requestApproval(
-                action = name,
-                detail = argsJson.take(600),
-                danger = name == "shell_run" || name == "git_op"
-            )
-            val decision = runCatching { JSONObject(ans).optString("decision", "deny") }
-                .getOrDefault("deny")
-            return if (decision == "allow" || decision == "allow_always") null
-            else "「$name」被用户拒绝执行。不要重试同一件事 —— 换个做法，" +
-                "或者用 ask_user 问清楚他到底想要什么。"
+            return askUserApproval(name, argsJson)
         }
         return null
+    }
+
+    /** 智能体规则拒绝时回给模型的话术（别让它以为是自己参数写错了） */
+    private fun agentDenyText(name: String): String =
+        "「$name」被拒绝：当前智能体" +
+            (if (agentName.isNotBlank()) "「" + agentName + "」" else "") +
+            "不允许调用它（只读 / 计划类智能体会锁住写文件、跑命令、操作设备）。" +
+            "需要动手时，请告诉用户切到「构建」智能体；别重试。"
+
+    /** 弹框请用户拍板（工作区模式与 ask 规则共用同一条路径） */
+    private fun askUserApproval(name: String, argsJson: String): String? {
+        val ans = ui.requestApproval(
+            action = name,
+            detail = argsJson.take(600),
+            danger = name == "shell_run" || name == "git_op"
+        )
+        val decision = runCatching { JSONObject(ans).optString("decision", "deny") }
+            .getOrDefault("deny")
+        return if (decision == "allow" || decision == "allow_always") null
+        else "「$name」被用户拒绝执行。不要重试同一件事 —— 换个做法，" +
+            "或者用 ask_user 问清楚他到底想要什么。"
     }
 
     // ==================== 执行 ====================
@@ -890,6 +927,10 @@ class EngineTools(private val ui: GameUi, private val root: File) {
         val isLocal = names().contains(name)
         mcp?.let { hub ->
             if (!isLocal && hub.handles(name)) {
+                // 智能体规则对 MCP 同样生效：计划模式不许借 MCP 动手（写 / 发布类一律拒绝）
+                if (PermissionEngine.decide(name, argsJson, agentRules) == "deny") {
+                    return ToolResult(agentDenyText(name))
+                }
                 if (mcpAllowed || !isWriteTool(name)) {
                     return ToolResult(hub.call(name, argsJson))
                 }
