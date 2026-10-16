@@ -12,6 +12,7 @@
   var Native = w.Native;
   var seq = 0;
   var waiting = {};
+  var _objs = [];
 
   w.__nativeResolve = function (payload) {
     var cb = waiting[payload.id];
@@ -91,6 +92,82 @@
         headers: opt.headers || {},
         body: opt.body || ''
       });
+    },
+
+    /*
+     * 对象注册表 —— 供 App 的「对象」面板读取（GDevelop 那种对象列表）。
+     *
+     * 创建角色 / 敌人 / 墙……时顺手注册：
+     *   var player = Engine.objects.register('Player', sprite, '角色');
+     * 面板会实时列出（名字 / 类型 / 坐标 / 可见性），点一下能在画面上高亮。
+     *
+     * 不注册也能用：面板会自动探测 Phaser / Pixi 的场景树。
+     * 但**自绘 canvas 的游戏只有注册了才看得见** —— 所以推荐都注册。
+     */
+    objects: {
+      register: function (name, obj, kind) {
+        try {
+          var n = String(name);
+          _objs = _objs.filter(function (o) { return o.name !== n; });
+          _objs.push({ name: n, obj: obj, kind: kind || '' });
+        } catch (e) { /* ignore */ }
+        return obj;
+      },
+      remove: function (name) {
+        _objs = _objs.filter(function (o) { return o.name !== String(name); });
+      },
+      clear: function () { _objs = []; },
+      list: function () {
+        return _objs.map(function (o) {
+          var t = o.obj;
+          var type = o.kind;
+          if (!type && t) {
+            type = (t.constructor && t.constructor.name) || '';
+            if (typeof t.type === 'string') type = t.type;
+          }
+          return {
+            name: o.name,
+            type: String(type || ''),
+            x: (t && typeof t.x === 'number') ? Math.round(t.x) : null,
+            y: (t && typeof t.y === 'number') ? Math.round(t.y) : null,
+            visible: !t || t.visible !== false
+          };
+        });
+      },
+      highlight: function (name, ms) {
+        var hit = null;
+        try {
+          for (var i = 0; i < _objs.length; i++) {
+            if (_objs[i].name === String(name)) { hit = _objs[i].obj; break; }
+          }
+        } catch (e) { return false; }
+        if (!hit) return false;
+        var dur = ms || 1500;
+        try {
+          // 自绘游戏可以自己实现 highlight(ms)：注册表优先用它（比如画一个圈）
+          if (typeof hit.highlight === 'function') { hit.highlight(dur); return true; }
+          if (typeof hit.setTint === 'function') {
+            var old = (typeof hit.tint !== 'undefined') ? hit.tint : null;
+            hit.setTint(0xffd54f);
+            setTimeout(function () {
+              try {
+                if (old === null || old === undefined) {
+                  if (typeof hit.clearTint === 'function') hit.clearTint();
+                  else hit.setTint(0xffffff);
+                } else { hit.setTint(old); }
+              } catch (e) { /* ignore */ }
+            }, dur);
+            return true;
+          }
+          if (hit.style) {
+            var o2 = hit.style.outline;
+            hit.style.outline = '3px solid #ffd54f';
+            setTimeout(function () { hit.style.outline = o2 || ''; }, dur);
+            return true;
+          }
+        } catch (e) { /* ignore */ }
+        return false;
+      }
     }
   };
 

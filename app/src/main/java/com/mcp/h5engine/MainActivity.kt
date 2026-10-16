@@ -212,6 +212,19 @@ private val GAME_MUTE_BOOTSTRAP_JS: String =
  *
  * 只动 text/html，其它资源（js/css/图片/音频）原样透传，别把它们也读进内存。
  */
+/**
+ * 对象面板里的一条对象（从运行中的游戏实时读取）。
+ * ui=true 表示这是网页界面元素（DOM），不是游戏实体。
+ */
+private data class EditorObj(
+    val name: String,
+    val type: String,
+    val x: Int?,
+    val y: Int?,
+    val visible: Boolean,
+    val ui: Boolean
+)
+
 private class GameMuteInjectHandler(
     private val inner: WebViewAssetLoader.PathHandler
 ) : WebViewAssetLoader.PathHandler {
@@ -324,6 +337,17 @@ class MainActivity : AppCompatActivity(), GameUi {
     private lateinit var modelBtn: TextView
     /** 智能体胶囊（OpenCode 模式）；buildChatPage 才会创建，所以可空 */
     private var agentBtn: TextView? = null
+
+    // ==================== 对象面板（GDevelop 式编辑器）====================
+    /** 面板根容器（展开/收起） */
+    private var objPanelRoot: LinearLayout? = null
+    private var objListBox: LinearLayout? = null
+    private var objBarText: TextView? = null
+    private var objSearch: EditText? = null
+    /** 最近一次实时读取到的对象清单 */
+    private val objItems = mutableListOf<EditorObj>()
+    /** 数据来源：registry / phaser / pixi / 空 */
+    private var objEngine = ""
     private lateinit var attachInfo: TextView
     private lateinit var titleTv: TextView
     private lateinit var subTv: TextView
@@ -1192,6 +1216,245 @@ class MainActivity : AppCompatActivity(), GameUi {
             web.scaleY = previewZoom
         }
         toast("画面缩放 ${(previewZoom * 100).toInt()}%")
+    }
+
+    // ==================== 对象面板（GDevelop 式编辑器）====================
+
+    /**
+     * 对象面板：在游戏页面里**实时**枚举对象。
+     * 顺序：① Engine.objects 注册表（推荐，自绘游戏也能用）→ ② Phaser 场景树
+     *       → ③ Pixi 舞台 → ④ DOM 界面元素。
+     * 返回 JSON 字符串，App 侧用 jsString() 解码后渲染。
+     */
+    private val OBJ_INTROSPECT_JS = """
+(function () {
+  function t(o) { try { return (o && o.constructor && o.constructor.name) || ''; } catch (e) { return ''; } }
+  var out = { engine: '', objects: [], ui: [] };
+  try {
+    var E = window.Engine && window.Engine.objects;
+    if (E && E.list) {
+      var r = E.list();
+      if (r && r.length) { out.engine = 'registry'; out.objects = r; }
+    }
+    if (!out.objects.length && window.game && window.game.scene && window.game.scene.scenes) {
+      out.engine = 'phaser';
+      window.game.scene.scenes.forEach(function (s) {
+        var key = (s.scene && s.scene.key) || '';
+        var list = (s.children && s.children.list) ? s.children.list : [];
+        list.forEach(function (c) {
+          if (!c) return;
+          out.objects.push({
+            name: c.name || (t(c) + (c.depth != null ? '#' + c.depth : '')),
+            type: String(c.type || t(c)),
+            x: Math.round(c.x || 0), y: Math.round(c.y || 0),
+            visible: c.visible !== false, scene: key
+          });
+        });
+      });
+    }
+    if (!out.objects.length && window.app && window.app.stage && window.app.stage.children) {
+      out.engine = 'pixi';
+      window.app.stage.children.forEach(function (c) {
+        if (!c) return;
+        out.objects.push({
+          name: c.name || t(c), type: t(c),
+          x: Math.round(c.x || 0), y: Math.round(c.y || 0),
+          visible: c.visible !== false
+        });
+      });
+    }
+    var els = document.querySelectorAll('[id]');
+    for (var i = 0; i < els.length && i < 80; i++) {
+      var e = els[i];
+      if (!e.id) continue;
+      if (e.tagName === 'SCRIPT' || e.tagName === 'STYLE' || e.tagName === 'CANVAS') continue;
+      out.ui.push({ name: e.id, type: e.tagName.toLowerCase() });
+    }
+  } catch (err) { out.error = String((err && err.message) || err); }
+  return JSON.stringify(out);
+})()
+"""
+
+    /** 展开 / 收起对象面板；打开时自动刷新一次 */
+    private fun toggleEditorObjects(show: Boolean? = null) {
+        val p = objPanelRoot ?: return
+        val want = show ?: (p.visibility != View.VISIBLE)
+        p.visibility = if (want) View.VISIBLE else View.GONE
+        if (want) {
+            refreshEditorObjects()
+        } else {
+            runCatching { objSearch?.clearFocus() }
+        }
+    }
+
+    /** 从预览页实时读一份对象清单（异步回来渲染） */
+    private fun refreshEditorObjects() {
+        objBarText?.text = "对象 · 读取中…"
+        runCatching {
+            web.evaluateJavascript(OBJ_INTROSPECT_JS) { v ->
+                parseEditorObjects(jsString(v))
+                renderEditorObjects()
+                val n = objItems.count { !it.ui }
+                val src = when (objEngine) {
+                    "registry" -> "已注册"
+                    "phaser" -> "Phaser"
+                    "pixi" -> "Pixi"
+                    else -> "未读到"
+                }
+                objBarText?.text = "对象 · $n 个（$src）"
+            }
+        }
+    }
+
+    private fun parseEditorObjects(json: String?) {
+        objItems.clear()
+        objEngine = ""
+        if (json.isNullOrBlank()) return
+        val o = runCatching { org.json.JSONObject(json) }.getOrNull() ?: return
+        objEngine = o.optString("engine", "")
+        val arr = o.optJSONArray("objects")
+        if (arr != null) {
+            for (i in 0 until arr.length()) {
+                val it = arr.optJSONObject(i) ?: continue
+                objItems.add(
+                    EditorObj(
+                        name = it.optString("name", "?").ifBlank { "?" },
+                        type = it.optString("type", ""),
+                        x = if (it.has("x") && !it.isNull("x")) it.optInt("x") else null,
+                        y = if (it.has("y") && !it.isNull("y")) it.optInt("y") else null,
+                        visible = it.optBoolean("visible", true),
+                        ui = false
+                    )
+                )
+            }
+        }
+        val uis = o.optJSONArray("ui")
+        if (uis != null) {
+            for (i in 0 until uis.length()) {
+                val it = uis.optJSONObject(i) ?: continue
+                objItems.add(
+                    EditorObj(it.optString("name", "?"), it.optString("type", ""), null, null, true, true)
+                )
+            }
+        }
+    }
+
+    private fun renderEditorObjects() {
+        val box = objListBox ?: return
+        val f = objSearch?.text?.toString()?.trim().orEmpty()
+        box.removeAllViews()
+        val objs = objItems.filter { !it.ui && (f.isEmpty() || it.name.contains(f, true) || it.type.contains(f, true)) }
+        val uis = objItems.filter { it.ui && (f.isEmpty() || it.name.contains(f, true)) }
+        if (objs.isEmpty() && uis.isEmpty()) {
+            box.addView(TextView(this).apply {
+                text = if (objEngine.isEmpty())
+                    "没有读到对象。\n· 自绘 canvas 游戏：让 AI 创建实体时用 " +
+                        "Engine.objects.register('Player', sprite) 注册，这里就会出现\n" +
+                        "· Phaser / Pixi 游戏会自动读取场景树"
+                else "没有匹配「$f」的对象"
+                textSize = 12f
+                setTextColor(pal.faint)
+                setPadding(dp(8), dp(14), dp(8), dp(8))
+                setLineSpacing(dp(3).toFloat(), 1f)
+            })
+            return
+        }
+        if (objs.isNotEmpty()) {
+            box.addView(objGroupLabel("场景对象（" + (if (objEngine.isNotEmpty()) objEngine else "engine") + "）"))
+            objs.forEach {
+                box.addView(objRow(it), LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(5) })
+            }
+        }
+        if (uis.isNotEmpty()) {
+            box.addView(objGroupLabel("界面元素"))
+            uis.forEach {
+                box.addView(objRow(it), LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(5) })
+            }
+        }
+    }
+
+    private fun objGroupLabel(t: String) = TextView(this).apply {
+        text = t
+        textSize = 11f
+        letterSpacing = 0.08f
+        typeface = MEDIUM
+        setTextColor(pal.sub)
+        setPadding(dp(8), dp(12), dp(8), dp(4))
+    }
+
+    private fun objRow(o: EditorObj): View {
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(10), dp(10), dp(10), dp(10))
+            background = pressable(roundCard(this@MainActivity, pal.card, pal.border, 10), 0x14000000)
+            setOnClickListener { highlightEditorObject(o.name, o.ui) }
+        }
+        row.addView(TextView(this).apply {
+            text = if (o.visible) "●" else "○"
+            textSize = 9f
+            setTextColor(if (o.visible) pal.accent else pal.faint)
+            setPadding(0, 0, dp(8), 0)
+        })
+        row.addView(TextView(this).apply {
+            text = o.name
+            textSize = 13f
+            setTextColor(pal.text)
+            maxLines = 1
+            ellipsize = android.text.TextUtils.TruncateAt.END
+        }, LinearLayout.LayoutParams(0, -2, 1f))
+        val meta = buildString {
+            if (o.type.isNotBlank()) append(o.type)
+            if (o.x != null && o.y != null) {
+                if (isNotEmpty()) append(" · ")
+                append(o.x).append(",").append(o.y)
+            }
+        }
+        if (meta.isNotBlank()) {
+            row.addView(TextView(this).apply {
+                text = meta
+                textSize = 10.5f
+                setTextColor(pal.faint)
+                maxLines = 1
+                setPadding(dp(8), 0, 0, 0)
+            })
+        }
+        return row
+    }
+
+    /**
+     * 让预览里的某个对象闪一下（金色染色 / 描边），1500ms 后自动还原。
+     * 依次尝试：Engine.objects 注册表 → Phaser 场景树 → Pixi 舞台；界面元素用 DOM 描边。
+     */
+    private fun highlightEditorObject(name: String, ui: Boolean) {
+        val q = org.json.JSONObject.quote(name)
+        val js =
+            if (ui) {
+                "(function(){try{var el=document.getElementById($q);if(!el)return false;" +
+                    "var o=el.style.outline;el.style.outline='3px solid #ffd54f';" +
+                    "setTimeout(function(){el.style.outline=o||'';},1500);return true;}catch(e){return false;}})()"
+            } else {
+                "(function(){try{var n=$q;" +
+                    "var E=window.Engine&&window.Engine.objects;" +
+                    "if(E&&E.highlight&&E.highlight(n,1500))return true;" +
+                    "var hit=null;" +
+                    "if(window.game&&window.game.scene&&window.game.scene.scenes){" +
+                    "window.game.scene.scenes.forEach(function(s){var l=(s.children&&s.children.list)?s.children.list:[];" +
+                    "l.forEach(function(c){if(!hit&&c&&c.name===n)hit=c;});});}" +
+                    "if(!hit&&window.app&&window.app.stage&&window.app.stage.children){" +
+                    "window.app.stage.children.forEach(function(c){if(!hit&&c&&c.name===n)hit=c;});}" +
+                    "if(!hit)return false;" +
+                    "if(typeof hit.setTint==='function'){var old=(typeof hit.tint!=='undefined')?hit.tint:null;" +
+                    "hit.setTint(0xffd54f);setTimeout(function(){try{if(old===null||old===undefined){" +
+                    "if(typeof hit.clearTint==='function')hit.clearTint();else hit.setTint(0xffffff);}" +
+                    "else{hit.setTint(old);}}catch(e){}},1500);return true;}" +
+                    "return false;}catch(e){return false;}})()"
+            }
+        runCatching {
+            web.evaluateJavascript(js) { v ->
+                if (v == "true") toast("已高亮「" + name + "」") else toast("这个对象没有可直接高亮的画布实体")
+            }
+        }
     }
 
     @Suppress("DEPRECATION")
@@ -5048,6 +5311,8 @@ class MainActivity : AppCompatActivity(), GameUi {
         bar.addView(iconButton(this, pal, "camera", sizeDp = 32, marginStartDp = 5) { attachScreenshot() })
         // 手绘全屏图标：把预览容器整个搬进全屏 Dialog（同一个 WebView 实例，游戏状态不丢）
         bar.addView(iconButton(this, pal, "fullscreen", sizeDp = 32, marginStartDp = 5) { showFullPreview() })
+        // 对象面板开关（GDevelop 式的「对象」列表，实时读运行中的游戏）
+        bar.addView(iconButton(this, pal, "layers", sizeDp = 32, marginStartDp = 5) { toggleEditorObjects() })
 
         @SuppressLint("SetJavaScriptEnabled")
         val w = WebView(this).apply { setBackgroundColor(pal.bg) }
@@ -5058,6 +5323,79 @@ class MainActivity : AppCompatActivity(), GameUi {
         page.addView(View(this).apply { setBackgroundColor(pal.border) },
             LinearLayout.LayoutParams(-1, dp(1)))
         page.addView(wrap, LinearLayout.LayoutParams(-1, 0, 1f))
+
+        // ===== 对象面板（GDevelop 式）=====
+        // 收起时是一条细条（点了就展开并实时读取）；展开后是「搜索 + 对象列表」。
+        // 列表内容来自**运行中的游戏**：Engine.objects 注册表 → Phaser/Pixi 场景树 → DOM 界面元素。
+        val objBar = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(12), dp(7), dp(12), dp(7))
+            setBackgroundColor(pal.navBg)
+            setOnClickListener { toggleEditorObjects() }
+        }
+        objBar.addView(iconView(this, pal, "layers", 14, pal.sub), LinearLayout.LayoutParams(dp(20), dp(20)))
+        objBarText = TextView(this).apply {
+            text = "对象 · 点开实时读取"
+            textSize = 12f
+            setTextColor(pal.sub)
+            setPadding(dp(7), 0, 0, 0)
+        }
+        objBar.addView(objBarText, LinearLayout.LayoutParams(0, -2, 1f))
+        objBar.addView(TextView(this).apply {
+            text = "▴"
+            textSize = 12f
+            setTextColor(pal.faint)
+        })
+
+        val objPanel = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(pal.navBg)
+            visibility = View.GONE
+        }
+        objPanelRoot = objPanel
+        val objHead = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(12), dp(8), dp(10), dp(4))
+        }
+        objSearch = EditText(this).apply {
+            hint = "搜索对象"
+            textSize = 13f
+            setTextColor(pal.text)
+            setHintTextColor(pal.faint)
+            setPadding(dp(12), dp(9), dp(12), dp(9))
+            includeFontPadding = false
+            setSingleLine()
+            background = roundCard(this@MainActivity, pal.cardAlt, pal.border, 10)
+            addTextChangedListener(object : android.text.TextWatcher {
+                override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+                override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+                override fun afterTextChanged(s: android.text.Editable?) { renderEditorObjects() }
+            })
+        }
+        objHead.addView(objSearch, LinearLayout.LayoutParams(0, -2, 1f))
+        objHead.addView(
+            iconButton(this, pal, "refresh", sizeDp = 30, marginStartDp = 6) { refreshEditorObjects() },
+            LinearLayout.LayoutParams(dp(30), dp(30))
+        )
+        objHead.addView(
+            iconButton(this, pal, "close", sizeDp = 30, marginStartDp = 4) { toggleEditorObjects(false) },
+            LinearLayout.LayoutParams(dp(30), dp(30))
+        )
+        objPanel.addView(objHead)
+        val objList = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(8), 0, dp(8), dp(4))
+        }
+        objListBox = objList
+        objPanel.addView(
+            ScrollView(this).apply { addView(objList) },
+            LinearLayout.LayoutParams(-1, dp(240))
+        )
+        page.addView(objBar, LinearLayout.LayoutParams(-1, -2))
+        page.addView(objPanel, LinearLayout.LayoutParams(-1, -2))
+
         previewWrapHolder = wrap
         previewSlot = page
         return page

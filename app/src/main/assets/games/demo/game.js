@@ -45,6 +45,15 @@
     over: false
   };
 
+  /* ---------- 对象面板（App 的「对象」列表）能看到的对象 ----------
+   * 自绘 canvas 游戏没有场景树，注册一下对象面板才读得到。
+   * 顺带给 Player 一个 highlight 方法：面板里点它会画个金圈（1.5 秒）。 */
+  var flashUntil = 0;
+  if (window.Engine && Engine.objects) {
+    state.player.highlight = function (ms) { flashUntil = performance.now() + (ms || 1500); };
+    Engine.objects.register('Player', state.player, '角色·圆盘');
+  }
+
   /* ---------- 输入 ---------- */
   function moveTo(x) {
     state.player.tx = Math.max(state.player.r, Math.min(W - state.player.r, x));
@@ -74,14 +83,18 @@
   }
 
   /* ---------- 游戏逻辑 ---------- */
+  var itemSeq = 0;
   function spawn() {
     var r = CONFIG.itemR;
-    state.items.push({
+    var it = {
       x: r + Math.random() * (W - r * 2),
       y: -r * 2,
       r: r,
       hue: Math.random() < 0.15 ? 60 : 150   /* 偶尔来个金色的 */
-    });
+    };
+    it.__name = '方块 ' + (++itemSeq);
+    state.items.push(it);
+    if (window.Engine && Engine.objects) Engine.objects.register(it.__name, it, '掉落物');
   }
 
   var spawnTimer = 0;
@@ -106,12 +119,14 @@
         state.score += (gold ? 50 : 10) + state.combo * 2;
         state.speed = Math.min(7, state.speed + CONFIG.speedUpPerHit);
         burst(it.x, it.y, gold ? '#fbbf24' : '#4ade80');
+        if (window.Engine && Engine.objects && it.__name) Engine.objects.remove(it.__name);
         state.items.splice(i, 1);
         scoreEl.textContent = state.score;
         continue;
       }
 
       if (it.y > H + it.r * 2) {
+        if (window.Engine && Engine.objects && it.__name) Engine.objects.remove(it.__name);
         state.items.splice(i, 1);
         state.combo = 0;
       }
@@ -184,6 +199,15 @@
     ctx.beginPath();
     ctx.arc(state.player.x, state.player.y, state.player.r * 0.5, 0, Math.PI * 2);
     ctx.fill();
+
+    /* 对象面板里点了「Player」之后的金圈（1.5 秒） */
+    if (flashUntil > performance.now()) {
+      ctx.strokeStyle = '#ffd54f';
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.arc(state.player.x, state.player.y, state.player.r + 12, 0, Math.PI * 2);
+      ctx.stroke();
+    }
 
     for (var p = 0; p < state.particles.length; p++) {
       var q = state.particles[p];

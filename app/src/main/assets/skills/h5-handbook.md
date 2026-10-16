@@ -269,3 +269,29 @@ const s = JSON.parse(localStorage.getItem('save1') || 'null');
 - [ ] 音频在首次交互后才播
 - [ ] `game_validate` 跑过，没有真实报错
 - [ ] `game_shot` 看过画面，不是白屏 / 错位
+
+---
+
+## 8. 对象注册（App 的「对象」面板）
+
+App 预览页底部有一个「对象」面板（类似 GDevelop 的对象列表），**实时**读取运行中的游戏。
+它按这个顺序找对象：
+
+1. `Engine.objects` 注册表（**推荐**，自绘 canvas 游戏只有注册了才看得见）
+2. Phaser / Pixi 的**场景树** —— 用这两个引擎的自动就有，不用额外做
+
+**约定：创建角色 / 敌人 / 掉落物 / 墙这类实体时，顺手注册一下：**
+
+```js
+// 注册（obj 带 x / y / visible 就能在面板里显示坐标和可见性）
+Engine.objects.register('Player', state.player, '角色');
+// 实体不要了（被销毁 / 出屏），同步移除
+Engine.objects.remove('Player');
+// 想支持「面板里点一下高亮」，给对象一个 highlight(ms) 方法
+state.player.highlight = function (ms) { flashUntil = performance.now() + (ms || 1500); };
+```
+
+要点：
+- 名字用**稳定、可读**的字符串（`Player` / `Enemy 1` / `墙-左`），别用随机 id
+- `register` 用同名重复注册 = 覆盖，不会堆两份
+- 高亮是锦上添花：Phaser/Pixi 精灵自动有（染色）；自绘对象实现 `highlight(ms)` 即可
