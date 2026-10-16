@@ -255,30 +255,51 @@ object AiProviders {
         /*
          * OpenCode Go：$10/月订阅制（Go Plus $40），额度只在 /inference/go 这组端点上生效。
          *
-         * 注意两点（都踩过）：
+         * 注意（都踩过）：
          *  1. 网关强制要求 `x-opencode-session` 请求头，少了直接 400 MissingSessionID ——
          *     AiClient 已按域名自动补，这里不用配。
          *  2. 千万别把 Base URL 写成 /inference/openai/v1：那是**按量付费**入口，
          *     会用「余额不足」把请求打回来（跟订阅无关）。必须带 /go/。
-         *  3. deepseek 系模型还要求在控制台把工作区 Privacy/Region 设成 Global，
+         *  3. 同一个 Base URL 后面挂着三种协议，**按模型自动分流**（AiClient.routeOf，
+         *     37 个模型逐一实测）：Claude 系与 minimax-m2.7 走 Anthropic 的 /messages，
+         *     其余全部走 /chat/completions。换个模型不用换预设。
+         *  4. deepseek 系模型还要求在控制台把工作区 Privacy/Region 设成 Global，
          *     否则报 "requires Global regions"；其它模型不受影响。
+         *  5. 列表里只放本网络环境实测可用的。gpt-*/grok-*/muse-spark-* 走 Responses 协议
+         *     （客户端暂未实现）；几个 contributor/free 模型对当前地区 403，所以不入列。
          */
         Provider(
             "opencode-go", "OpenCode Go（订阅制）", "https://opencode.ai/inference/go/v1",
             keyHint = "oc_sk-...", group = "国外", editableBaseUrl = true,
             models = listOf(
-                ModelSpec("kimi-k3", "Kimi K3"),
-                ModelSpec("kimi-k2.7-code", "Kimi K2.7 Code（写代码）"),
+                // —— 通用 / 编程 ——
                 ModelSpec("glm-5.3", "GLM-5.3"),
                 ModelSpec("glm-5.3-flash", "GLM-5.3 Flash（快）"),
+                ModelSpec("kimi-k3", "Kimi K3"),
+                ModelSpec("kimi-k2.7-code", "Kimi K2.7 Code（写代码）"),
+                ModelSpec("kimi-k2.6", "Kimi K2.6"),
+                ModelSpec("deepseek-v4-pro", "DeepSeek V4 Pro（需控制台设 Global）"),
                 ModelSpec("deepseek-v4.1-flash", "DeepSeek V4.1 Flash（需控制台设 Global）"),
+                ModelSpec("qwen3.8-max", "Qwen3.8 Max"),
+                ModelSpec("qwen3.8-flash", "Qwen3.8 Flash（快）"),
+                ModelSpec("qwen3.7-max", "Qwen3.7 Max"),
+                ModelSpec("minimax-m3", "MiniMax M3"),
+                ModelSpec("minimax-m2.7", "MiniMax M2.7（走 Messages 协议）"),
+                // —— Claude（Anthropic 协议，客户端已自动分流）——
+                ModelSpec("claude-haiku-5-5", "Claude Haiku 5.5（走 Messages 协议）"),
+                // —— 快 / 轻 ——
                 ModelSpec("mimo-v2.6-flash", "MiMo V2.6 Flash（快）"),
-                ModelSpec("minimax-m2.7", "MiniMax M2.7"),
+                ModelSpec("mimo-v2.6-pro", "MiMo V2.6 Pro"),
+                ModelSpec("glm-5.1", "GLM-5.1"),
+                ModelSpec("mimo-v2.5-pro", "MiMo V2.5 Pro"),
+                ModelSpec("minimax-m2.5", "MiniMax M2.5"),
+                // —— 新 / 实验 ——
                 ModelSpec("longcat-2.0", "LongCat 2.0"),
-                ModelSpec("qwen3.8-flash", "Qwen3.8 Flash"),
-                ModelSpec("claude-haiku-5-5", "Claude Haiku 5.5"),
-                ModelSpec("grok-4.7", "Grok 4.7"),
-                ModelSpec("gpt-6-luna", "GPT-6 Luna")
+                ModelSpec("longcat-2.5-preview-free", "LongCat 2.5 Preview（免费）"),
+                ModelSpec("hy4-preview", "HY4 Preview"),
+                ModelSpec("space-bunny", "Space Bunny"),
+                ModelSpec("omen-alpha", "Omen Alpha"),
+                ModelSpec("step-5-preview", "Step-5 Preview")
             )
         ),
 

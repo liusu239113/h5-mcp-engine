@@ -93,12 +93,36 @@ class AiClient(private val cfg: ProviderConfig) {
         runCatching { inflight?.cancel() }
     }
 
+    /** 当前配置是不是走 OpenCode 的推理网关（订阅 Go / 按量付费都算） */
+    private val viaOpenCode: Boolean
+        get() = cfg.provider.id == "opencode-go" ||
+            cfg.baseUrl.contains("opencode.ai") || cfg.provider.baseUrl.contains("opencode.ai")
+
+    /**
+     * 实际生效的协议。
+     *
+     * OpenCode 把多种协议的模型挂在**同一个 Base URL** 后面（订阅只有一个目录、一套 Key）：
+     *  - chat 系（kimi / glm / deepseek / mimo / minimax-m2.x / longcat…）走 /chat/completions；
+     *  - Claude / Qwen / minimax-m3 只认 Anthropic 的 /messages。
+     * 之前不分模型统一按预设协议发，选到 Claude 就被网关 400
+     * 「ModelProtocolUnsupported」——用户看到的是「这个模型坏了」，其实只是协议不对。
+     * 这里按模型名自动纠正，换模型不用再换预设。
+     */
+    private val effProtocol: Protocol
+        get() = protoOverride ?: if (viaOpenCode) routeOf(cfg.model) else cfg.provider.protocol
+
+    /**
+     * 协议兜底：万一路由表没覆盖到某个新模型，网关回的原文是
+     * `ModelProtocolUnsupported` —— 那就换另一条协议原样重发一次（见 chat() 的 ④）。
+     */
+    private var protoOverride: Protocol? = null
+
     private val endpoint: String
         get() {
             val base = cfg.baseUrl.trim()
                 .removeSuffix("/")
                 .ifBlank { cfg.provider.baseUrl.trimEnd('/') }
-            return when (cfg.provider.protocol) {
+            return when (effProtocol) {
                 Protocol.OPENAI -> "$base/chat/completions"
                 Protocol.ANTHROPIC -> "$base/messages"
                 Protocol.GEMINI -> "$base/models/${cfg.model}:generateContent"
@@ -196,6 +220,7 @@ class AiClient(private val cfg: ProviderConfig) {
 
     fun chat(rawHistory: List<ChatMsg>, tools: List<JSONObject>): ChatReply {
         aborted = false
+        protoOverride = null   // 每次对话重新按路由表选协议，上一轮的兜底结果不残留
         // 顺序有讲究：
         //   ① 按条数裁窗口 → ② 清洗 tool 配对（裁剪会把某个 assistant(tool_calls) 的响应截到
         //   窗口外，不洗的话服务商直接 400）→ ③ 长工具结果压占位 → ④ 旧截图清掉。
@@ -206,7 +231,7 @@ class AiClient(private val cfg: ProviderConfig) {
         // 设置里可以直接关掉工具定义：50+ 个工具的 JSON 是 token 大头，
         // 免费档模型（Groq 8000 TPM 这类）关掉立刻就能用。
         val toolsUse = if (cfg.sendTools) tools else emptyList()
-        val base = when (cfg.provider.protocol) {
+        val base = when (effProtocol) {
             Protocol.OPENAI -> bodyOpenAi(history, toolsUse)
             Protocol.ANTHROPIC -> bodyAnthropic(history, toolsUse)
             Protocol.GEMINI -> bodyGemini(history, toolsUse)
@@ -222,7 +247,8 @@ class AiClient(private val cfg: ProviderConfig) {
         var direct = false
 
         var last: ChatReply = ChatReply(null, emptyList(), "未发起请求")
-        for (attempt in 1..4) {
+        var protoFlipped = false
+        for (attempt in 1..5) {
             val r = once(
                 body, direct,
                 when {
@@ -243,6 +269,20 @@ class AiClient(private val cfg: ProviderConfig) {
             if (!direct && !directTried && systemProxyInUse()) {
                 directTried = true
                 direct = true
+                continue
+            }
+            // ④ 协议发错了（新模型不在路由表里 / 网关换了归属）：换另一条协议重发一次。
+            //    OpenCode 网关对「模型 + 协议不匹配」的原文就是 ModelProtocolUnsupported。
+            if (viaOpenCode && !protoFlipped && err.contains("ModelProtocolUnsupported")) {
+                protoFlipped = true
+                protoOverride =
+                    if (effProtocol == Protocol.OPENAI) Protocol.ANTHROPIC else Protocol.OPENAI
+                body = when (effProtocol) {
+                    Protocol.OPENAI -> bodyOpenAi(history, toolsUse)
+                    Protocol.ANTHROPIC -> bodyAnthropic(history, toolsUse)
+                    Protocol.GEMINI -> bodyGemini(history, toolsUse)
+                }
+                runCatching { Thread.sleep(300L) }
                 continue
             }
             // ②③ 请求体积超限（413 / TPM / 上下文超长）：越试越小。
@@ -368,7 +408,7 @@ class AiClient(private val cfg: ProviderConfig) {
         val o = JSONObject(body.toString())
         o.remove("tools")
         o.remove("tool_choice")
-        when (cfg.provider.protocol) {
+        when (effProtocol) {
             Protocol.OPENAI, Protocol.ANTHROPIC -> o.put("max_tokens", 512)
             Protocol.GEMINI -> {}
         }
@@ -392,7 +432,7 @@ class AiClient(private val cfg: ProviderConfig) {
             for (i in (msgs.length() - 6).coerceAtLeast(0) until msgs.length()) arr.put(msgs.get(i))
             o.put("messages", arr)
         }
-        when (cfg.provider.protocol) {
+        when (effProtocol) {
             Protocol.OPENAI, Protocol.ANTHROPIC -> o.put("max_tokens", 256)
             Protocol.GEMINI -> {}
         }
@@ -404,7 +444,7 @@ class AiClient(private val cfg: ProviderConfig) {
         // 服务商不认 SSE 时下面会自动退回非流式整段读，但那是**把整个请求体去掉 stream 重发一遍**：
         // 每步都白付一次 token 和时间。所以一家试出来不支持就记下来，同一个 Base URL 不再试。
         val streamKey = cfg.provider.id + "|" + cfg.baseUrl
-        val wantStream = cfg.provider.protocol == Protocol.OPENAI &&
+        val wantStream = effProtocol == Protocol.OPENAI &&
             !body.has("stream") && !streamKnownOff(streamKey)
         if (wantStream) {
             body.put("stream", true)
@@ -418,11 +458,17 @@ class AiClient(private val cfg: ProviderConfig) {
         val rb = Request.Builder().url(endpoint)
             .post(body.toString().toRequestBody("application/json".toMediaType()))
 
-        when (cfg.provider.protocol) {
+        when (effProtocol) {
             Protocol.OPENAI ->
                 rb.header("Authorization", "Bearer ${cfg.apiKey}")
             Protocol.ANTHROPIC ->
-                rb.header("x-api-key", cfg.apiKey).header("anthropic-version", "2023-06-01")
+                // OpenCode 网关的鉴权统一走 Bearer，不认官方的 x-api-key；
+                // 两边都要带 anthropic-version，缺了被当非法请求。
+                if (viaOpenCode)
+                    rb.header("Authorization", "Bearer ${cfg.apiKey}")
+                        .header("anthropic-version", "2023-06-01")
+                else
+                    rb.header("x-api-key", cfg.apiKey).header("anthropic-version", "2023-06-01")
             Protocol.GEMINI ->
                 rb.header("x-goog-api-key", cfg.apiKey)
         }
@@ -509,7 +555,7 @@ class AiClient(private val cfg: ProviderConfig) {
                     runCatching {
                         android.util.Log.i(
                             "hexoraAi",
-                            "proto=" + cfg.provider.protocol + " model=" + cfg.model +
+                            "proto=" + effProtocol + " model=" + cfg.model +
                                 " len=" + text.length +
                                 " reasoningLike=" + (text.contains("reasoning") ||
                                 text.contains("\"thinking\"")) +
@@ -529,7 +575,7 @@ class AiClient(private val cfg: ProviderConfig) {
     /** 发一条极短消息，用来验证 Key / Base URL / 模型名是否可用 */
     fun test(): String {
         val started = System.currentTimeMillis()
-        val body = when (cfg.provider.protocol) {
+        val body = when (effProtocol) {
             Protocol.OPENAI -> JSONObject()
                 .put("model", cfg.model)
                 .put("temperature", 0.0)
@@ -580,6 +626,26 @@ class AiClient(private val cfg: ProviderConfig) {
          * 稳定即可 —— 不需要每次请求都换，换了反而让缓存失效。
          */
         val OPENCODE_SESSION_ID: String = UUID.randomUUID().toString().replace("-", "")
+
+        /**
+         * OpenCode 网关的「模型 → 协议」路由（37 个模型逐一实测过，2026-10）。
+         *
+         * 同一个 Base URL 后面其实挂着三种协议，按模型分流；
+         * 发错协议的原文报错是 `ModelProtocolUnsupported`（chat() 里还有一次自动换协议兜底）。
+         *  - **Claude 系、minimax-m2.7** → Anthropic Messages（/messages）
+         *  - gpt-* / grok-* / muse-spark-* → OpenAI Responses（/responses，客户端暂未实现，不放预设）
+         *  - 其余全部（含 qwen / minimax-m3 / kimi / glm / deepseek / mimo / hy / longcat / bunny…）→ chat/completions
+         *
+         * 实测反直觉的两条：minimax-m2.7 只认 Messages，minimax-m3 只认 chat —— 别按家族猜。
+         */
+        fun routeOf(model: String): Protocol {
+            val m = model.lowercase()
+            return when {
+                m.startsWith("claude") -> Protocol.ANTHROPIC
+                m == "minimax-m2.7" -> Protocol.ANTHROPIC
+                else -> Protocol.OPENAI
+            }
+        }
 
         // ==================== 连接复用 ====================
 
@@ -1318,7 +1384,7 @@ class AiClient(private val cfg: ProviderConfig) {
 
     // ======================= 响应解析 =======================
 
-    private fun parse(raw: String): ChatReply = when (cfg.provider.protocol) {
+    private fun parse(raw: String): ChatReply = when (effProtocol) {
         Protocol.OPENAI -> parseOpenAi(raw)
         Protocol.ANTHROPIC -> parseAnthropic(raw)
         Protocol.GEMINI -> parseGemini(raw)
