@@ -112,6 +112,22 @@ class AiClient(private val cfg: ProviderConfig) {
         get() = protoOverride ?: if (viaOpenCode) routeOf(cfg.model) else cfg.provider.protocol
 
     /**
+     * 这个请求不要带 `temperature`。
+     *
+     * OpenCode 网关上的 Claude 5 系（haiku-5-5 等）已废弃该参数 ——
+     * 带上直接 400：「`temperature` is deprecated for this model」。
+     * 其它模型照常带（温度对写代码的稳定性有意义）。
+     */
+    private val dropTemperature: Boolean
+        get() = viaOpenCode && effProtocol == Protocol.ANTHROPIC
+
+    /** 重试时发现 temperature 被拒 → 本轮后续所有尝试都不带它（兜底其它模型 / 中转） */
+    private var tempRetryDropped = false
+
+    private val noTemperature: Boolean
+        get() = dropTemperature || tempRetryDropped
+
+    /**
      * 协议兜底：万一路由表没覆盖到某个新模型，网关回的原文是
      * `ModelProtocolUnsupported` —— 那就换另一条协议原样重发一次（见 chat() 的 ④）。
      */
@@ -221,6 +237,7 @@ class AiClient(private val cfg: ProviderConfig) {
     fun chat(rawHistory: List<ChatMsg>, tools: List<JSONObject>): ChatReply {
         aborted = false
         protoOverride = null   // 每次对话重新按路由表选协议，上一轮的兜底结果不残留
+        tempRetryDropped = false
         // 顺序有讲究：
         //   ① 按条数裁窗口 → ② 清洗 tool 配对（裁剪会把某个 assistant(tool_calls) 的响应截到
         //   窗口外，不洗的话服务商直接 400）→ ③ 长工具结果压占位 → ④ 旧截图清掉。
@@ -248,7 +265,7 @@ class AiClient(private val cfg: ProviderConfig) {
 
         var last: ChatReply = ChatReply(null, emptyList(), "未发起请求")
         var protoFlipped = false
-        for (attempt in 1..5) {
+        for (attempt in 1..6) {
             val r = once(
                 body, direct,
                 when {
@@ -283,6 +300,22 @@ class AiClient(private val cfg: ProviderConfig) {
                     Protocol.GEMINI -> bodyGemini(history, toolsUse)
                 }
                 runCatching { Thread.sleep(300L) }
+                continue
+            }
+            // ⑤ 参数被废弃（Claude 5 系不收 temperature 之类）：去掉该参数重发一次。
+            //    原文形如「`temperature` is deprecated for this model」。
+            //    预先判断见 noTemperature；这里是兜底 —— 其它模型 / 中转也会这么报。
+            if (!tempRetryDropped && err.contains("temperature") &&
+                (err.contains("deprecated") || err.contains("not supported") ||
+                    err.contains("unsupported") || err.contains("不支持"))
+            ) {
+                tempRetryDropped = true
+                body = when (effProtocol) {
+                    Protocol.OPENAI -> bodyOpenAi(history, toolsUse)
+                    Protocol.ANTHROPIC -> bodyAnthropic(history, toolsUse)
+                    Protocol.GEMINI -> bodyGemini(history, toolsUse)
+                }
+                runCatching { Thread.sleep(200L) }
                 continue
             }
             // ②③ 请求体积超限（413 / TPM / 上下文超长）：越试越小。
@@ -1168,7 +1201,9 @@ class AiClient(private val cfg: ProviderConfig) {
         val out = JSONObject()
             .put("model", cfg.model)
             .put("messages", fixToolPairing(msgs))
-            .put("temperature", cfg.temperature)
+        // temperature：部分新模型（GPT-5 系 / Claude 5 系等）已废弃该参数，
+        // 带上直接 400 —— 见 noTemperature 的说明
+        if (!noTemperature) out.put("temperature", cfg.temperature)
 
         // 输出上限：设置里调（0 = 不发送，交服务商决定）。
         // 注意很多厂商会按 max_tokens 预扣额度，调小它同时能救「余额不足」与「TPM 超限」。
@@ -1205,7 +1240,9 @@ class AiClient(private val cfg: ProviderConfig) {
             .put("messages", msgs)
             // 输出上限：设置里可调；默认 4096（原来硬编码 8192，免费档/小配额模型容易被判超额）
             .put("max_tokens", if (cfg.maxOutTokens > 0) cfg.maxOutTokens else 4096)
-            .put("temperature", cfg.temperature)
+        // temperature：OpenCode 网关上的 Claude 5 系已废弃该参数，
+        // 带上直接 400「`temperature` is deprecated for this model」（见 noTemperature）
+        if (!noTemperature) out.put("temperature", cfg.temperature)
 
         // 提示缓存：系统提示 + 工具清单是一轮任务里**逐字不变**的前缀，但每一步都要重发。
         // 打上 cache_control 之后，第 2 步起这段按「缓存命中」计费（便宜一个数量级），
@@ -1452,8 +1489,10 @@ class AiClient(private val cfg: ProviderConfig) {
             .put("contents", contents)
             .put(
                 "generationConfig",
-                JSONObject().put("temperature", cfg.temperature)
-                    .put("maxOutputTokens", if (cfg.maxOutTokens > 0) cfg.maxOutTokens else 4096)
+                JSONObject().apply {
+                    if (!noTemperature) put("temperature", cfg.temperature)
+                    put("maxOutputTokens", if (cfg.maxOutTokens > 0) cfg.maxOutTokens else 4096)
+                }
             )
 
         if (system.isNotBlank()) {
