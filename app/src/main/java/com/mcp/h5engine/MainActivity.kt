@@ -326,6 +326,8 @@ class MainActivity : AppCompatActivity(), GameUi {
     private lateinit var bridge: EngineBridge
     private lateinit var chatPage: LinearLayout
     private lateinit var previewPage: LinearLayout
+    /** 首页（GDevelop 式：项目/模板/AI 配置入口） */
+    private lateinit var homePage: LinearLayout
     // 是 FrameLayout 不是 LinearLayout：发布页里「管理发布」那一层要**叠**在原页面上，
     // 竖排 LinearLayout 会把第二个 MATCH_PARENT 的子视图排到屏幕外面（点不动就是这个原因）
     private lateinit var pubPage: FrameLayout
@@ -338,6 +340,12 @@ class MainActivity : AppCompatActivity(), GameUi {
     /** 智能体胶囊（OpenCode 模式）；buildChatPage 才会创建，所以可空 */
     private var agentBtn: TextView? = null
 
+    // ==================== 编辑器：场景页签（GDevelop 式）====================
+    /** 当前加载的场景 html（默认 index.html） */
+    private var currentScene = "index.html"
+    private var sceneTabsRow: LinearLayout? = null
+    private var sceneTabsWrap: View? = null
+
     // ==================== 对象面板（GDevelop 式编辑器）====================
     /** 面板根容器（展开/收起） */
     private var objPanelRoot: LinearLayout? = null
@@ -348,12 +356,28 @@ class MainActivity : AppCompatActivity(), GameUi {
     private val objItems = mutableListOf<EditorObj>()
     /** 数据来源：registry / phaser / pixi / 空 */
     private var objEngine = ""
+    /** 当前选中的对象（属性面板要用；高亮也靠它） */
+    private var objSelectedName: String? = null
+    /** 对象面板打开时的自动刷新（实时感） */
+    private var objAutoRunning = false
+    private val objAutoRefresh = object : Runnable {
+        override fun run() {
+            if (activeTab == 1 && objPanelRoot?.visibility == View.VISIBLE) {
+                refreshEditorObjects(silent = true)
+                main.postDelayed(this, 2500)
+            } else {
+                objAutoRunning = false
+            }
+        }
+    }
     private lateinit var attachInfo: TextView
     private lateinit var titleTv: TextView
     private lateinit var subTv: TextView
     private lateinit var navChat: LinearLayout
     private lateinit var navPreview: LinearLayout
     private lateinit var navPub: LinearLayout
+    /** 首页（GDevelop 式启动流）的底栏页签 */
+    private lateinit var navHome: LinearLayout
     private lateinit var rootView: LinearLayout
     private lateinit var stage: FrameLayout
     private lateinit var pubScroll: LinearLayout
@@ -677,7 +701,8 @@ class MainActivity : AppCompatActivity(), GameUi {
 
         setupWebView()
         buildPublishPage()
-        showTab(0)
+        // GDevelop 式启动流：打开 App 先落**首页**（选项目/新建/模板/AI 配置），而不是对话页
+        showTab(3)
 
         refreshHeader()
         openGame(currentGame)
@@ -917,6 +942,7 @@ class MainActivity : AppCompatActivity(), GameUi {
         stage = FrameLayout(this)
         chatPage = buildChatPage()
         previewPage = buildPreviewPage()
+        homePage = buildHomePage()
 
         // ⚠️ 必须是 FrameLayout，不能是 LinearLayout。
         // 「管理发布」那一层是**叠**在原发布页上面的，两层都是 height=MATCH_PARENT：
@@ -931,6 +957,7 @@ class MainActivity : AppCompatActivity(), GameUi {
         stage.addView(chatPage, FrameLayout.LayoutParams(-1, -1))
         stage.addView(previewPage, FrameLayout.LayoutParams(-1, -1))
         stage.addView(pubPage, FrameLayout.LayoutParams(-1, -1))
+        stage.addView(homePage, FrameLayout.LayoutParams(-1, -1))
     }
 
     // ==================== 底栏 ====================
@@ -980,14 +1007,18 @@ class MainActivity : AppCompatActivity(), GameUi {
         holder.addView(View(this).apply { setBackgroundColor(pal.border) },
             LinearLayout.LayoutParams(-1, dp(1)))
         val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        // GDevelop 式：**首页是一级入口**（选项目/新建→进编辑器），对话是 AI 入口
+        navHome = navItemView("grid", "首页")
         navChat = navItemView("chat", "对话")
-        navPreview = navItemView("fullscreen", "预览")
+        navPreview = navItemView("fullscreen", "编辑器")
         navPub = navItemView("upload", "发布")
+        row.addView(navHome, LinearLayout.LayoutParams(0, -2, 1f))
         row.addView(navChat, LinearLayout.LayoutParams(0, -2, 1f))
         row.addView(navPreview, LinearLayout.LayoutParams(0, -2, 1f))
         row.addView(navPub, LinearLayout.LayoutParams(0, -2, 1f))
         holder.addView(row, LinearLayout.LayoutParams(-1, -2))
 
+        navHome.setOnClickListener { showTab(3) }
         navChat.setOnClickListener { showTab(0) }
         navPreview.setOnClickListener { showTab(1) }
         navPub.setOnClickListener { showTab(2) }
@@ -1128,9 +1159,13 @@ class MainActivity : AppCompatActivity(), GameUi {
         chatPage.visibleIf(tab == 0)
         previewPage.visibleIf(tab == 1)
         pubPage.visibleIf(tab == 2)
+        homePage.visibleIf(tab == 3)
         tintNav(navChat, tab == 0)
         tintNav(navPreview, tab == 1)
         tintNav(navPub, tab == 2)
+        tintNav(navHome, tab == 3)
+        // 首页每次进来都刷新一遍项目列表（新建 / 删除 / 切换后回来要是新的）
+        if (tab == 3) refreshHomeProjects()
         // 声音纪律：预览 WebView 是常驻的（切页只是改 visibility），
         // 不主动静音的话，游戏 BGM / 音效会在「对话」「发布」页一直响下去。
         // 只有停在预览页时才允许发声；切走立刻掐掉。
@@ -1140,11 +1175,8 @@ class MainActivity : AppCompatActivity(), GameUi {
         if (tab != 1) main.postDelayed({ if (activeTab != 1) applyPreviewMute(true) }, 350)
         if (tab == 1) {
             ensurePreviewFresh(true)
-            // 切到预览页 → **自动进全屏**（用户要的：切过来就是铺满整屏、
-            // 右上角留一个「退出全屏」图标；点它才回到普通状态）。
-            // post 一下：等这一帧的可见性切换落定再弹，否则全屏对话框里的
-            // 预览容器尺寸会按旧状态算。
-            main.post { if (activeTab == 1) showFullPreview() }
+            // 注意：GDevelop 式编辑器页**不再自动全屏** —— 页面上有工具栏、场景页签、
+            // 底部五格面板，自动全屏会把它们全盖掉。想全屏用工具栏那个 ⛶ 手动进。
         }
         if (tab == 2) refreshExportRow()
     }
@@ -1275,21 +1307,17 @@ class MainActivity : AppCompatActivity(), GameUi {
 })()
 """
 
-    /** 展开 / 收起对象面板；打开时自动刷新一次 */
+    /** 展开 / 收起对象面板（也走底部五格的统一切换） */
     private fun toggleEditorObjects(show: Boolean? = null) {
         val p = objPanelRoot ?: return
         val want = show ?: (p.visibility != View.VISIBLE)
-        p.visibility = if (want) View.VISIBLE else View.GONE
-        if (want) {
-            refreshEditorObjects()
-        } else {
-            runCatching { objSearch?.clearFocus() }
-        }
+        if (!want) runCatching { objSearch?.clearFocus() }
+        showEditorPanel(if (want) "objects" else null)
     }
 
-    /** 从预览页实时读一份对象清单（异步回来渲染） */
-    private fun refreshEditorObjects() {
-        objBarText?.text = "对象 · 读取中…"
+    /** 从预览页实时读一份对象清单（异步回来渲染）；silent=true 时不闪「读取中」 */
+    private fun refreshEditorObjects(silent: Boolean = false) {
+        if (!silent) objBarText?.text = "对象 · 读取中…"
         runCatching {
             web.evaluateJavascript(OBJ_INTROSPECT_JS) { v ->
                 parseEditorObjects(jsString(v))
@@ -1383,12 +1411,26 @@ class MainActivity : AppCompatActivity(), GameUi {
     }
 
     private fun objRow(o: EditorObj): View {
+        val on = o.name == objSelectedName
         val row = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             setPadding(dp(10), dp(10), dp(10), dp(10))
-            background = pressable(roundCard(this@MainActivity, pal.card, pal.border, 10), 0x14000000)
-            setOnClickListener { highlightEditorObject(o.name, o.ui) }
+            background = pressable(
+                roundCard(
+                    this@MainActivity,
+                    if (on) pal.accentSoft else pal.card,
+                    if (on) pal.accent else pal.border,
+                    10
+                ), 0x14000000
+            )
+            setOnClickListener {
+                // 选中（属性面板会用）+ 画面上闪一下
+                objSelectedName = o.name
+                renderEditorObjects()
+                if (propPanelRoot?.visibility == View.VISIBLE) renderPropPanel()
+                highlightEditorObject(o.name, o.ui)
+            }
         }
         row.addView(TextView(this).apply {
             text = if (o.visible) "●" else "○"
@@ -1453,6 +1495,262 @@ class MainActivity : AppCompatActivity(), GameUi {
         runCatching {
             web.evaluateJavascript(js) { v ->
                 if (v == "true") toast("已高亮「" + name + "」") else toast("这个对象没有可直接高亮的画布实体")
+            }
+        }
+    }
+
+    /**
+     * 保存快照（对位 GDevelop 的「保存」）。
+     *
+     * 把当前项目整体复制到 `<项目>/_snapshots/<时间戳>/`：
+     *   · 让 AI 改代码前点一下 = 有后悔药（改坏了能整个回退）
+     *   · 排除 _snapshots 自身，避免快照套快照
+     * 后台线程复制，完成后报文件数。
+     */
+    private fun snapshotProject() {
+        val src = projDir()
+        val stamp = java.text.SimpleDateFormat("MMdd-HHmmss", java.util.Locale.US).format(java.util.Date())
+        val dst = File(src, "_snapshots/$stamp")
+        if (dst.exists() || !dst.mkdirs()) {
+            toast("快照目录建不了：${dst.absolutePath}")
+            return
+        }
+        toast("正在保存快照…")
+        Thread {
+            var n = 0
+            runCatching {
+                src.walkTopDown()
+                    .onEnter { it.name != "_snapshots" }
+                    .filter { it.isFile }
+                    .forEach { f ->
+                        val rel = f.relativeTo(src)
+                        val out = File(dst, rel.path)
+                        out.parentFile?.mkdirs()
+                        f.copyTo(out, overwrite = true)
+                        n++
+                    }
+            }
+            main.post {
+                toast("已保存快照（$n 个文件）")
+                addSystemLine("保存快照：_snapshots/$stamp（$n 个文件）")
+            }
+        }.start()
+    }
+
+    // ==================== 编辑器底部五格（GDevelop 移动版对位）====================
+    // 对象 / 素材 / 编辑 / 属性 / 图层 —— 全部接真实功能，不做假按钮。
+
+    private var assetPanelRoot: LinearLayout? = null
+    private var assetListBox: LinearLayout? = null
+    private var codePanelRoot: LinearLayout? = null
+    private var codeListBox: LinearLayout? = null
+    private var propPanelRoot: LinearLayout? = null
+    private var propBox: LinearLayout? = null
+    private var layerPanelRoot: LinearLayout? = null
+    private var layerListBox: LinearLayout? = null
+    /** 五格页签（视图 ↔ key），用于选中着色 */
+    private var editorTabViews: List<Pair<LinearLayout, String>> = emptyList()
+
+    private val MEDIA_EXT = listOf(
+        ".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp",
+        ".mp3", ".wav", ".ogg", ".m4a", ".aac", ".flac", ".mp4"
+    )
+    private val CODE_EXT = listOf(".html", ".js", ".css", ".json", ".md", ".ts")
+
+    /**
+     * 底部五格切换：显示选中的面板（其它全收起）；同一个再点一次 = 收起。
+     * key：objects / assets / code / props / layers；null = 全部收起。
+     */
+    private fun showEditorPanel(key: String?) {
+        val panels = listOf(
+            "objects" to objPanelRoot,
+            "assets" to assetPanelRoot,
+            "code" to codePanelRoot,
+            "props" to propPanelRoot,
+            "layers" to layerPanelRoot
+        )
+        val target = panels.firstOrNull { it.first == key }?.second
+        val collapse = key != null && target != null && target.visibility == View.VISIBLE
+        val active = if (collapse) null else key
+        for ((k, p) in panels) {
+            p?.visibility = if (active == k) View.VISIBLE else View.GONE
+        }
+        when (active) {
+            "objects" -> {
+                refreshEditorObjects()
+                startObjAutoRefresh()
+            }
+            "assets" -> renderAssetPanel()
+            "code" -> renderCodePanel()
+            "props" -> renderPropPanel()
+            "layers" -> renderLayerPanel()
+        }
+        tintEditorTabs(active.orEmpty())
+    }
+
+    private fun tintEditorTabs(activeKey: String) {
+        for ((box, key) in editorTabViews) {
+            val on = key == activeKey
+            val color = if (on) pal.accent else pal.sub
+            (box.getChildAt(0) as? ImageView)?.let { iv ->
+                val icon = iv.tag as? String ?: "layers"
+                iv.setImageDrawable(LineIcon(icon, color, dp(16).toFloat()))
+            }
+            (box.getChildAt(1) as? TextView)?.setTextColor(color)
+        }
+    }
+
+    private fun startObjAutoRefresh() {
+        if (objAutoRunning) return
+        objAutoRunning = true
+        main.postDelayed(objAutoRefresh, 2500)
+    }
+
+    /** 空面板的一句提示 */
+    private fun emptyBox(box: LinearLayout, t: String) {
+        box.addView(TextView(this).apply {
+            text = t
+            textSize = 12f
+            setTextColor(pal.faint)
+            setPadding(dp(8), dp(14), dp(8), dp(8))
+            setLineSpacing(dp(3).toFloat(), 1f)
+        })
+    }
+
+    private fun fileSizeText(n: Long): String = when {
+        n >= 1024 * 1024 -> String.format(java.util.Locale.US, "%.1fMB", n / 1048576.0)
+        n >= 1024 -> String.format(java.util.Locale.US, "%.0fKB", n / 1024.0)
+        else -> n.toString() + "B"
+    }
+
+    /** 素材面板：项目里的图片 / 音频 / 视频（排除快照与技能目录） */
+    private fun renderAssetPanel() {
+        val box = assetListBox ?: return
+        box.removeAllViews()
+        val dir = projDir()
+        val files = runCatching {
+            dir.walkTopDown()
+                .onEnter { it.name != "_snapshots" && it.name != "_skills" && it.name != ".git" }
+                .filter { it.isFile && MEDIA_EXT.any { ext -> it.name.endsWith(ext, true) } }
+                .take(150).toList()
+        }.getOrDefault(emptyList())
+        if (files.isEmpty()) {
+            emptyBox(box, "还没有素材。\n· 从「＋附件」加图片 / 音频\n· 或让 AI 生成素材（Maker 生图 / 音效）")
+            return
+        }
+        for (f in files) {
+            val rel = runCatching { f.relativeTo(dir).path }.getOrDefault(f.name)
+            box.addView(
+                homeCard(f.name, rel + " · " + fileSizeText(f.length()), "image") {
+                    copyToClip(rel, "素材路径")
+                },
+                LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(5) }
+            )
+        }
+    }
+
+    /** 编辑面板：项目的代码文件（html / js / css / json / md） */
+    private fun renderCodePanel() {
+        val box = codeListBox ?: return
+        box.removeAllViews()
+        val dir = projDir()
+        val files = runCatching {
+            dir.walkTopDown()
+                .onEnter { it.name != "_snapshots" && it.name != ".git" && it.name != "_skills" && it.name != "_uploads" }
+                .filter { it.isFile && CODE_EXT.any { ext -> it.name.endsWith(ext, true) } }
+                .take(150).toList()
+        }.getOrDefault(emptyList())
+        if (files.isEmpty()) {
+            emptyBox(box, "还没有代码文件 —— 让 AI 先建一个游戏")
+            return
+        }
+        for (f in files) {
+            val rel = runCatching { f.relativeTo(dir).path }.getOrDefault(f.name)
+            box.addView(
+                homeCard(f.name, rel + " · " + fileSizeText(f.length()), "code") {
+                    showCodeViewer(f, rel)
+                },
+                LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(5) }
+            )
+        }
+    }
+
+    /** 只读代码查看器（编辑交给 AI；这里看 + 复制） */
+    private fun showCodeViewer(f: File, rel: String) {
+        val text = runCatching { f.readText() }.getOrNull()
+        if (text == null) {
+            toast("读不了这个文件")
+            return
+        }
+        val tv = TextView(this).apply {
+            text = if (text.length > 120_000) text.take(120_000) + "\n…（过长已截断）" else text
+            textSize = 12f
+            typeface = MONO
+            setTextColor(pal.text)
+            setTextIsSelectable(true)
+            setPadding(dp(12), dp(10), dp(12), dp(10))
+        }
+        val d = HxDialog.Builder(themed(), pal)
+            .setTitle(rel)
+            .setView(ScrollView(this).apply { addView(tv) })
+            .setPositiveButton("复制全文", null)
+            .setNegativeButton("关闭", null)
+            .create()
+        d.setOnShowListener {
+            d.btn(HxDialog.BUTTON_POSITIVE)?.setOnClickListener { copyToClip(text, "代码") }
+        }
+        d.show()
+    }
+
+    /** 属性面板：当前选中对象的详情（对象面板点选后自动联动） */
+    private fun renderPropPanel() {
+        val box = propBox ?: return
+        box.removeAllViews()
+        val o = objItems.firstOrNull { it.name == objSelectedName }
+        if (o == null) {
+            emptyBox(box, "先到「对象」里点一个对象 ——\n这里会显示它的名字 / 类型 / 坐标 / 可见性，并且可以高亮。")
+            return
+        }
+        box.addView(
+            homeCard(o.name, (if (o.ui) "界面元素" else "场景对象") + (if (o.type.isNotBlank()) " · " + o.type else ""), "star") {
+                highlightEditorObject(o.name, o.ui)
+            },
+            LinearLayout.LayoutParams(-1, -2)
+        )
+        box.addView(TextView(this).apply {
+            text = "坐标：" + (o.x?.toString() ?: "—") + " , " + (o.y?.toString() ?: "—") +
+                "        可见：" + (if (o.visible) "是" else "否")
+            textSize = 12f
+            setTextColor(pal.sub)
+            setPadding(dp(4), dp(10), dp(4), dp(2))
+        })
+        box.addView(TextView(this).apply {
+            text = "来源：" + when (objEngine) {
+                "registry" -> "游戏注册表（Engine.objects）"
+                "phaser" -> "Phaser 场景树"
+                "pixi" -> "Pixi 舞台"
+                else -> "网页界面"
+            }
+            textSize = 11f
+            setTextColor(pal.faint)
+            setPadding(dp(4), dp(6), dp(4), dp(2))
+        })
+    }
+
+    /** 图层面板：场景对象按类型分组（GDevelop 图层的简化对位） */
+    private fun renderLayerPanel() {
+        val box = layerListBox ?: return
+        box.removeAllViews()
+        val objs = objItems.filter { !it.ui }
+        if (objs.isEmpty()) {
+            emptyBox(box, "还没有对象数据。\n先到「对象」里点一次刷新（面板会实时读取运行中的游戏）")
+            return
+        }
+        val groups = objs.groupBy { it.type.ifBlank { "未分类" } }
+        for ((type, list) in groups) {
+            box.addView(objGroupLabel("$type（${list.size}）"))
+            for (o in list) {
+                box.addView(objRow(o), LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(4) })
             }
         }
     }
@@ -5139,9 +5437,8 @@ class MainActivity : AppCompatActivity(), GameUi {
         }
         val idx = File(dir, "index.html")
         if (idx.isFile) {
-            hideMakerPreview()
-            previewLabel.text = "项目：$id · H5 ⟳"
-            web.loadUrl("https://appassets.androidplatform.net/games/$id/index.html")
+            // 回默认场景（index.html）；多 html 项目的场景页签由 renderSceneTabs 更新
+            loadSceneHtml(id, "index.html")
         } else {
             hideMakerPreview()
             previewLabel.text = "项目：$id · H5 ⟳"
@@ -5153,6 +5450,58 @@ class MainActivity : AppCompatActivity(), GameUi {
                     "<p style='color:#4FCFB4;word-break:break-all'>" + dir.absolutePath + "</p>" +
                     "</body></html>",
                 "text/html", "utf-8", null
+            )
+        }
+    }
+
+    /**
+     * 把项目里的某个 html「场景」加载进编辑器画布，并更新页签高亮。
+     * 单场景项目（只有 index.html）时页签整行隐藏，这个函数只负责加载。
+     */
+    private fun loadSceneHtml(id: String, file: String) {
+        val dir = File(gameRoot, id)
+        if (!File(dir, file).isFile) {
+            toast("场景不存在：$file")
+            return
+        }
+        currentScene = file
+        hideMakerPreview()
+        val tag = if (file == "index.html") "" else " · " + file.removeSuffix(".html")
+        previewLabel.text = "项目：$id$tag · H5 ⟳"
+        web.loadUrl("https://appassets.androidplatform.net/games/$id/$file")
+        renderSceneTabs()
+    }
+
+    /**
+     * 场景页签：列出项目里的 *.html（GDevelop 的场景页签对位）。
+     * 只有一个 html 时整行隐藏（那个页签就是顶栏里的项目胶囊）。
+     */
+    private fun renderSceneTabs() {
+        val row = sceneTabsRow ?: return
+        val wrap = sceneTabsWrap ?: return
+        row.removeAllViews()
+        val files = runCatching {
+            File(gameRoot, currentGame).listFiles()
+                ?.filter { it.isFile && it.name.endsWith(".html", true) }
+                ?.map { it.name }
+                ?.sorted()
+                ?: emptyList()
+        }.getOrDefault(emptyList())
+        if (files.size <= 1) {
+            wrap.visibility = View.GONE
+            return
+        }
+        wrap.visibility = View.VISIBLE
+        for (f in files) {
+            val on = f == currentScene
+            row.addView(
+                chipOf(this, pal, f.removeSuffix(".html"), on).apply {
+                    setOnClickListener {
+                        if (f == currentScene) return@setOnClickListener
+                        loadSceneHtml(currentGame, f)
+                    }
+                },
+                LinearLayout.LayoutParams(-2, -2).apply { rightMargin = dp(6) }
             )
         }
     }
@@ -5254,35 +5603,317 @@ class MainActivity : AppCompatActivity(), GameUi {
 
     private lateinit var previewLabel: TextView
 
+    // ==================== 首页（GDevelop 式启动流） ====================
+
+    /** 首页里的「最近项目」容器（切回首页时重渲染，列表永远是最新的） */
+    private var homeProjBox: LinearLayout? = null
+
+    /**
+     * 首页 —— 对齐 GDevelop 的启动流：**先选项目 / 新建（模板）→ 再进编辑器**。
+     * 打开 App 不再直接落到对话页；对话作为编辑器里的 AI 入口保留。
+     * 模型系统保持「自己填 API」：这里的 AI 配置入口就是设置页。
+     */
+    private fun buildHomePage(): LinearLayout {
+        val page = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(pal.bg)
+        }
+        val head = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(20), dp(26), dp(20), dp(8))
+        }
+        head.addView(TextView(this).apply {
+            text = "Hexora"
+            textSize = 26f
+            typeface = Typeface.DEFAULT_BOLD
+            setTextColor(pal.text)
+        })
+        head.addView(TextView(this).apply {
+            text = "单机版游戏编辑器 · 模型自己填 API（Key / Base URL / 模型），不订阅"
+            textSize = 12f
+            setTextColor(pal.sub)
+            setPadding(0, dp(6), 0, 0)
+        })
+        page.addView(head)
+
+        val scroll = ScrollView(this).apply { isFillViewport = true }
+        val col = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(16), dp(2), dp(16), dp(20))
+        }
+
+        // ---- 主操作 ----
+        val acts = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        acts.addView(primaryBtnOf(this, pal, "＋ 新建项目").apply {
+            setOnClickListener { showTemplatePicker() }
+        }, LinearLayout.LayoutParams(0, -2, 1f).apply { rightMargin = dp(8) })
+        acts.addView(ghostBtnOf(this, pal, "全部项目").apply {
+            setOnClickListener { showProjects() }
+        }, LinearLayout.LayoutParams(-2, -2))
+        col.addView(acts, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(8) })
+
+        // ---- 最近项目 ----
+        col.addView(homeSection("最近项目"))
+        val box = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        homeProjBox = box
+        col.addView(box)
+
+        // ---- 从模板开始（选布局）----
+        col.addView(homeSection("从模板开始（选布局）"))
+        col.addView(
+            homeCard("接方块 · 完整示例", "拖动接方块：连击 / 难度递增 / 存档（打开就能玩）", "play") {
+                switchProject("demo")
+                showTab(1)
+            },
+            LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(8) }
+        )
+        col.addView(
+            homeCard("更多模板…", "新建项目时选模板（空白 / 骨架 / 示例）", "grid") {
+                showTemplatePicker()
+            },
+            LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(8) }
+        )
+
+        // ---- AI 与设置 ----
+        col.addView(homeSection("AI 与设置"))
+        col.addView(
+            homeCard("AI 配置", "选厂商 / 填 Key / 选模型（自填 API，不订阅）", "gear") {
+                showSettings()
+            },
+            LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(8) }
+        )
+        col.addView(
+            homeCard("AI 对话", "让 AI 做游戏 / 改游戏（编辑器里也随时能进）", "robot") {
+                showTab(0)
+            },
+            LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(8) }
+        )
+        col.addView(
+            homeCard("导出当前项目", "打包成 zip，方便备份 / 分享", "upload") {
+                exportZip()
+            },
+            LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(8) }
+        )
+
+        scroll.addView(col)
+        page.addView(scroll, LinearLayout.LayoutParams(-1, 0, 1f))
+
+        page.addView(TextView(this).apply {
+            text = "所有数据都在本机 · 不上传云端 · 不订阅"
+            textSize = 10.5f
+            setTextColor(pal.faint)
+            gravity = Gravity.CENTER
+            setPadding(dp(10), dp(4), dp(10), dp(10))
+        })
+
+        refreshHomeProjects()
+        return page
+    }
+
+    /** 首页区块标题（和设置页同一套观感） */
+    private fun homeSection(t: String) = TextView(this).apply {
+        text = t
+        textSize = 11.5f
+        letterSpacing = 0.12f
+        typeface = MEDIUM
+        setTextColor(pal.accent)
+        setPadding(dp(2), dp(22), dp(2), dp(10))
+    }
+
+    /** 首页卡片行：图标 + 标题 + 副标题 + › */
+    private fun homeCard(title: String, sub: String, icon: String, onClick: () -> Unit): LinearLayout {
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(14), dp(13), dp(14), dp(13))
+            background = pressable(roundCard(this@MainActivity, pal.card, pal.border, 14), 0x14000000)
+            setOnClickListener { onClick() }
+        }
+        row.addView(iconView(this, pal, icon, 18, pal.accent), LinearLayout.LayoutParams(dp(34), dp(34)))
+        val col = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(10), 0, 0, 0)
+        }
+        col.addView(TextView(this).apply {
+            text = title
+            textSize = 14.5f
+            typeface = MEDIUM
+            setTextColor(pal.text)
+            maxLines = 1
+            ellipsize = android.text.TextUtils.TruncateAt.END
+        })
+        if (sub.isNotBlank()) {
+            col.addView(TextView(this).apply {
+                text = sub
+                textSize = 11f
+                setTextColor(pal.sub)
+                maxLines = 1
+                ellipsize = android.text.TextUtils.TruncateAt.END
+                setPadding(0, dp(3), 0, 0)
+            })
+        }
+        row.addView(col, LinearLayout.LayoutParams(0, -2, 1f))
+        row.addView(TextView(this).apply {
+            text = "›"
+            textSize = 16f
+            setTextColor(pal.faint)
+        })
+        return row
+    }
+
+    /** 重渲染首页的「最近项目」列表（进首页时调用） */
+    private fun refreshHomeProjects() {
+        val box = homeProjBox ?: return
+        box.removeAllViews()
+        val projects = runCatching { listProjects() }.getOrDefault(emptyList())
+        if (projects.isEmpty()) {
+            box.addView(TextView(this).apply {
+                text = "还没有项目 —— 点上面「＋ 新建项目」开始"
+                textSize = 12.5f
+                setTextColor(pal.sub)
+                setPadding(dp(4), dp(2), dp(4), dp(2))
+            })
+            return
+        }
+        for (p in projects.take(8)) {
+            val sub = kindLabel(p.name) + " · " + p.absolutePath +
+                (if (p.name == currentGame) " · 当前" else "")
+            box.addView(
+                homeCard(p.name, sub, "folder") {
+                    switchProject(p.name)
+                    showTab(1)
+                },
+                LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(8) }
+            )
+        }
+        if (projects.size > 8) {
+            box.addView(chipOf(this, pal, "还有 ${projects.size - 8} 个 · 全部项目", false).apply {
+                setOnClickListener { showProjects() }
+            }, LinearLayout.LayoutParams(-2, -2).apply { topMargin = dp(8) })
+        }
+    }
+
+    /**
+     * 模板选择（对齐 GDevelop 的「从模板创建」底部面板）。
+     * 现在两种：完整示例（demo）/ 空白项目（走原有新建流程）。
+     */
+    private fun showTemplatePicker() {
+        val dlg = Dialog(this)
+        dlg.requestWindowFeature(android.view.Window.FEATURE_NO_TITLE)
+        val radius = dp(16).toFloat()
+        val sheetBg = android.graphics.drawable.GradientDrawable().apply {
+            setColor(pal.card)
+            cornerRadii = floatArrayOf(radius, radius, radius, radius, 0f, 0f, 0f, 0f)
+        }
+        val root = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = sheetBg
+        }
+        val titleRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(16), dp(14), dp(12), dp(10))
+        }
+        titleRow.addView(TextView(this).apply {
+            text = "新建项目 · 选择模板"
+            textSize = 15f
+            typeface = MEDIUM
+            setTextColor(pal.text)
+        }, LinearLayout.LayoutParams(0, -2, 1f))
+        titleRow.addView(iconView(this, pal, "close", 15, pal.sub).apply {
+            setPadding(dp(9), dp(3), dp(6), dp(3))
+            setOnClickListener { dlg.dismiss() }
+        }, LinearLayout.LayoutParams(dp(30), dp(27)))
+        root.addView(titleRow)
+        root.addView(View(this).apply { setBackgroundColor(pal.border) },
+            LinearLayout.LayoutParams(-1, dp(1)))
+
+        val inner = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(14), dp(10), dp(14), dp(14))
+        }
+        inner.addView(homeCard("接方块 · 完整示例", "拖动接方块：连击 / 难度递增 / 存档", "play") {
+            dlg.dismiss()
+            switchProject("demo")
+            showTab(1)
+        }, LinearLayout.LayoutParams(-1, -2))
+        inner.addView(homeCard("空白项目 · 自绘 Canvas", "最小骨架，让 AI 从零搭一个", "plus") {
+            dlg.dismiss()
+            newProjectDialog()
+        }, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(8) })
+        inner.addView(TextView(this).apply {
+            text = "模板会随 App 预制（和 GDevelop 一样，之后会补更多布局）"
+            textSize = 10.5f
+            setTextColor(pal.faint)
+            setPadding(dp(2), dp(10), dp(2), 0)
+        })
+        root.addView(inner)
+
+        dlg.setContentView(root)
+        dlg.window?.let { w ->
+            w.setBackgroundDrawable(android.graphics.drawable.ColorDrawable(0))
+            w.addFlags(android.view.WindowManager.LayoutParams.FLAG_DIM_BEHIND)
+            w.setDimAmount(0.42f)
+            w.setGravity(Gravity.BOTTOM)
+        }
+        dlg.show()
+        dlg.window?.setLayout(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+    }
+
     private fun buildPreviewPage(): LinearLayout {
         val page = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setBackgroundColor(pal.bg)
         }
 
+        // ===== GDevelop 式两行顶栏 =====
+        // 第一行：☰ 项目菜单 · ⌂ 首页 · [场景页签] · 🤖 Ask AI
         val bar = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(14), dp(10), dp(12), dp(8))
+            setPadding(dp(10), dp(8), dp(10), dp(4))
             setBackgroundColor(pal.navBg)
         }
+        bar.addView(iconButton(this, pal, "list", sizeDp = 32) { showProjects() })
+        bar.addView(iconButton(this, pal, "grid", sizeDp = 32, marginStartDp = 4) { showTab(3) })
         previewLabel = TextView(this).apply {
-            textSize = 13f
+            textSize = 12.5f
             setTextColor(pal.text)
-            typeface = Typeface.DEFAULT_BOLD
-            // 标题上的 ⟳ 不是装饰：点一下就把预览切到另一种模式（H5 <-> Maker）
+            typeface = MEDIUM
+            maxLines = 1
+            ellipsize = android.text.TextUtils.TruncateAt.END
+            setPadding(dp(12), dp(7), dp(12), dp(7))
+            background = pressable(roundCard(this@MainActivity, pal.accentSoft, pal.groupBorder, 9), 0x14000000)
+            // 场景页签：点一下把预览切到另一种模式（H5 <-> Maker）
             isClickable = true
             setOnClickListener { toggleProjKind() }
         }
-        bar.addView(previewLabel, LinearLayout.LayoutParams(0, -2, 1f))
-        // 工具栏一律用**手绘图标**，不再用文字 chip。
-        // 以前是「重载 / 🔊 有声 / 发给 AI / 项目」四个文字块，中间还夹一个 emoji ——
-        // 右边明明是全屏那种手绘图标，两边画风是断的（用户反复提过：不要文字、不要 emoji）。
-        // 按钮收到 32dp 是为了塞得下：一行 6 个，再宽就把左边的项目名挤没了。
-        bar.addView(iconButton(this, pal, "refresh", sizeDp = 32, marginStartDp = 6) {
+        bar.addView(
+            previewLabel,
+            LinearLayout.LayoutParams(0, -2, 1f).apply { leftMargin = dp(8); rightMargin = dp(8) }
+        )
+        bar.addView(iconButton(this, pal, "robot", sizeDp = 32) { showTab(0) })
+
+        // 第二行：工具 —— 保存快照 · ▶ 运行 · 缩放 ± · 全屏 · 对象 · 静音 · 相机
+        val tools = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(10), dp(2), dp(10), dp(7))
+            setBackgroundColor(pal.navBg)
+        }
+        // 保存快照（对位 GDevelop 的「保存」）：项目整体复制到 _snapshots/，随时能回退
+        tools.addView(iconButton(this, pal, "check", sizeDp = 32) { snapshotProject() })
+        tools.addView(iconButton(this, pal, "play", sizeDp = 32, marginStartDp = 4) {
             reloadGame()
             toast("已重载画面")
         })
+        // 缩放：手机上的游戏画面常常偏小或偏大，给 ± 两档
+        tools.addView(iconButton(this, pal, "zoom_out", sizeDp = 32, marginStartDp = 4) { zoomPreview(-1) })
+        tools.addView(iconButton(this, pal, "zoom_in", sizeDp = 32, marginStartDp = 2) { zoomPreview(1) })
+        // 手绘全屏图标：把预览容器整个搬进全屏 Dialog（同一个 WebView 实例，游戏状态不丢）
+        tools.addView(iconButton(this, pal, "fullscreen", sizeDp = 32, marginStartDp = 4) { showFullPreview() })
+        // 对象面板开关（GDevelop 式的「对象」列表，实时读运行中的游戏）
+        tools.addView(iconButton(this, pal, "layers", sizeDp = 32, marginStartDp = 4) { toggleEditorObjects() })
         // 静音开关：**图标本身就说明状态**（喇叭+声波 = 有声；喇叭+叉 = 已静音），
         // 不再靠文字切换 —— 以前标签显示动作，用户点完看着字变了也不知道到底静音没有。
         previewMuteChip = ImageView(this).apply {
@@ -5303,51 +5934,73 @@ class MainActivity : AppCompatActivity(), GameUi {
                 toast(if (userMutePreview) "预览已静音（切页、重载也保持）" else "预览恢复发声")
             }
         }
-        bar.addView(previewMuteChip, LinearLayout.LayoutParams(dp(32), dp(32)).apply { leftMargin = dp(5) })
-        // 缩放：手机上的游戏画面常常偏小或偏大，给 ± 两档
-        bar.addView(iconButton(this, pal, "zoom_out", sizeDp = 32, marginStartDp = 5) { zoomPreview(-1) })
-        bar.addView(iconButton(this, pal, "zoom_in", sizeDp = 32, marginStartDp = 4) { zoomPreview(1) })
-        // 相机 = 把当前画面发给 AI（原来那块「发给 AI」文字）
-        bar.addView(iconButton(this, pal, "camera", sizeDp = 32, marginStartDp = 5) { attachScreenshot() })
-        // 手绘全屏图标：把预览容器整个搬进全屏 Dialog（同一个 WebView 实例，游戏状态不丢）
-        bar.addView(iconButton(this, pal, "fullscreen", sizeDp = 32, marginStartDp = 5) { showFullPreview() })
-        // 对象面板开关（GDevelop 式的「对象」列表，实时读运行中的游戏）
-        bar.addView(iconButton(this, pal, "layers", sizeDp = 32, marginStartDp = 5) { toggleEditorObjects() })
+        tools.addView(previewMuteChip, LinearLayout.LayoutParams(dp(32), dp(32)).apply { leftMargin = dp(4) })
+        // 相机 = 把当前画面发给 AI
+        tools.addView(iconButton(this, pal, "camera", sizeDp = 32, marginStartDp = 4) { attachScreenshot() })
 
         @SuppressLint("SetJavaScriptEnabled")
         val w = WebView(this).apply { setBackgroundColor(pal.bg) }
         web = w
         val wrap = FrameLayout(this).apply { addView(w, FrameLayout.LayoutParams(-1, -1)) }
 
+        // 场景页签条（多 html 项目才显示；GDevelop 的场景页签对位）
+        val sceneRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(dp(10), 0, dp(10), dp(5))
+            setBackgroundColor(pal.navBg)
+        }
+        sceneTabsRow = sceneRow
+        val sceneWrap = android.widget.HorizontalScrollView(this).apply {
+            isHorizontalScrollBarEnabled = false
+            setBackgroundColor(pal.navBg)
+            visibility = View.GONE
+            addView(sceneRow)
+        }
+        sceneTabsWrap = sceneWrap
+
         page.addView(bar, LinearLayout.LayoutParams(-1, -2))
+        page.addView(sceneWrap, LinearLayout.LayoutParams(-1, -2))
+        page.addView(tools, LinearLayout.LayoutParams(-1, -2))
         page.addView(View(this).apply { setBackgroundColor(pal.border) },
             LinearLayout.LayoutParams(-1, dp(1)))
         page.addView(wrap, LinearLayout.LayoutParams(-1, 0, 1f))
 
-        // ===== 对象面板（GDevelop 式）=====
-        // 收起时是一条细条（点了就展开并实时读取）；展开后是「搜索 + 对象列表」。
-        // 列表内容来自**运行中的游戏**：Engine.objects 注册表 → Phaser/Pixi 场景树 → DOM 界面元素。
-        val objBar = LinearLayout(this).apply {
+        // ===== 底部五格（GDevelop 移动版对位）：对象 · 素材 · 编辑 · 属性 · 图层 =====
+        // 全部接真实功能：对象=实时读游戏；素材/编辑=扫项目文件；属性=选中对象；图层=按类型分组
+        val tabBar = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(12), dp(7), dp(12), dp(7))
             setBackgroundColor(pal.navBg)
-            setOnClickListener { toggleEditorObjects() }
         }
-        objBar.addView(iconView(this, pal, "layers", 14, pal.sub), LinearLayout.LayoutParams(dp(20), dp(20)))
-        objBarText = TextView(this).apply {
-            text = "对象 · 点开实时读取"
-            textSize = 12f
-            setTextColor(pal.sub)
-            setPadding(dp(7), 0, 0, 0)
+        val tabPairs = mutableListOf<Pair<LinearLayout, String>>()
+        fun edTab(icon: String, label: String, key: String): LinearLayout {
+            val box = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                gravity = Gravity.CENTER
+                setPadding(dp(4), dp(8), dp(4), dp(6))
+                setOnClickListener { showEditorPanel(key) }
+            }
+            val iv = ImageView(this).apply {
+                setImageDrawable(LineIcon(icon, pal.sub, dp(16).toFloat()))
+                tag = icon
+            }
+            box.addView(iv, LinearLayout.LayoutParams(dp(20), dp(20)))
+            box.addView(TextView(this).apply {
+                text = label
+                textSize = 10f
+                setTextColor(pal.sub)
+                setPadding(0, dp(2), 0, 0)
+            })
+            tabPairs += box to key
+            return box
         }
-        objBar.addView(objBarText, LinearLayout.LayoutParams(0, -2, 1f))
-        objBar.addView(TextView(this).apply {
-            text = "▴"
-            textSize = 12f
-            setTextColor(pal.faint)
-        })
+        tabBar.addView(edTab("grid", "对象", "objects"), LinearLayout.LayoutParams(0, -2, 1f))
+        tabBar.addView(edTab("image", "素材", "assets"), LinearLayout.LayoutParams(0, -2, 1f))
+        tabBar.addView(edTab("edit", "编辑", "code"), LinearLayout.LayoutParams(0, -2, 1f))
+        tabBar.addView(edTab("list", "属性", "props"), LinearLayout.LayoutParams(0, -2, 1f))
+        tabBar.addView(edTab("layers", "图层", "layers"), LinearLayout.LayoutParams(0, -2, 1f))
+        editorTabViews = tabPairs
 
+        // ---- 对象面板：搜索 + 实时对象列表 ----
         val objPanel = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setBackgroundColor(pal.navBg)
@@ -5380,10 +6033,17 @@ class MainActivity : AppCompatActivity(), GameUi {
             LinearLayout.LayoutParams(dp(30), dp(30))
         )
         objHead.addView(
-            iconButton(this, pal, "close", sizeDp = 30, marginStartDp = 4) { toggleEditorObjects(false) },
+            iconButton(this, pal, "close", sizeDp = 30, marginStartDp = 4) { showEditorPanel(null) },
             LinearLayout.LayoutParams(dp(30), dp(30))
         )
         objPanel.addView(objHead)
+        objBarText = TextView(this).apply {
+            text = "对象 · 点开实时读取"
+            textSize = 11f
+            setTextColor(pal.faint)
+            setPadding(dp(14), dp(2), dp(14), dp(4))
+        }
+        objPanel.addView(objBarText)
         val objList = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(8), 0, dp(8), dp(4))
@@ -5393,8 +6053,82 @@ class MainActivity : AppCompatActivity(), GameUi {
             ScrollView(this).apply { addView(objList) },
             LinearLayout.LayoutParams(-1, dp(240))
         )
-        page.addView(objBar, LinearLayout.LayoutParams(-1, -2))
+
+        // ---- 素材面板 ----
+        val assetPanel = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(pal.navBg)
+            visibility = View.GONE
+        }
+        assetPanelRoot = assetPanel
+        val assetList = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(10), dp(6), dp(10), dp(6))
+        }
+        assetListBox = assetList
+        assetPanel.addView(
+            ScrollView(this).apply { addView(assetList) },
+            LinearLayout.LayoutParams(-1, dp(238))
+        )
+
+        // ---- 编辑面板（代码文件）----
+        val codePanel = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(pal.navBg)
+            visibility = View.GONE
+        }
+        codePanelRoot = codePanel
+        val codeList = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(10), dp(6), dp(10), dp(6))
+        }
+        codeListBox = codeList
+        codePanel.addView(
+            ScrollView(this).apply { addView(codeList) },
+            LinearLayout.LayoutParams(-1, dp(238))
+        )
+
+        // ---- 属性面板 ----
+        val propPanel = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(pal.navBg)
+            visibility = View.GONE
+        }
+        propPanelRoot = propPanel
+        val propInner = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(10), dp(6), dp(10), dp(6))
+        }
+        propBox = propInner
+        propPanel.addView(
+            ScrollView(this).apply { addView(propInner) },
+            LinearLayout.LayoutParams(-1, dp(238))
+        )
+
+        // ---- 图层面板 ----
+        val layerPanel = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(pal.navBg)
+            visibility = View.GONE
+        }
+        layerPanelRoot = layerPanel
+        val layerList = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(10), dp(6), dp(10), dp(6))
+        }
+        layerListBox = layerList
+        layerPanel.addView(
+            ScrollView(this).apply { addView(layerList) },
+            LinearLayout.LayoutParams(-1, dp(238))
+        )
+
+        // 添加顺序 = 屏幕上的位置：画布 → 各面板 → 五格页签
         page.addView(objPanel, LinearLayout.LayoutParams(-1, -2))
+        page.addView(assetPanel, LinearLayout.LayoutParams(-1, -2))
+        page.addView(codePanel, LinearLayout.LayoutParams(-1, -2))
+        page.addView(propPanel, LinearLayout.LayoutParams(-1, -2))
+        page.addView(layerPanel, LinearLayout.LayoutParams(-1, -2))
+        page.addView(tabBar, LinearLayout.LayoutParams(-1, -2))
 
         previewWrapHolder = wrap
         previewSlot = page
@@ -8263,6 +8997,8 @@ makerRow1.addView(ghostBtnOf(ctx, pal, "扫码登录").apply {
         setTextIf(modelBtn, "$star${cfg.model} ▴")
         // 智能体胶囊跟着当前智能体走（可能刚在设置页里切过 / 改过名字）
         refreshAgentChip()
+        // 场景页签跟着当前项目刷新（多 html 项目才会显示这一行）
+        renderSceneTabs()
         setTextIf(projBtn, currentGame)
         setTextIf(statusProj, "$currentGame · $kind")
         setTextIf(statusModel, "${cfg.provider.label} / ${cfg.model}")
