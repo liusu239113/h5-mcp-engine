@@ -1677,13 +1677,13 @@ class MainActivity : AppCompatActivity(), GameUi {
 
     /** 只读代码查看器（编辑交给 AI；这里看 + 复制） */
     private fun showCodeViewer(f: File, rel: String) {
-        val text = runCatching { f.readText() }.getOrNull()
-        if (text == null) {
+        val content = runCatching { f.readText() }.getOrNull()
+        if (content == null) {
             toast("读不了这个文件")
             return
         }
         val tv = TextView(this).apply {
-            text = if (text.length > 120_000) text.take(120_000) + "\n…（过长已截断）" else text
+            text = if (content.length > 120_000) content.take(120_000) + "\n…（过长已截断）" else content
             textSize = 12f
             typeface = MONO
             setTextColor(pal.text)
@@ -1697,7 +1697,7 @@ class MainActivity : AppCompatActivity(), GameUi {
             .setNegativeButton("关闭", null)
             .create()
         d.setOnShowListener {
-            d.btn(HxDialog.BUTTON_POSITIVE)?.setOnClickListener { copyToClip(text, "代码") }
+            d.btn(HxDialog.BUTTON_POSITIVE)?.setOnClickListener { copyToClip(content, "代码") }
         }
         d.show()
     }
