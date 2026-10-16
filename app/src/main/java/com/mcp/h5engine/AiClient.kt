@@ -1241,6 +1241,102 @@ class AiClient(private val cfg: ProviderConfig) {
             }
             out.put("tools", ts)
         }
+        // 【结构兜底】Anthropic 对 tool_use / tool_result 的配对与顺序是硬校验，
+        // 历史里任何一处对不上都会让**整条请求** 400（见 fixAnthPairs 的说明）。
+        out.put("messages", fixAnthPairs(msgs))
+        return out
+    }
+
+    /**
+     * Anthropic 的 `tool_use → tool_result` 配对修复（bodyAnthropic 拼完后跑一遍）。
+     *
+     * Anthropic 比 OpenAI 严得多，两件事都是**整条请求直接 400**：
+     *   ① 含 tool_use 的 assistant 消息，紧接着的那条 user 消息里，每个 id 都必须有 tool_result
+     *      （原文：`tool_use` ids were found without `tool_result` blocks immediately after）；
+     *   ② 反过来也不行：找不到对应 tool_use 的 tool_result 会被拒。
+     *
+     * 历史是跨模型、跨中断一路攒下来的（OpenAI 系的 call_xxx、被按停的批次、
+     * 并发写历史留下的中间态），转换时任何一处对不上，用户看到的就是
+     * 「换了个模型就说我参数错误」。这里统一兜底：
+     *   · 缺的 tool_result → 补占位（如实说明是缺失，别让模型以为执行过）；
+     *   · 孤儿 / 重复的 tool_result → 降级成普通文本；
+     *   · 顺序按 tool_use 排，tool_result 一律排在该条 user 消息最前 ——
+     *     Anthropic 要求结果块先于其它内容。
+     * 宁可少一条结果，也不能让整段会话打不开。
+     */
+    private fun fixAnthPairs(msgs: JSONArray): JSONArray {
+        val out = JSONArray()
+        for (i in 0 until msgs.length()) {
+            val m = msgs.optJSONObject(i) ?: continue
+            out.put(m)
+            if (m.optString("role") != "assistant") continue
+
+            // 这条 assistant 消息里所有 tool_use 的 id（去重、保插入顺序）
+            val ids = mutableSetOf<String>()
+            m.optJSONArray("content")?.let { content ->
+                for (k in 0 until content.length()) {
+                    val b = content.optJSONObject(k) ?: continue
+                    if (b.optString("type") == "tool_use") ids.add(b.optString("id", ""))
+                }
+            }
+            if (ids.isEmpty()) continue
+
+            // 下一条必须是 user（连续同角色在 bodyAnthropic 里已合并过）；没有就补一条空的
+            val raw = if (i + 1 < msgs.length()) msgs.optJSONObject(i + 1) else null
+            val next: JSONObject
+            if (raw != null && raw.optString("role") == "user") {
+                next = raw
+            } else {
+                next = JSONObject().put("role", "user").put("content", JSONArray())
+                out.put(next)
+            }
+
+            val nc = next.optJSONArray("content") ?: JSONArray().also { next.put("content", it) }
+            val have = mutableMapOf<String, JSONObject>()
+            val keep = JSONArray()
+            for (k in 0 until nc.length()) {
+                val b = nc.optJSONObject(k) ?: continue
+                if (b.optString("type") == "tool_result") {
+                    val id = b.optString("tool_use_id", "")
+                    if (id.isNotEmpty() && ids.contains(id) && !have.containsKey(id)) {
+                        have[id] = b                       // 正常配对，原样保留
+                    } else {
+                        // 孤儿（id 对不上）或重复：降级成文本，别拖垮整条请求
+                        val rawTxt = b.optJSONArray("content")?.toString().orEmpty()
+                        if (rawTxt.isNotBlank()) {
+                            keep.put(
+                                JSONObject().put("type", "text")
+                                    .put("text", "（历史工具结果）" + rawTxt.take(300))
+                            )
+                        }
+                    }
+                } else {
+                    keep.put(b)
+                }
+            }
+
+            // 重建：tool_result 按 tool_use 顺序排最前，缺的补占位，其余内容跟在后
+            val rebuilt = JSONArray()
+            for (id in ids) {
+                rebuilt.put(
+                    have[id] ?: JSONObject()
+                        .put("type", "tool_result")
+                        .put("tool_use_id", id)
+                        .put(
+                            "content",
+                            JSONArray().put(
+                                JSONObject().put("type", "text")
+                                    .put("text", "（这条工具调用的结果缺失，可能是上一轮被中断。需要时重新调用一次。）")
+                            )
+                        )
+                )
+            }
+            for (k in 0 until keep.length()) rebuilt.put(keep.get(k))
+            if (rebuilt.length() == 0) {
+                rebuilt.put(JSONObject().put("type", "text").put("text", "（继续）"))
+            }
+            next.put("content", rebuilt)
+        }
         return out
     }
 
