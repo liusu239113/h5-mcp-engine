@@ -265,8 +265,8 @@ object AiProviders {
          *     其余全部走 /chat/completions。换个模型不用换预设。
          *  4. deepseek 系模型还要求在控制台把工作区 Privacy/Region 设成 Global，
          *     否则报 "requires Global regions"；其它模型不受影响。
-         *  5. 列表里只放本网络环境实测可用的。gpt-*/grok-*/muse-spark-* 走 Responses 协议
-         *     （客户端暂未实现）；几个 contributor/free 模型对当前地区 403，所以不入列。
+         *  5. 列表里只放本网络环境实测可用的。走 Responses 协议的 gpt、grok、muse-spark 系
+         *     （客户端暂未实现），以及对本地区 403 的 contributor / free 模型，都不入列。
          */
         Provider(
             "opencode-go", "OpenCode Go（订阅制）", "https://opencode.ai/inference/go/v1",
